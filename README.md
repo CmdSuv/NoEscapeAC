@@ -4,7 +4,7 @@
 [![Download Zip](https://img.shields.io/badge/Download-Source%20Code%20(.zip)-darkred?style=for-the-badge&logo=github)](https://github.com/CmdSuv/NoEscapeAC/archive/refs/tags/v1.1.zip)
 [![License: Non-Commercial Share-Alike](https://img.shields.io/badge/License-Non--Commercial%20Share--Alike-blue?style=for-the-badge)](LICENSE)
 
-**NoEscape** is a cross-platform (Linux + Windows Ring-3), high-performance anti-cheat framework re-engineered in modern **C++20**. Designed for high-integrity game and application security, it incorporates forensic memory analysis, SIMD-accelerated pattern scanning, PCIe DMA hardware detection, statistical input kinematics, ESP overlay detection, encrypted blackbox crash dumpers, and an industry-standard C-ABI SDK.
+**NoEscape Anti-Cheat (NoEscapeAC)** is a modern, lightweight, and unified user-mode (Ring-3) anti-cheat and runtime integrity framework engineered in **C++20** for Linux and Windows. Designed to safeguard competitive multiplayer games and custom game launchers without intrusive kernel drivers, NoEscapeAC delivers defense-in-depth security: AVX2 SIMD byte pattern scanning, unbacked memory forensics with JVM/JIT HotSpot awareness, automatic inline API unhooking, PCIe DMA anomaly detection, statistical mouse kinematics (silent-aim / instant-snap heuristics), ESP fake-window overlay interception, and a Riot Vanguard-inspired crimson ban enforcement UI.
 
 ---
 
