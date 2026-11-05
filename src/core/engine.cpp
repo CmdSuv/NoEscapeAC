@@ -344,7 +344,7 @@ void AntiCheatEngine::SpawnBanScreen(const std::string& reason,
     }
 
     if (resolvedPath.empty()) {
-        Logger::Instance().Warn("Vanguard ban screen executable not found in candidate paths.");
+        Logger::Instance().Warn("Security ban screen executable not found in candidate paths.");
         return;
     }
 
@@ -420,7 +420,7 @@ void AntiCheatEngine::SpawnBanScreen(const std::string& reason,
         waitpid(pid, nullptr, 0);
     }
 #endif
-    Logger::Instance().Info("Vanguard-style security ban screen spawned successfully.");
+    Logger::Instance().Info("Security ban screen spawned successfully.");
 }
 
 std::vector<DetectionEvent> AntiCheatEngine::GetDetectionHistory() const {

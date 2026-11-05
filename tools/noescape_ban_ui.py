@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-NoEscape Anti-Cheat - Vanguard-Style Ban Warning Screen
+NoEscape Anti-Cheat - Standalone Crimson Ban Warning Screen
 Designed for KDE Plasma on Wayland / X11 (Qt6 / PySide6)
 """
 
@@ -27,7 +27,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, QPoint
 from PySide6.QtGui import QColor, QFont, QPalette, QLinearGradient, QBrush, QPainter, QPainterPath
 
-class VanguardBanWindow(QWidget):
+class BanWindow(QWidget):
     def __init__(self, hwid, score, reason, component, violation_type, timestamp_str):
         super().__init__()
         self.hwid = hwid or "UNKNOWN-HWID-DEVICE"
@@ -117,7 +117,7 @@ class VanguardBanWindow(QWidget):
         header_layout.setContentsMargins(24, 20, 24, 20)
         header_layout.setSpacing(20)
 
-        # Big Vanguard Symbol / Shield Icon
+        # Security Symbol / Shield Icon
         icon_label = QLabel("⛔")
         icon_label.setStyleSheet("font-size: 48px; color: #ff4655; background: transparent;")
         icon_label.setAlignment(Qt.AlignCenter)
@@ -134,7 +134,7 @@ class VanguardBanWindow(QWidget):
         main_title.setStyleSheet("color: #ffffff; font-size: 26px; font-weight: 900; letter-spacing: 1px;")
         title_vbox.addWidget(main_title)
 
-        sub_title = QLabel("VAN-STYLE HARDWARE ENFORCEMENT // ACCESS REVOKED")
+        sub_title = QLabel("HARDWARE-LEVEL SECURITY ENFORCEMENT // ACCESS REVOKED")
         sub_title.setStyleSheet("color: #ff4655; font-size: 13px; font-weight: 700; letter-spacing: 1.2px;")
         title_vbox.addWidget(sub_title)
 
@@ -244,7 +244,7 @@ class VanguardBanWindow(QWidget):
             super().keyPressEvent(event)
 
 def main():
-    parser = argparse.ArgumentParser(description="NoEscape Vanguard-Style Ban Screen")
+    parser = argparse.ArgumentParser(description="NoEscape Crimson Ban Screen")
     parser.add_argument("--hwid", type=str, default="", help="Device HWID fingerprint")
     parser.add_argument("--score", type=int, default=100, help="Threat score")
     parser.add_argument("--reason", type=str, default="Critical security violation detected", help="Violation details")
@@ -268,7 +268,7 @@ def main():
             hwid = "2d70541832a1cb00855e97f183c6a5053a7b666bc5043648970f977710c3fb80"
 
     app = QApplication(sys.argv)
-    window = VanguardBanWindow(
+    window = BanWindow(
         hwid=hwid,
         score=args.score,
         reason=args.reason,

@@ -74,7 +74,7 @@ TEST(Engine, FatalBanEnforcement) {
     ASSERT_TRUE(banCalled);
 }
 
-TEST(Engine, VanguardBanScreenConfigAndInvocation) {
+TEST(Engine, BanScreenConfigAndInvocation) {
     EngineConfig cfg;
     cfg.enableHeartbeat = false;
     cfg.banScoreThreshold = 100;
