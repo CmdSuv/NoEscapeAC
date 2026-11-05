@@ -127,9 +127,17 @@ NoEscapeAC/
 
 ---
 
+### 👥 Contributors & Core Team
+
+- **Omar Yiğitcan Mengü** ([@CmdSuv](https://github.com/CmdSuv)) — Lead Architect & Creator
+- **OnlyCosmos** ([@OnlyCosmos](https://github.com/OnlyCosmos)) — Co-Developer & Contributor
+
+---
+
 ### 📄 License & Copyright
 
 **Copyright (c) 2026 Omar Yiğitcan Mengü ([github.com/CmdSuv](https://github.com/CmdSuv)). All Rights Reserved.**
+**Contributors:** OnlyCosmos ([github.com/OnlyCosmos](https://github.com/OnlyCosmos))
 
 This software is distributed under the custom **NoEscape Non-Commercial Share-Alike Source Available License (v1.0)**:
 - **Commercial Use & Sale Strictly Forbidden**: You may **NOT** sell, resell, sublicense, monetize, commercialize, or profit from this software or any derivative works thereof in any form.

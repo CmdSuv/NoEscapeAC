@@ -14,3 +14,4 @@ __pycache__/
 .idea/
 compile_commands.json
 
+*.zip
