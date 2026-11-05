@@ -1,41 +1,115 @@
-# 🛡️ NoEscape Anti-Cheat
+# 🛡️ NoEscape Anti-Cheat Engine (v7.0)
 
-**NoEscape** is a lightweight, high-performance security and anti-cheat framework written in C++. Designed for modern applications and game environments, it features real-time process signature scanning, hardware fingerprinting, and automated global ban enforcement.
-
----
-
-### ✨ Key Features
-
-* **Dual-Layer Identification:** Combines Windows MachineGuid (`HWID`) and real-time Public IP tracking (`ipify API`) to prevent hardware spoofing bypasses.
-* **Smart Digital Whitelisting:** Integrates native Windows trust verification (`WinVerifyTrust`) to automatically whitelist signed system processes and trusted applications (e.g., Discord, Steam), minimizing false positives.
-* **Process Signature Scanner:** Actively scans running system processes against a predefined blacklisted signature array (debugters, memory editors, and known injection tools).
-* **REST API Panel Integration:** Communicates seamlessly with a backend panel to check global ban statuses and issue automated HWID/IP bans upon security violations.
-* **Privilege Escalation:** Automatically attempts to acquire `SeDebugPrivilege` for comprehensive process monitoring capabilities.
+**NoEscape** is a cross-platform (Linux + Windows Ring-3), high-performance anti-cheat framework re-engineered in modern **C++20**. Designed for high-integrity game and application security, it incorporates forensic memory analysis, SIMD-accelerated pattern scanning, PCIe DMA hardware detection, statistical input kinematics, ESP overlay detection, encrypted blackbox crash dumpers, and an industry-standard C-ABI SDK.
 
 ---
 
-### ⚙️ Architecture & Modules
+### ✨ Key Subsystems & Features
 
-* `ScopedHandle`: RAII wrapper ensuring safe, leak-free Win32 handle management.
-* `HwidUtil & NetworkUtil`: Hardware and network fingerprint generators.
-* `PanelClient`: HTTP communication interface using WinINet for secure API requests.
-* `ProcessUtil`: Toolhelp32 snapshot engine combined with digital signature validation.
+1. **Cross-Platform Architecture (Linux & Windows Ring-3)**:
+   - Linux: `/proc` subsystem audit, `/proc/self/maps` page analysis, `dl_iterate_phdr` ELF parsing, and `mprotect` inline unhooking.
+   - Windows: Win32/NTAPI direct PEB inspection, `NtQueryInformationProcess`, `Toolhelp32`, and `VirtualQueryEx`.
+   - Compile-time XOR string obfuscation (`NOESCAPE_XOR`) and FNV-1a hashing (`NOESCAPE_HASH`).
+
+2. **SIMD Pattern Scanner (AVX2 / SSE2 / Scalar)**:
+   - High-throughput byte signature search utilizing AVX2 256-bit vector registers with scalar fallback (up to 35+ GB/s throughput).
+   - Supports IDA-style wildcard patterns (`48 B8 ? ? ? ? ? ? ? ? FF E0`) and batch scanning in a single pass.
+
+3. **Memory & Injection Analysis**:
+   - **Unbacked Executable Memory Scanner**: Detects anonymous `RX`/`RWX` pages, reflective DLL / SO injection, deleted binary execution (`/proc/<pid>/exe (deleted)`), and memory-ghosted modules.
+   - **Inline Hook Detector & Unhooker**: Identifies `0xE9` (JMP rel32), `0xEB` (JMP rel8), `0xFF 0x25` (JMP indirect), `MOV RAX; JMP RAX`, `PUSH/RET`, and `0xCC` (INT3) hooks on core system APIs and automatically restores clean instructions into memory.
+
+4. **Overlay & ESP/Wallhack Detector (Rendering Hook & Fake Window Scanner)**:
+   - **Fake Window Hijack Scanner**: Detects transparent/layered top-most fake windows (`WS_EX_LAYERED`, `WS_EX_TRANSPARENT`, `WS_EX_TOPMOST`) matching the game viewport bounding rect.
+   - **Rendering Pipeline Integrity**: Inspects DirectX / Vulkan / OpenGL `Present`, `SwapBuffers`, and dynamic swapchain vtables to ensure function pointers reside strictly within loaded module address spaces and have not been redirected to unbacked trampolines or inline-hooked.
+   - Linux overlay process detection across X11/Wayland display environments.
+
+5. **Blackbox Crash/Violation Dumper**:
+   - When a fatal security event occurs or threat score exceeds threshold, captures a compact, authenticated diagnostic snapshot:
+     - Real-time timestamp & Hardware ID fingerprint.
+     - Violating component & reason.
+     - Stack backtrace return addresses (`backtrace()` on Linux / `CaptureStackBackTrace` on Windows).
+     - Recent input kinematics circular trail buffer.
+     - Sample of loaded executable modules.
+   - Encrypted with AES/SHA-256 CTR stream cipher and authenticated with HMAC-SHA256 signature for tamper-evident offline diagnostics and backend telemetry.
+
+6. **Industry-Standard C-API & Game Engine SDK (`noescape_sdk.h`)**:
+   - Clean C-compatible ABI (`extern "C"`) enabling 2-line integration in Unity (P/Invoke), Unreal Engine, and custom C/C++ game engines:
+     - `NoEscape_Init(const NoEscapeConfig* config)`
+     - `NoEscape_Shutdown()`
+     - `NoEscape_Tick()`
+     - `NoEscape_PushMouseEvent(float delta_yaw, float delta_pitch, uint64_t timestamp_ms)`
+     - `NoEscape_GetThreatScore()`
+     - `NoEscape_SetViolationCallback(void (*cb)(int type, int score, const char* details))`
+   - Exports both static (`libnoescape.a` / `noescape_static.lib`) and dynamic shared (`libnoescape.so` / `noescape.dll`) libraries.
+
+7. **PCIe DMA Hardware & Bus Latency Detection**:
+   - Micro-architectural cache eviction & memory bus contention latency jitter profiling (`rdtsc`, `clflushopt`, `mfence`) to detect external FPGA DMA cards (e.g., Screamer, CaptainDMA, Enigma X1).
+   - Direct bus enumeration for known FTDI FT601 USB3 FIFO bridges and Xilinx Artix-7 PCIe VID/PID signatures.
+
+8. **Input Kinematics & Aimbot Trajectory Analysis**:
+   - Biomechanical mouse movement heuristics: computes angular velocity ($\omega$), acceleration ($\alpha$), and jerk ($j$).
+   - **Instant Snap Detection**: Identifies 1-tick silent-aim flick shots ($\ge 20^\circ$ in $\le 35\text{ms}$) followed by immediate dead stops.
+   - **Linearity & Smoothing Analysis**: Detects sub-millidegree robotic linear interpolation ($R^2 \approx 1.0$) and constant-velocity aimbot smoothing without natural physiological tremors.
 
 ---
 
-### 🚀 Getting Started
+### 🚀 Build & Verification
 
 #### Prerequisites
-* Windows 10 / 11 (x64)
-* Visual Studio (MSVC compiler with C++17 support)
+- **Linux**: GCC 11+ or Clang 13+ with C++20 support, CMake 3.20+, `make`/`ninja`.
+- **Windows**: MSVC v143+ (Visual Studio 2022) with C++20 standard `/std:c++20`.
 
-#### Compilation & Build
-1. Clone or download the repository.
-2. Open the project in Visual Studio.
-3. Configure your backend API endpoint in the `Config` struct (`panelApiUrl`).
-4. Build the solution as **Release / x64**.
+#### Build Commands
+```bash
+# Configure and build
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j$(nproc)
+
+# Run Comprehensive Unit Test Suite (48 test cases across all subsystems)
+./build/noescape_tests
+
+# Run Interactive Subsystem Demo
+./build/noescape_demo
+
+# Run Standalone Anti-Cheat Engine (Single Audit)
+./build/noescape_app --once
+```
+
+---
+
+### 📂 Directory Layout
+
+```
+NoEscapeAC/
+├── include/
+│   ├── noescape_sdk.h        # Clean C-ABI & C++ SDK layer
+│   └── noescape/
+│       ├── core/             # Types, Logger, ThreadPool, Engine, Blackbox, Obfuscation
+│       ├── security/         # AntiDebug, Self-Integrity, TSC Timing
+│       ├── memory/           # SIMD PatternScanner, MemoryScanner, Unhooker
+│       ├── overlay/          # OverlayDetector (Window scanner & Swapchain validator)
+│       ├── forensics/        # ProcessAnalyzer, ArtifactAnalyzer
+│       ├── dma/              # DmaDetector (PCIe Leech & Latency Jitter)
+│       ├── kinematics/       # AimAnalyzer (Snap, Linearity, Smoothing)
+│       ├── network/          # CryptoUtil (SHA-256 / HMAC), PanelClient
+│       └── sdk/              # SDK forwarding header
+├── src/                      # Subsystem implementations (Linux + Windows)
+│   ├── core/
+│   ├── security/
+│   ├── memory/
+│   ├── overlay/
+│   ├── forensics/
+│   ├── dma/
+│   ├── kinematics/
+│   ├── network/
+│   └── sdk/
+├── demo/                     # Interactive demonstration program
+├── tests/                    # 48 Comprehensive unit tests
+└── CMakeLists.txt            # Exports libnoescape.a, libnoescape.so, and executables
+```
 
 ---
 
 ### ⚠️ Disclaimer
-*This project is open-source and provided for educational and developmental purposes. Use it responsibly to secure your own applications.*
+*This project is open-source and provided for educational, security research, and defensive application hardening purposes.*

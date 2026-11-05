@@ -1,0 +1,16 @@
+build/
+*.o
+*.a
+*.so
+*.dylib
+*.dll
+*.lib
+*.dmp
+*.log
+hs_err_pid*.log
+__pycache__/
+*.py[cod]
+.vscode/
+.idea/
+compile_commands.json
+
