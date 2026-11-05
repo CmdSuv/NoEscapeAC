@@ -1,6 +1,22 @@
-# 🛡️ NoEscape Anti-Cheat Engine (v7.0)
+# 🛡️ NoEscape Anti-Cheat Engine (v7.0 / Release 1.1)
+
+[![GitHub Release](https://img.shields.io/badge/Release-NoEscapeAC%201.1-red?style=for-the-badge&logo=github)](https://github.com/CmdSuv/NoEscapeAC/releases/tag/v1.1)
+[![Download Zip](https://img.shields.io/badge/Download-Source%20Code%20(.zip)-darkred?style=for-the-badge&logo=github)](https://github.com/CmdSuv/NoEscapeAC/archive/refs/tags/v1.1.zip)
+[![License: Non-Commercial Share-Alike](https://img.shields.io/badge/License-Non--Commercial%20Share--Alike-blue?style=for-the-badge)](LICENSE)
 
 **NoEscape** is a cross-platform (Linux + Windows Ring-3), high-performance anti-cheat framework re-engineered in modern **C++20**. Designed for high-integrity game and application security, it incorporates forensic memory analysis, SIMD-accelerated pattern scanning, PCIe DMA hardware detection, statistical input kinematics, ESP overlay detection, encrypted blackbox crash dumpers, and an industry-standard C-ABI SDK.
+
+---
+
+### 📦 Latest Release: NoEscapeAC 1.1
+> **[Direct Download: NoEscapeAC 1.1 Source Code (.zip)](https://github.com/CmdSuv/NoEscapeAC/archive/refs/tags/v1.1.zip)**  
+> **Release Tag**: `v1.1` | **Full Release Notes**: [View on GitHub Releases](https://github.com/CmdSuv/NoEscapeAC/releases/tag/v1.1)
+> 
+> **Key Highlights in Release 1.1:**
+> - **Unified C++20 Ring-3 Architecture**: Zero external dependencies beyond glibc / Win32.
+> - **Riot Vanguard-Style Crimson Ban Overlay**: Standalone GUI dialog with detailed English forensic report and immediate process kick (`tools/noescape_ban_ui.py`).
+> - **JVM / JIT Runtime Guard**: Native HotSpot CodeCache awareness preventing false positives on Minecraft / Fabric / Java games.
+> - **Full Verification Suite**: 86 automated unit tests + 5 Scenario B preload verification tests passing with 100% rate.
 
 ---
 
@@ -111,5 +127,19 @@ NoEscapeAC/
 
 ---
 
+### 📄 License & Copyright
+
+**Copyright (c) 2026 Omar Yiğitcan Mengü ([github.com/CmdSuv](https://github.com/CmdSuv)). All Rights Reserved.**
+
+This software is distributed under the custom **NoEscape Non-Commercial Share-Alike Source Available License (v1.0)**:
+- **Commercial Use & Sale Strictly Forbidden**: You may **NOT** sell, resell, sublicense, monetize, commercialize, or profit from this software or any derivative works thereof in any form.
+- **Modification & Public Showcase Permitted**: You are welcome to inspect, study, modify, fork, and showcase/demonstrate the software for non-commercial, personal, and educational purposes.
+- **Strict License Preservation (Copyleft)**: Any copy, fork, redistribution, or showcase of this software (in source or binary form) **MUST** retain the original [LICENSE](LICENSE) file completely unmodified.
+- **Mandatory Attribution**: You must visibly credit **Omar Yiğitcan Mengü** and maintain an active link to the author's GitHub profile: [https://github.com/CmdSuv](https://github.com/CmdSuv).
+
+For full legal terms and conditions, please consult the complete [LICENSE](LICENSE) file.
+
+---
+
 ### ⚠️ Disclaimer
-*This project is open-source and provided for educational, security research, and defensive application hardening purposes.*
+*This project is provided strictly for educational research, system administration, and defensive application security hardening purposes.*
