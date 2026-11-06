@@ -1,22 +1,16 @@
-# 🛡️ NoEscape Anti-Cheat Engine (v7.0 / Release 1.1)
+# 🛡️ NoEscape Anti-Cheat Engine (v7.0 / Release 1.2)
 
-[![GitHub Release](https://img.shields.io/badge/Release-NoEscapeAC%201.1-red?style=for-the-badge&logo=github)](https://github.com/CmdSuv/NoEscapeAC/releases/tag/v1.1)
-[![Download Zip](https://img.shields.io/badge/Download-Source%20Code%20(.zip)-darkred?style=for-the-badge&logo=github)](https://github.com/CmdSuv/NoEscapeAC/archive/refs/tags/v1.1.zip)
+[![GitHub Release](https://img.shields.io/badge/Release-NoEscapeAC%201.2-red?style=for-the-badge&logo=github)](https://github.com/CmdSuv/NoEscapeAC/releases/tag/v1.2)
+[![Download Zip](https://img.shields.io/badge/Download-Source%20Code%20(.zip)-darkred?style=for-the-badge&logo=github)](https://github.com/CmdSuv/NoEscapeAC/archive/refs/tags/v1.2.zip)
 [![License: Non-Commercial Share-Alike](https://img.shields.io/badge/License-Non--Commercial%20Share--Alike-blue?style=for-the-badge)](LICENSE)
 
 **NoEscape Anti-Cheat (NoEscapeAC)** is a modern, lightweight, and unified user-mode (Ring-3) anti-cheat and runtime integrity framework engineered in **C++20** for Linux and Windows. Designed to safeguard competitive multiplayer games and custom game launchers without intrusive kernel drivers, NoEscapeAC delivers defense-in-depth security: AVX2 SIMD byte pattern scanning, unbacked memory forensics with JVM/JIT HotSpot awareness, automatic inline API unhooking, PCIe DMA anomaly detection, statistical mouse kinematics (silent-aim / instant-snap heuristics), ESP fake-window overlay interception, and a standalone crimson security ban enforcement UI.
 
 ---
 
-### 📦 Latest Release: NoEscapeAC 1.1
-> **[Direct Download: NoEscapeAC 1.1 Source Code (.zip)](https://github.com/CmdSuv/NoEscapeAC/archive/refs/tags/v1.1.zip)**  
-> **Release Tag**: `v1.1` | **Full Release Notes**: [View on GitHub Releases](https://github.com/CmdSuv/NoEscapeAC/releases/tag/v1.1)
-> 
-> **Key Highlights in Release 1.1:**
-> - **Unified C++20 Ring-3 Architecture**: Zero external dependencies beyond glibc / Win32.
-> - **Standalone Crimson Ban Overlay**: Standalone GUI dialog with detailed English forensic report and immediate process kick (`tools/noescape_ban_ui.py`).
-> - **JVM / JIT Runtime Guard**: Native HotSpot CodeCache awareness preventing false positives on Minecraft / Fabric / Java games.
-> - **Full Verification Suite**: 86 automated unit tests + 5 Scenario B preload verification tests passing with 100% rate.
+### 📦 Latest Release: NoEscapeAC 1.2
+> **[Direct Download: NoEscapeAC 1.2 Source Code (.zip)](https://github.com/CmdSuv/NoEscapeAC/archive/refs/tags/v1.2.zip)**  
+> **Release Tag**: `v1.2` | **Changelog & Release Notes**: [View on GitHub Releases](https://github.com/CmdSuv/NoEscapeAC/releases/tag/v1.2)
 
 ---
 
