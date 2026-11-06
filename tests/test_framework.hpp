@@ -7,6 +7,16 @@
 #include <stdexcept>
 #include <cmath>
 
+// Sanitizers quarantine freed memory (stale residue of earlier tests stays scannable) and
+// shadow-map huge regions, so "completely clean process" assertions are only meaningful without them.
+#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
+#define NOESCAPE_UNDER_SANITIZER 1
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer)
+#define NOESCAPE_UNDER_SANITIZER 1
+#endif
+#endif
+
 namespace noescape::test {
 
 class TestRunner {

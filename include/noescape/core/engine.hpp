@@ -72,6 +72,9 @@ public:
     void UpdateAuditHeartbeat();
     uint64_t GetLastAuditHeartbeatMs() const { return last_audit_heartbeat_ms_.load(std::memory_order_acquire); }
     void SetAuditHeartbeatForTesting(uint64_t timestamp_ms) { last_audit_heartbeat_ms_.store(timestamp_ms, std::memory_order_release); }
+    uint64_t GetWatchdogHeartbeatMs() const { return watchdog_heartbeat_ms_.load(std::memory_order_acquire); }
+    void SetWatchdogHeartbeatForTesting(uint64_t ts) { watchdog_heartbeat_ms_.store(ts, std::memory_order_release); }
+    void FreezeWatchdogForTesting(bool f) { freeze_watchdog_for_testing_.store(f, std::memory_order_release); }
     void FreezeBackgroundLoopForTesting(bool freeze) { freeze_background_loop_for_testing_.store(freeze, std::memory_order_release); }
 
 private:
@@ -87,6 +90,7 @@ private:
     std::atomic<std::thread::id> background_thread_id_{};
     std::atomic<uint64_t> last_heavy_scan_ms_{0};
     std::atomic<bool> freeze_background_loop_for_testing_{false};
+    std::atomic<bool> freeze_watchdog_for_testing_{false};
 
     network::PanelClient panel_client_;
     kinematics::AimAnalyzer aim_analyzer_;
@@ -117,6 +121,11 @@ private:
     std::thread watchdog_thread_;
     std::thread network_thread_;
     std::atomic<uint64_t> last_audit_heartbeat_ms_{0};
+    // Mutual supervision: the audit loop watches the watchdog the same way the watchdog watches it
+    std::atomic<uint64_t> watchdog_heartbeat_ms_{0};
+    std::atomic<bool> watchdog_exited_{false};      // set by the watchdog when it ends on purpose
+    std::atomic<bool> watchdog_reported_{false};
+    void CheckWatchdogHealth();
 };
 
 using SecurityEngine = AntiCheatEngine;

@@ -526,6 +526,9 @@ void AntiCheatEngine::Start() {
     stop_requested_.store(false, std::memory_order_release);
 
     last_audit_heartbeat_ms_.store(GetSteadyNowMs(), std::memory_order_release);
+    watchdog_heartbeat_ms_.store(GetSteadyNowMs(), std::memory_order_release);
+    watchdog_exited_.store(false, std::memory_order_release);
+    watchdog_reported_.store(false, std::memory_order_release);
 
     // Long memory scans report progress so a legitimately slow scan is not mistaken for a freeze
     memory::MemoryScanner::Instance().SetProgressCallback([this]() { UpdateAuditHeartbeat(); });
@@ -622,6 +625,7 @@ void AntiCheatEngine::BackgroundLoop() {
         if (!running_.load(std::memory_order_acquire)) break;
 
         UpdateAuditHeartbeat();
+        CheckWatchdogHealth();
         try {
             AuditCycle();
         } catch (const std::exception& ex) {
@@ -641,6 +645,7 @@ void AntiCheatEngine::BackgroundLoop() {
                 break;
             }
             UpdateAuditHeartbeat();
+            CheckWatchdogHealth();
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
     }
@@ -656,6 +661,9 @@ void AntiCheatEngine::WatchdogLoop() {
     while (running_.load(std::memory_order_acquire)) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
         if (!running_.load(std::memory_order_acquire)) break;
+        if (!freeze_watchdog_for_testing_.load(std::memory_order_acquire)) {
+            watchdog_heartbeat_ms_.store(GetSteadyNowMs(), std::memory_order_release);
+        }
         if (is_banned_.load(std::memory_order_acquire)) break;
 
         uint64_t now = GetSteadyNowMs();
@@ -675,6 +683,27 @@ void AntiCheatEngine::WatchdogLoop() {
             }
             break;
         }
+    }
+    // Reaching here with the engine still running and nobody banned means the loop ended on its
+    // own terms (ban handled / stop requested); a killed thread never executes this line.
+    watchdog_exited_.store(true, std::memory_order_release);
+}
+
+void AntiCheatEngine::CheckWatchdogHealth() {
+    if (!running_.load(std::memory_order_acquire) || watchdog_exited_.load(std::memory_order_acquire)) return;
+    if (watchdog_reported_.load(std::memory_order_acquire)) return;
+    uint64_t now = GetSteadyNowMs();
+    uint64_t last = watchdog_heartbeat_ms_.load(std::memory_order_acquire);
+    if (last > 0 && now > last && (now - last) > 3000) {
+        watchdog_reported_.store(true, std::memory_order_release);
+        DetectionEvent ev;
+        ev.type = DetectionType::HEARTBEAT_TAMPERING;
+        ev.severity = Severity::FATAL_BAN;
+        ev.component = "AntiCheatEngine::WatchdogSupervisor";
+        ev.details = "Watchdog thread stopped responding (killed, suspended or hooked): audit loop supervision lost";
+        ev.timestamp = static_cast<uint64_t>(std::time(nullptr));
+        ev.threat_score = 100;
+        ProcessDetection(ev);
     }
 }
 
