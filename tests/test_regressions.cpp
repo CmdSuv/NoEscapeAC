@@ -309,3 +309,87 @@ TEST(Regression, EngineCanBeRestartedAfterStop) {
         engine.Stop();
     }
 }
+
+#if !defined(_WIN32)
+#include "noescape/security/integrity.hpp"
+#include <limits.h>
+
+namespace {
+std::string HttpGetLocal(int port, const std::string& path) {
+    std::string cmd = "python3 -c \"import urllib.request,sys;print(urllib.request.urlopen('http://127.0.0.1:" +
+                      std::to_string(port) + path + "',timeout=3).read().decode())\" 2>/dev/null";
+    std::string out;
+    FILE* p = popen(cmd.c_str(), "r");
+    if (!p) return out;
+    char buf[256];
+    while (fgets(buf, sizeof(buf), p)) out += buf;
+    pclose(p);
+    return out;
+}
+} // namespace
+
+TEST(Regression, ServerSideAttestationAndSessionVerdict) {
+    if (std::system("python3 --version >/dev/null 2>&1") != 0) return;
+    char self[PATH_MAX]{};
+    ssize_t n = readlink("/proc/self/exe", self, sizeof(self) - 1);
+    ASSERT_TRUE(n > 0);
+
+    const char* secret = "AttestSecret";
+    std::string start = std::string("NOESCAPE_REF_IMAGE=") + self + " NOESCAPE_REF_SESSION_TTL=3 python3 " +
+                        NOESCAPE_SOURCE_DIR + "/tools/reference_server.py 18433 " + secret + " >/dev/null 2>&1 &";
+    ASSERT_EQ(std::system(start.c_str()), 0);
+    std::this_thread::sleep_for(std::chrono::milliseconds(1200));
+
+    network::PanelClient client("http://127.0.0.1:18433/api/ac", secret);
+    const std::string verdictPath = "/api/ac/session?hwid=" + client.GetHwid();
+    auto& integrity = security::IntegrityChecker::Instance();
+    ASSERT_TRUE(integrity.Initialize());
+
+    // 0) before any heartbeat the player has no session
+    bool noSession = HttpGetLocal(18433, verdictPath).find("\"valid\":false") != std::string::npos;
+
+    // 1) honest client: heartbeat -> challenge -> correct answer -> valid session
+    auto hb = client.Heartbeat(0, "HEALTHY");
+    bool gotChallenge = hb.ok && hb.challenge.present && !hb.challenge.forged;
+    std::string answer;
+    bool answered = gotChallenge &&
+        integrity.Attest(secret, hb.challenge.id, hb.challenge.nonce, hb.challenge.offset, hb.challenge.length, answer) &&
+        client.SendAttestation(hb.challenge, answer);
+    bool validAfterHonest = HttpGetLocal(18433, verdictPath).find("\"valid\":true") != std::string::npos;
+
+    // 2) client whose code was patched cannot reproduce the reference bytes: wrong answer
+    auto hb2 = client.Heartbeat(0, "HEALTHY");
+    bool tamperedAccepted = true;
+    if (hb2.ok && hb2.challenge.present && !hb2.challenge.forged) {
+        std::string bogus(64, '0');
+        tamperedAccepted = client.SendAttestation(hb2.challenge, bogus);
+    }
+    bool invalidAfterTamper = HttpGetLocal(18433, verdictPath).find("\"valid\":false") != std::string::npos;
+
+    // 3) wrong secret: server's challenge signature is rejected by the client as forged
+    network::PanelClient wrongSecret("http://127.0.0.1:18433/api/ac", "NotTheSecret");
+    auto hb3 = wrongSecret.Heartbeat(0, "HEALTHY");
+
+    (void)!std::system("pkill -f 'reference_server.py 18433' >/dev/null 2>&1");
+
+    ASSERT_TRUE(noSession);
+    ASSERT_TRUE(gotChallenge);
+    ASSERT_TRUE(answered);
+    ASSERT_TRUE(validAfterHonest);
+    ASSERT_FALSE(tamperedAccepted);
+    ASSERT_TRUE(invalidAfterTamper);
+    ASSERT_FALSE(hb3.ok);
+}
+
+TEST(Regression, AttestationRangeIsBoundsChecked) {
+    auto& integrity = security::IntegrityChecker::Instance();
+    ASSERT_TRUE(integrity.Initialize());
+    std::string out;
+    ASSERT_FALSE(integrity.Attest("k", "id", "n", 0, 0, out));
+    ASSERT_FALSE(integrity.Attest("k", "id", "n", integrity.TextSize(), 16, out));
+    ASSERT_FALSE(integrity.Attest("k", "id", "n", 1, UINT64_MAX, out));
+    ASSERT_FALSE(integrity.Attest("k", "id", "n", UINT64_MAX, 16, out));
+    ASSERT_TRUE(integrity.Attest("k", "id", "n", 0, 64, out));
+    ASSERT_EQ(out.size(), 64u);
+}
+#endif

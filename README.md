@@ -98,6 +98,10 @@ NoEscapeAC is a **user-mode (Ring-3) detection and deterrence layer**. It runs w
 - Therefore the client should be one signal among several. For competitive titles, pair it with **server-side** validation (fog-of-war culling, movement/aim statistics, mandatory signed heartbeats) and treat client reports as evidence, not verdicts.
 - Roll new rules out in *report-only* mode first (`enforce_ban = false`) and watch false-positive telemetry before enabling bans.
 
+### 🛰️ Server-verified sessions (recommended for competitive games)
+
+Enable heartbeats (`enable_heartbeat = true` / `NOESCAPE_ENABLE_HEARTBEAT=1`). Each signed heartbeat reply may carry a **code-attestation challenge**: the server names a random byte range of the client's executable segment, the client returns `HMAC(secret, id:nonce:bytes)` and the server recomputes it from the reference build (`NOESCAPE_REF_IMAGE` in `tools/reference_server.py`; ELF in the reference implementation). Your **game server** then asks `GET /api/ac/session?hwid=H` and drops players whose session is not `valid` (no heartbeat, expired TTL, wrong or unanswered attestation). Enforcement therefore lives on the server, where a cheat cannot switch it off. Challenges are random, single-use and signed, so answers cannot be replayed or precomputed.
+
 ### 🔐 Integration Notes
 
 - **Always set a unique `secret_key` and `panel_url`.** The built-in default key is public; a warning is logged when it is used.
