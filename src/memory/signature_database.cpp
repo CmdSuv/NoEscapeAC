@@ -196,22 +196,22 @@ std::vector<CheatSignature> SignatureDatabase::CreateDefaultSignatures() {
 
     list.emplace_back(
         "42 6C 61 63 6B 62 6F 6E 65", // "Blackbone"
-        "Blackbone_Driver_Signature",
+        "BlackBone_Driver_Signature",
         SignatureCategory::INJECTOR_STUB,
         100,
         core::Severity::FATAL_BAN,
         MemoryTargetRule::UNBACKED_ONLY,
-        "Blackbone kernel/userland memory hacking and injection library identifier"
+        "BlackBone kernel/userland memory hacking and injection library identifier"
     );
 
     list.emplace_back(
         "48 83 EC 28 48 89 4C 24 20 48 89 54 24 28 48 8B",
-        "Blackbone_APC_Injection_Stub",
+        "BlackBone_APC_Injection_Stub",
         SignatureCategory::INJECTOR_STUB,
         100,
         core::Severity::FATAL_BAN,
         MemoryTargetRule::UNBACKED_ONLY,
-        "Blackbone APC execution trampoline stub"
+        "BlackBone APC execution trampoline stub"
     );
 
     list.emplace_back(
@@ -236,27 +236,27 @@ std::vector<CheatSignature> SignatureDatabase::CreateDefaultSignatures() {
 
     list.emplace_back(
         "4B 53 44 75 6D 70 65 72", // "KSDumper"
-        "KSDumper_Driver_Signature",
+        "KsDumper_Driver_Signature",
         SignatureCategory::INJECTOR_STUB,
         100,
         core::Severity::FATAL_BAN,
         MemoryTargetRule::UNBACKED_ONLY,
-        "KSDumper ring0 memory dumper device identifier"
+        "KsDumper ring0 memory dumper device identifier"
     );
 
     list.emplace_back(
         "81 FA 00 22 22 00 74",
-        "KSDumper_IOCTL_Dispatch",
+        "KsDumper_IOCTL_Dispatch",
         SignatureCategory::INJECTOR_STUB,
         90,
         core::Severity::FATAL_BAN,
         MemoryTargetRule::UNBACKED_ONLY,
-        "KSDumper memory copy IOCTL verification dispatch"
+        "KsDumper memory copy IOCTL verification dispatch"
     );
 
     list.emplace_back(
         "52 65 66 6C 65 63 74 69 76 65 4C 6F 61 64 65 72", // "ReflectiveLoader"
-        "ReflectiveLoader_Export",
+        "Reflective_Loader_Export",
         SignatureCategory::INJECTOR_STUB,
         100,
         core::Severity::FATAL_BAN,
@@ -339,7 +339,7 @@ std::vector<CheatSignature> SignatureDatabase::CreateDefaultSignatures() {
         30,
         core::Severity::MEDIUM,
         MemoryTargetRule::ANY_ANONYMOUS,
-        "Cheat Engine DBK64 kernel driver device string"
+        "Cheat Engine Dbk64 kernel driver device string"
     );
 
     list.emplace_back(
@@ -435,7 +435,7 @@ std::vector<CheatSignature> SignatureDatabase::CreateDefaultSignatures() {
         30,
         core::Severity::MEDIUM,
         MemoryTargetRule::ANY_ANONYMOUS,
-        "Injected Dear ImGui overlay render identity"
+        "Injected Dear-ImGui overlay render identity"
     );
 
     list.emplace_back(
@@ -445,7 +445,7 @@ std::vector<CheatSignature> SignatureDatabase::CreateDefaultSignatures() {
         30,
         core::Severity::MEDIUM,
         MemoryTargetRule::ANY_ANONYMOUS,
-        "Dear ImGui framework signature in unbacked memory allocation"
+        "Dear-ImGui framework signature in unbacked memory allocation"
     );
 
     list.emplace_back(
@@ -513,12 +513,12 @@ std::vector<CheatSignature> SignatureDatabase::CreateDefaultSignatures() {
 
     list.emplace_back(
         "54 68 65 6D 69 64 61", // "Themida"
-        "Themida_SDK_Marker",
+        "ThemIDA_SDK_Marker",
         SignatureCategory::PACKER_PROTECTOR,
         80,
         core::Severity::HIGH,
         MemoryTargetRule::UNBACKED_ONLY,
-        "Themida / WinLicense protected payload indicator"
+        "ThemIDA / WinLicense protected payload indicator"
     );
 
     list.emplace_back(
@@ -543,12 +543,12 @@ std::vector<CheatSignature> SignatureDatabase::CreateDefaultSignatures() {
 
     list.emplace_back(
         "2E 74 68 65 6D 69 64 61", // ".themida"
-        "Themida_Section_Tag",
+        "ThemIDA_Section_Tag",
         SignatureCategory::PACKER_PROTECTOR,
         85,
         core::Severity::FATAL_BAN,
         MemoryTargetRule::UNBACKED_ONLY,
-        "Themida protected section header tag in unbacked memory"
+        "ThemIDA protected section header tag in unbacked memory"
     );
 
     // =========================================================================

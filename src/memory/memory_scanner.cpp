@@ -251,13 +251,17 @@ std::vector<MemoryRegion> MemoryScanner::QueryMemoryRegionsInternal() {
             reg.executable = (mbi.Protect & (PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)) != 0;
             reg.is_shared = (mbi.Type == MEM_MAPPED || mbi.Type == MEM_IMAGE);
 
-            char filePath[MAX_PATH]{};
-            if (GetMappedFileNameA(GetCurrentProcess(), mbi.BaseAddress, filePath, MAX_PATH) > 0) {
-                reg.pathname = filePath;
-                reg.is_backed_by_file = true;
-            } else {
-                reg.is_backed_by_file = false;
+            // Image/mapped sections are file-backed by definition; the name is informational
+            // (wide API: ANSI mangles non-ASCII paths).
+            wchar_t filePathW[MAX_PATH * 2]{};
+            if (GetMappedFileNameW(GetCurrentProcess(), mbi.BaseAddress, filePathW, MAX_PATH * 2) > 0) {
+                char utf8[MAX_PATH * 4]{};
+                WideCharToMultiByte(CP_UTF8, 0, filePathW, -1, utf8, sizeof(utf8), nullptr, nullptr);
+                reg.pathname = utf8;
+            } else if (mbi.Type == MEM_IMAGE) {
+                reg.pathname = "<image>";
             }
+            reg.is_backed_by_file = (mbi.Type == MEM_IMAGE || mbi.Type == MEM_MAPPED);
 
             regions.push_back(reg);
         }
@@ -566,8 +570,13 @@ std::vector<core::DetectionEvent> MemoryScanner::ScanSignatures(const std::vecto
         // and string tables. Skip non-executable heap/stack regions to eliminate false positives.
         if (!r.executable && (r.pathname == "[heap]" || r.pathname.rfind("[stack", 0) == 0)) continue;
 
+#if defined(_WIN32)
+        // Windows paths are NT device paths ("\\Device\\HarddiskVolume3\\..."), never "/..."
+        const bool genuineFile = r.is_backed_by_file;
+#else
         const bool genuineFile = r.is_backed_by_file && !r.pathname.empty() && r.pathname[0] == '/' &&
                                  r.pathname.find("(deleted)") == std::string::npos;
+#endif
 
         // Filter signatures that are applicable to this region based on its memory target rule
         std::vector<const CheatSignature*> applicable;

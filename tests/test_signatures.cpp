@@ -349,7 +349,7 @@ TEST(Signatures, LiveMemoryAuditDetectionInAnonymousDataMemory) {
 TEST(Signatures, NewCuratedSignaturesVerification) {
     ASSERT_EQ(SignatureDatabase::Count(), 50);
 
-    auto refl = SignatureDatabase::FindByName("ReflectiveLoader_Export");
+    auto refl = SignatureDatabase::FindByName("Reflective_Loader_Export");
     ASSERT_TRUE(refl.has_value());
     ASSERT_EQ(static_cast<int>(refl->GetCategory()), static_cast<int>(SignatureCategory::INJECTOR_STUB));
 
@@ -373,7 +373,7 @@ TEST(Signatures, NewCuratedSignaturesVerification) {
     ASSERT_TRUE(vmp.has_value());
     ASSERT_EQ(static_cast<int>(vmp->GetCategory()), static_cast<int>(SignatureCategory::PACKER_PROTECTOR));
 
-    auto themida = SignatureDatabase::FindByName("Themida_Section_Tag");
+    auto themida = SignatureDatabase::FindByName("ThemIDA_Section_Tag");
     ASSERT_TRUE(themida.has_value());
     ASSERT_EQ(static_cast<int>(themida->GetCategory()), static_cast<int>(SignatureCategory::PACKER_PROTECTOR));
 
