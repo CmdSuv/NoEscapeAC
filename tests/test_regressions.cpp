@@ -393,3 +393,50 @@ TEST(Regression, AttestationRangeIsBoundsChecked) {
     ASSERT_EQ(out.size(), 64u);
 }
 #endif
+
+TEST(Regression, AuditLoopDetectsDeadWatchdog) {
+    core::EngineConfig cfg;
+    cfg.enableHeartbeat = false;
+    cfg.enableDmaDetection = false;
+    cfg.enableMemoryScan = false;
+    cfg.enableForensics = false;
+    cfg.enableOverlayDetection = false;
+    cfg.terminateProcessOnBan = false;
+    cfg.showBanUi = false;
+    cfg.enforceBanOnViolation = true;
+    core::AntiCheatEngine engine(cfg);
+    ASSERT_TRUE(engine.Initialize());
+    engine.Start();
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    ASSERT_FALSE(engine.IsBanned());           // healthy: mutual supervision stays quiet
+
+    // Attacker suspends/kills only the watchdog thread; the audit loop must notice by itself
+    engine.FreezeWatchdogForTesting(true);
+    engine.SetWatchdogHeartbeatForTesting(engine.GetWatchdogHeartbeatMs() - 5000);
+    std::this_thread::sleep_for(std::chrono::milliseconds(800));
+    bool banned = engine.IsBanned();
+    bool reported = false;
+    for (const auto& ev : engine.GetDetectionHistory())
+        if (ev.component == "AntiCheatEngine::WatchdogSupervisor") reported = true;
+    engine.FreezeWatchdogForTesting(false);
+    engine.Stop();
+    ASSERT_TRUE(reported);
+    ASSERT_TRUE(banned);
+}
+
+TEST(Regression, HealthyEngineNeverSelfReportsWatchdogFailure) {
+    core::EngineConfig cfg;
+    cfg.enableHeartbeat = false;
+    cfg.enableDmaDetection = false;
+    cfg.enableMemoryScan = false;
+    cfg.enableForensics = false;
+    cfg.enableOverlayDetection = false;
+    cfg.enforceBanOnViolation = false;
+    core::AntiCheatEngine engine(cfg);
+    ASSERT_TRUE(engine.Initialize());
+    engine.Start();
+    std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+    engine.Stop();
+    for (const auto& ev : engine.GetDetectionHistory())
+        ASSERT_TRUE(ev.component.find("Watchdog") == std::string::npos);
+}

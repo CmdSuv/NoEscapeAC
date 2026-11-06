@@ -292,6 +292,9 @@ TEST(Signatures, LiveMemoryAuditDetectionInAnonymousMemory) {
 }
 
 TEST(Signatures, CleanProcessHasNoSignatureFalsePositives) {
+#if defined(NOESCAPE_UNDER_SANITIZER)
+    return; // freed-memory quarantine keeps earlier tests' planted patterns readable
+#endif
     // In a clean process with no injected anonymous memory, default signatures
     // must not produce any MEMORY_SIGNATURE_MATCH events on genuine binaries!
     auto sigs = MemoryScanner::GetDefaultCheatSignatures();

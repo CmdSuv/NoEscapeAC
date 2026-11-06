@@ -76,7 +76,7 @@
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j$(nproc)
 
-# Run Comprehensive Unit Test Suite (105 test cases across all subsystems)
+# Run Comprehensive Unit Test Suite (115 test cases across all subsystems)
 ./build/noescape_tests
 
 # Run Interactive Subsystem Demo
@@ -97,6 +97,10 @@ NoEscapeAC is a **user-mode (Ring-3) detection and deterrence layer**. It runs w
 - Pattern/name based detections are signatures: they catch off-the-shelf tools and lazy modifications, not custom builds.
 - Therefore the client should be one signal among several. For competitive titles, pair it with **server-side** validation (fog-of-war culling, movement/aim statistics, mandatory signed heartbeats) and treat client reports as evidence, not verdicts.
 - Roll new rules out in *report-only* mode first (`enforce_ban = false`) and watch false-positive telemetry before enabling bans.
+
+### 🧷 Self-protection
+
+The audit loop and the watchdog supervise **each other**: the watchdog bans when the audit loop stalls (> 3 s), and the audit loop reports when the watchdog stops answering, so suspending or killing only one of the two threads is detected. Audits are serialized, long scans report progress, and `Tick()` never blocks behind a running background audit.
 
 ### 🛰️ Server-verified sessions (recommended for competitive games)
 
@@ -141,7 +145,7 @@ NoEscapeAC/
 │   ├── network/
 │   └── sdk/
 ├── demo/                     # Interactive demonstration program
-├── tests/                    # 105 unit & regression tests
+├── tests/                    # 115 unit & regression tests
 └── CMakeLists.txt            # Exports libnoescape.a, libnoescape.so, and executables
 ```
 
