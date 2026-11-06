@@ -7,6 +7,7 @@
 #include "noescape/memory/memory_scanner.hpp"
 #include "noescape/memory/unhooker.hpp"
 #include "noescape/security/anti_debug.hpp"
+#include "noescape/core/engine.hpp"
 #include "noescape_sdk.h"
 
 #if !defined(_WIN32)
@@ -391,4 +392,168 @@ TEST(Phase3, SignedPanelProtocolAgainstReferenceServer) {
     // Unreachable server: never reported clean
     std::this_thread::sleep_for(std::chrono::milliseconds(300));
     ASSERT_EQ(static_cast<int>(good.QueryBanStatus().status), static_cast<int>(network::BanCheckStatus::NETWORK_ERROR));
+}
+
+#if !defined(_WIN32)
+#include <linux/perf_event.h>
+#include <linux/hw_breakpoint.h>
+#include <sys/syscall.h>
+
+TEST(Hardening, HardwareBreakpointDetectionWithPerfEvent) {
+    // 1. Verify clean process reports zero hardware breakpoints
+    ASSERT_FALSE(security::AntiDebug::CheckHardwareBreakpoints());
+
+    // 2. Simulate hardware debug register occupation using perf_event_open
+    static void (*probeFunc)() = []() {};
+    struct perf_event_attr pe{};
+    pe.type = PERF_TYPE_BREAKPOINT;
+    pe.size = sizeof(pe);
+    pe.bp_type = HW_BREAKPOINT_X;
+    pe.bp_addr = reinterpret_cast<uintptr_t>(probeFunc);
+    pe.bp_len = sizeof(long);
+    pe.disabled = 1;
+    pe.exclude_kernel = 1;
+    pe.exclude_hv = 1;
+
+    int simFd = static_cast<int>(syscall(__NR_perf_event_open, &pe, 0, -1, -1, 0));
+    if (simFd >= 0) {
+        // DR slot occupied -> CheckHardwareBreakpoints detects it
+        bool detected = security::AntiDebug::CheckHardwareBreakpoints();
+        close(simFd);
+        ASSERT_TRUE(detected);
+
+        // Released DR slot -> clean again
+        ASSERT_FALSE(security::AntiDebug::CheckHardwareBreakpoints());
+    }
+}
+#endif
+
+TEST(Hardening, MemoryScannerCacheSnapshot) {
+    auto& scanner = memory::MemoryScanner::Instance();
+    ASSERT_FALSE(scanner.IsCacheValid());
+
+    // Un-cached query
+    auto r1 = scanner.QueryMemoryRegions();
+    ASSERT_FALSE(r1.empty());
+    ASSERT_FALSE(scanner.IsCacheValid());
+
+    // Populate and query cached snapshot
+    scanner.RefreshCache();
+    ASSERT_TRUE(scanner.IsCacheValid());
+
+    auto r2 = scanner.QueryMemoryRegions();
+    ASSERT_EQ(r1.size(), r2.size());
+    ASSERT_EQ(r1[0].start, r2[0].start);
+
+    // Clear cache
+    scanner.ClearCache();
+    ASSERT_FALSE(scanner.IsCacheValid());
+}
+
+TEST(Hardening, LargeMemoryChunkingScanAbove32MB) {
+    auto& scanner = memory::MemoryScanner::Instance();
+    // Allocate 36 MB of anonymous executable memory (>32MB threshold previously skipped)
+    size_t allocSize = 36 * 1024 * 1024;
+#if !defined(_WIN32)
+    uint8_t* mem = static_cast<uint8_t*>(mmap(nullptr, allocSize, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
+    ASSERT_TRUE(mem != MAP_FAILED);
+
+    // Inject a known signature pattern into chunk 4 (offset 33 MB > 32 MB)
+    // MinHook x64 Trampoline: 49 BA [8 bytes target] 41 FF E2
+    size_t targetOffset = 33 * 1024 * 1024 + 1024;
+    mem[targetOffset] = 0x49; mem[targetOffset + 1] = 0xBA;
+    mem[targetOffset + 2] = 0x78; mem[targetOffset + 3] = 0x56;
+    mem[targetOffset + 4] = 0x34; mem[targetOffset + 5] = 0x12;
+    mem[targetOffset + 6] = 0x00; mem[targetOffset + 7] = 0x00;
+    mem[targetOffset + 8] = 0x00; mem[targetOffset + 9] = 0x00;
+    mem[targetOffset + 10] = 0x41; mem[targetOffset + 11] = 0xFF; mem[targetOffset + 12] = 0xE2;
+
+    auto events = scanner.ScanSignatures(memory::MemoryScanner::GetDefaultCheatSignatures());
+    bool foundInLargeBlock = false;
+    for (const auto& ev : events) {
+        if (ev.details.find("MinHook_X64_R10_Trampoline") != std::string::npos &&
+            ev.details.find("0x" + [] (uintptr_t v) {
+                std::ostringstream ss; ss << std::hex << v; return ss.str();
+            }(reinterpret_cast<uintptr_t>(mem + targetOffset))) != std::string::npos) {
+            foundInLargeBlock = true;
+            break;
+        }
+    }
+
+    munmap(mem, allocSize);
+    ASSERT_TRUE(foundInLargeBlock);
+#endif
+}
+
+TEST(Hardening, WatchdogThreadLifecycleClean) {
+    core::EngineConfig cfg;
+    cfg.enableHeartbeat = false;
+    cfg.terminateProcessOnBan = false;
+    cfg.showBanUi = false;
+
+    core::AntiCheatEngine engine(cfg);
+    ASSERT_TRUE(engine.Initialize());
+    engine.Start();
+    // Running under normal conditions maintains active heartbeat without false positives
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    ASSERT_FALSE(engine.IsBanned());
+    ASSERT_EQ(engine.GetThreatScore(), 0);
+    engine.Stop();
+}
+
+TEST(Hardening, WatchdogDetectsThreadFreezeTampering) {
+    core::EngineConfig cfg;
+    cfg.enableHeartbeat = false;
+    cfg.terminateProcessOnBan = false;
+    cfg.showBanUi = false;
+    cfg.enforceBanOnViolation = true;
+
+    core::AntiCheatEngine engine(cfg);
+    ASSERT_TRUE(engine.Initialize());
+    engine.Start();
+
+    // Verify engine starts cleanly
+    ASSERT_FALSE(engine.IsBanned());
+    ASSERT_TRUE(engine.GetLastAuditHeartbeatMs() > 0);
+
+    // Simulate an attacker suspending/freezing the background audit thread (> 3000ms deadline missed)
+    engine.FreezeBackgroundLoopForTesting(true);
+    uint64_t simulatedStallTime = engine.GetLastAuditHeartbeatMs() - 4000;
+    engine.SetAuditHeartbeatForTesting(simulatedStallTime);
+
+    // Watchdog thread checks every 100ms; wait 250ms for watchdog enforcement to trigger
+    std::this_thread::sleep_for(std::chrono::milliseconds(250));
+
+    // Watchdog must detect thread freeze, increment threat score to >= 100, and ban
+    ASSERT_TRUE(engine.IsBanned());
+    ASSERT_TRUE(engine.GetThreatScore() >= 100);
+
+    auto history = engine.GetDetectionHistory();
+    bool foundWatchdogDetection = false;
+    for (const auto& ev : history) {
+        if (ev.type == core::DetectionType::HEARTBEAT_TAMPERING &&
+            ev.component == "AntiCheatEngine::Watchdog") {
+            foundWatchdogDetection = true;
+            break;
+        }
+    }
+    ASSERT_TRUE(foundWatchdogDetection);
+
+    engine.FreezeBackgroundLoopForTesting(false);
+    engine.Stop();
+}
+
+TEST(Hardening, SecureEnvironmentOverrides) {
+    // Verify that NOESCAPE_TEST_MODE is set in test environment
+    const char* testMode = std::getenv("NOESCAPE_TEST_MODE");
+    ASSERT_TRUE(testMode != nullptr);
+    ASSERT_EQ(std::string(testMode), "1");
+
+    // In test mode, opt-out checking operates safely without breaking test harnesses
+    NoEscapeConfig cfg = NoEscape_GetDefaultConfig();
+    cfg.enable_heartbeat = false;
+    cfg.enable_anti_debug = false;
+    ASSERT_EQ(NoEscape_Init(&cfg), 0);
+    ASSERT_FALSE(NoEscape_IsBanned());
+    NoEscape_Shutdown();
 }

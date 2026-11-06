@@ -13,6 +13,12 @@ else()
     add_compile_options(-O3 -Wall -Wextra -Werror -Wno-unused-parameter -mavx2 -msse2 -pthread)
 endif()
 
+# Strict Production Build Flag (strips environment overrides)
+option(NOESCAPE_SECURE_BUILD "Enable strict production build disabling development environment overrides" ON)
+if(NOESCAPE_SECURE_BUILD)
+    add_compile_definitions(NOESCAPE_SECURE_BUILD)
+endif()
+
 # Core Include Directories
 include_directories(
     ${CMAKE_CURRENT_SOURCE_DIR}/include

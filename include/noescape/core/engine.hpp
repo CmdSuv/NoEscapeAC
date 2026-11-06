@@ -5,6 +5,7 @@
 #include <functional>
 #include <vector>
 #include <mutex>
+#include <thread>
 #include "noescape/core/types.hpp"
 #include "noescape/core/thread_pool.hpp"
 #include "noescape/core/logger.hpp"
@@ -62,11 +63,18 @@ public:
     void PushViewSample(float x, float y, float z, float pitch, float yaw, uint64_t timestamp_ms);
     const std::vector<uint8_t>& GetLastBlackboxPayload() const { return last_blackbox_payload_; }
 
+    // Watchdog heartbeat monitoring & testing interface
+    void UpdateAuditHeartbeat();
+    uint64_t GetLastAuditHeartbeatMs() const { return last_audit_heartbeat_ms_.load(std::memory_order_acquire); }
+    void SetAuditHeartbeatForTesting(uint64_t timestamp_ms) { last_audit_heartbeat_ms_.store(timestamp_ms, std::memory_order_release); }
+    void FreezeBackgroundLoopForTesting(bool freeze) { freeze_background_loop_for_testing_.store(freeze, std::memory_order_release); }
+
 private:
     EngineConfig config_;
     std::atomic<uint32_t> threat_score_{0};
     std::atomic<bool> is_banned_{false};
     std::atomic<bool> running_{false};
+    std::atomic<bool> freeze_background_loop_for_testing_{false};
 
     ThreadPool thread_pool_;
     network::PanelClient panel_client_;
@@ -89,7 +97,11 @@ private:
                         const std::string& component, 
                         DetectionType type);
     void BackgroundLoop();
+    void WatchdogLoop();
     uint32_t panel_failures_{0};
+
+    std::thread watchdog_thread_;
+    std::atomic<uint64_t> last_audit_heartbeat_ms_{0};
 };
 
 using SecurityEngine = AntiCheatEngine;

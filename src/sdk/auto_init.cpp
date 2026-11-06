@@ -43,18 +43,28 @@ DWORD WINAPI WindowsAutoInitWorker(LPVOID lpParam) {
         return 0;
     }
 
-    // Fast check: allow runtime opt-out
-    char envBuf[256]{};
-    DWORD len = GetEnvironmentVariableA("NOESCAPE_DISABLE_AUTO_INIT", envBuf, sizeof(envBuf));
-    if (len > 0 && (_stricmp(envBuf, "1") == 0 || _stricmp(envBuf, "true") == 0)) {
-        g_winInitFinished.store(true, std::memory_order_release);
-        return 0;
-    }
+    // Fast check: allow runtime opt-out (in secure production builds, require NOESCAPE_TEST_MODE)
+#if defined(NOESCAPE_SECURE_BUILD) || defined(NDEBUG)
+    char testModeBuf[16]{};
+    DWORD testLen = GetEnvironmentVariableA("NOESCAPE_TEST_MODE", testModeBuf, sizeof(testModeBuf));
+    bool allowDevOptOut = (testLen > 0 && (_stricmp(testModeBuf, "1") == 0 || _stricmp(testModeBuf, "true") == 0));
+#else
+    bool allowDevOptOut = true;
+#endif
 
-    len = GetEnvironmentVariableA("NOESCAPE_AUTO_START", envBuf, sizeof(envBuf));
-    if (len > 0 && (_stricmp(envBuf, "0") == 0 || _stricmp(envBuf, "false") == 0)) {
-        g_winInitFinished.store(true, std::memory_order_release);
-        return 0;
+    if (allowDevOptOut) {
+        char envBuf[256]{};
+        DWORD len = GetEnvironmentVariableA("NOESCAPE_DISABLE_AUTO_INIT", envBuf, sizeof(envBuf));
+        if (len > 0 && (_stricmp(envBuf, "1") == 0 || _stricmp(envBuf, "true") == 0)) {
+            g_winInitFinished.store(true, std::memory_order_release);
+            return 0;
+        }
+
+        len = GetEnvironmentVariableA("NOESCAPE_AUTO_START", envBuf, sizeof(envBuf));
+        if (len > 0 && (_stricmp(envBuf, "0") == 0 || _stricmp(envBuf, "false") == 0)) {
+            g_winInitFinished.store(true, std::memory_order_release);
+            return 0;
+        }
     }
 
     NoEscapeConfig cfg = NoEscape_GetDefaultConfig();
@@ -171,14 +181,23 @@ extern "C" BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpRes
 
         // Fast opt-out check to avoid thread creation if explicitly disabled
         {
-            char envBuf[32]{};
-            DWORD len = GetEnvironmentVariableA("NOESCAPE_DISABLE_AUTO_INIT", envBuf, sizeof(envBuf));
-            if (len > 0 && len < sizeof(envBuf) && (_stricmp(envBuf, "1") == 0 || _stricmp(envBuf, "true") == 0)) {
-                break;
-            }
-            len = GetEnvironmentVariableA("NOESCAPE_AUTO_START", envBuf, sizeof(envBuf));
-            if (len > 0 && len < sizeof(envBuf) && (_stricmp(envBuf, "0") == 0 || _stricmp(envBuf, "false") == 0)) {
-                break;
+#if defined(NOESCAPE_SECURE_BUILD) || defined(NDEBUG)
+            char testModeBuf[16]{};
+            DWORD testLen = GetEnvironmentVariableA("NOESCAPE_TEST_MODE", testModeBuf, sizeof(testModeBuf));
+            bool allowDevOptOut = (testLen > 0 && (_stricmp(testModeBuf, "1") == 0 || _stricmp(testModeBuf, "true") == 0));
+#else
+            bool allowDevOptOut = true;
+#endif
+            if (allowDevOptOut) {
+                char envBuf[32]{};
+                DWORD len = GetEnvironmentVariableA("NOESCAPE_DISABLE_AUTO_INIT", envBuf, sizeof(envBuf));
+                if (len > 0 && len < sizeof(envBuf) && (_stricmp(envBuf, "1") == 0 || _stricmp(envBuf, "true") == 0)) {
+                    break;
+                }
+                len = GetEnvironmentVariableA("NOESCAPE_AUTO_START", envBuf, sizeof(envBuf));
+                if (len > 0 && len < sizeof(envBuf) && (_stricmp(envBuf, "0") == 0 || _stricmp(envBuf, "false") == 0)) {
+                    break;
+                }
             }
         }
 
@@ -262,16 +281,25 @@ void* LinuxAutoInitWorker(void* arg) {
         return nullptr;
     }
 
-    const char* disableEnv = std::getenv("NOESCAPE_DISABLE_AUTO_INIT");
-    if (disableEnv && (std::strcmp(disableEnv, "1") == 0 || strcasecmp(disableEnv, "true") == 0)) {
-        g_linuxInitFinished.store(true, std::memory_order_release);
-        return nullptr;
-    }
+#if defined(NOESCAPE_SECURE_BUILD) || defined(NDEBUG)
+    const char* testEnv = std::getenv("NOESCAPE_TEST_MODE");
+    bool allowDevOptOut = (testEnv && (std::strcmp(testEnv, "1") == 0 || strcasecmp(testEnv, "true") == 0));
+#else
+    bool allowDevOptOut = true;
+#endif
 
-    const char* autoStartEnv = std::getenv("NOESCAPE_AUTO_START");
-    if (autoStartEnv && (std::strcmp(autoStartEnv, "0") == 0 || strcasecmp(autoStartEnv, "false") == 0)) {
-        g_linuxInitFinished.store(true, std::memory_order_release);
-        return nullptr;
+    if (allowDevOptOut) {
+        const char* disableEnv = std::getenv("NOESCAPE_DISABLE_AUTO_INIT");
+        if (disableEnv && (std::strcmp(disableEnv, "1") == 0 || strcasecmp(disableEnv, "true") == 0)) {
+            g_linuxInitFinished.store(true, std::memory_order_release);
+            return nullptr;
+        }
+
+        const char* autoStartEnv = std::getenv("NOESCAPE_AUTO_START");
+        if (autoStartEnv && (std::strcmp(autoStartEnv, "0") == 0 || strcasecmp(autoStartEnv, "false") == 0)) {
+            g_linuxInitFinished.store(true, std::memory_order_release);
+            return nullptr;
+        }
     }
 
     NoEscapeConfig cfg = NoEscape_GetDefaultConfig();
@@ -379,13 +407,22 @@ void NoEscape_AutoInit_Destructor();
 __attribute__((constructor))
 void NoEscape_AutoInit_Constructor() {
     // Fast path: avoid thread creation if explicitly disabled
-    const char* disableEnv = std::getenv("NOESCAPE_DISABLE_AUTO_INIT");
-    if (disableEnv && (std::strcmp(disableEnv, "1") == 0 || strcasecmp(disableEnv, "true") == 0)) {
-        return;
-    }
-    const char* autoStartEnv = std::getenv("NOESCAPE_AUTO_START");
-    if (autoStartEnv && (std::strcmp(autoStartEnv, "0") == 0 || strcasecmp(autoStartEnv, "false") == 0)) {
-        return;
+#if defined(NOESCAPE_SECURE_BUILD) || defined(NDEBUG)
+    const char* testEnv = std::getenv("NOESCAPE_TEST_MODE");
+    bool allowDevOptOut = (testEnv && (std::strcmp(testEnv, "1") == 0 || strcasecmp(testEnv, "true") == 0));
+#else
+    bool allowDevOptOut = true;
+#endif
+
+    if (allowDevOptOut) {
+        const char* disableEnv = std::getenv("NOESCAPE_DISABLE_AUTO_INIT");
+        if (disableEnv && (std::strcmp(disableEnv, "1") == 0 || strcasecmp(disableEnv, "true") == 0)) {
+            return;
+        }
+        const char* autoStartEnv = std::getenv("NOESCAPE_AUTO_START");
+        if (autoStartEnv && (std::strcmp(autoStartEnv, "0") == 0 || strcasecmp(autoStartEnv, "false") == 0)) {
+            return;
+        }
     }
 
     // Register atexit handler so clean shutdown occurs before C++ runtime / thread caches are torn down

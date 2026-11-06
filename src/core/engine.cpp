@@ -28,6 +28,18 @@
 
 namespace noescape::core {
 
+namespace {
+
+uint64_t GetSteadyNowMs() {
+    return static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()
+        ).count()
+    );
+}
+
+} // namespace
+
 AntiCheatEngine::AntiCheatEngine(EngineConfig config)
     : config_(std::move(config)),
       thread_pool_(2),
@@ -122,12 +134,23 @@ std::vector<DetectionEvent> AntiCheatEngine::AuditCycle() {
     std::vector<DetectionEvent> cycleEvents;
     if (!running_.load(std::memory_order_acquire)) return cycleEvents;
 
+    // Cache memory maps snapshot for the entire audit cycle to eliminate 25+ redundant file reads
+    memory::MemoryScanner::Instance().RefreshCache();
+    struct AuditCycleCacheGuard {
+        ~AuditCycleCacheGuard() {
+            memory::MemoryScanner::Instance().ClearCache();
+        }
+    } cycleCacheGuard;
+
+    UpdateAuditHeartbeat();
+
     // 1. Anti-Debug Audit
     if (config_.enableAntiDebug) {
         auto adEvents = security::AntiDebug::PerformAudit(config_.blacklistedProcesses);
         cycleEvents.insert(cycleEvents.end(), adEvents.begin(), adEvents.end());
     }
     if (!running_.load(std::memory_order_acquire)) return cycleEvents;
+    UpdateAuditHeartbeat();
 
     // 2. Self-Integrity Check
     if (config_.enableIntegrityScan) {
@@ -137,6 +160,7 @@ std::vector<DetectionEvent> AntiCheatEngine::AuditCycle() {
         }
     }
     if (!running_.load(std::memory_order_acquire)) return cycleEvents;
+    UpdateAuditHeartbeat();
 
     // 3. Timing / Speedhack Check
     if (config_.enableSpeedhackDetection) {
@@ -146,6 +170,7 @@ std::vector<DetectionEvent> AntiCheatEngine::AuditCycle() {
         }
     }
     if (!running_.load(std::memory_order_acquire)) return cycleEvents;
+    UpdateAuditHeartbeat();
 
     // 4. Memory Scanner (Unbacked executable memory + signature scan)
     if (config_.enableMemoryScan) {
@@ -153,6 +178,7 @@ std::vector<DetectionEvent> AntiCheatEngine::AuditCycle() {
         cycleEvents.insert(cycleEvents.end(), memEvents.begin(), memEvents.end());
     }
     if (!running_.load(std::memory_order_acquire)) return cycleEvents;
+    UpdateAuditHeartbeat();
 
     // 4b. Tripwire (canary) memory: detects external memory writes
     if (config_.enableMemoryScan) {
@@ -160,6 +186,7 @@ std::vector<DetectionEvent> AntiCheatEngine::AuditCycle() {
         cycleEvents.insert(cycleEvents.end(), canaryEvents.begin(), canaryEvents.end());
     }
     if (!running_.load(std::memory_order_acquire)) return cycleEvents;
+    UpdateAuditHeartbeat();
 
     // 5. Inline Unhooker Audit
     if (config_.enableUnhooker) {
@@ -167,6 +194,7 @@ std::vector<DetectionEvent> AntiCheatEngine::AuditCycle() {
         cycleEvents.insert(cycleEvents.end(), hookEvents.begin(), hookEvents.end());
     }
     if (!running_.load(std::memory_order_acquire)) return cycleEvents;
+    UpdateAuditHeartbeat();
 
     // 6. Forensics Process & Environment Audit
     if (config_.enableForensics) {
@@ -186,6 +214,7 @@ std::vector<DetectionEvent> AntiCheatEngine::AuditCycle() {
         cycleEvents.insert(cycleEvents.end(), artEvents.begin(), artEvents.end());
     }
     if (!running_.load(std::memory_order_acquire)) return cycleEvents;
+    UpdateAuditHeartbeat();
 
     // 7. DMA Hardware & Bus Latency Check
     if (config_.enableDmaDetection) {
@@ -193,6 +222,7 @@ std::vector<DetectionEvent> AntiCheatEngine::AuditCycle() {
         cycleEvents.insert(cycleEvents.end(), dmaEvents.begin(), dmaEvents.end());
     }
     if (!running_.load(std::memory_order_acquire)) return cycleEvents;
+    UpdateAuditHeartbeat();
 
     // 8. Overlay & ESP/Wallhack Detector (Rendering hooks & fake window scanner)
     if (config_.enableOverlayDetection) {
@@ -200,6 +230,7 @@ std::vector<DetectionEvent> AntiCheatEngine::AuditCycle() {
         cycleEvents.insert(cycleEvents.end(), overlayEvents.begin(), overlayEvents.end());
     }
     if (!running_.load(std::memory_order_acquire)) return cycleEvents;
+    UpdateAuditHeartbeat();
 
     // Process all generated events through threat scoring
     for (const auto& ev : cycleEvents) {
@@ -431,13 +462,23 @@ std::vector<DetectionEvent> AntiCheatEngine::GetDetectionHistory() const {
 void AntiCheatEngine::Start() {
     if (running_.exchange(true)) return;
 
+    last_audit_heartbeat_ms_.store(GetSteadyNowMs(), std::memory_order_release);
+
     thread_pool_.Enqueue([this]() {
         BackgroundLoop();
+    });
+
+    watchdog_thread_ = std::thread([this]() {
+        WatchdogLoop();
     });
 }
 
 void AntiCheatEngine::Stop() {
     if (!running_.exchange(false)) return;
+    freeze_background_loop_for_testing_.store(false, std::memory_order_release);
+    if (watchdog_thread_.joinable()) {
+        watchdog_thread_.join();
+    }
     thread_pool_.Stop();
 }
 
@@ -445,8 +486,20 @@ void AntiCheatEngine::BackgroundLoop() {
     auto lastHeartbeat = std::chrono::steady_clock::now();
     auto lastPanelCheck = std::chrono::steady_clock::now() - std::chrono::seconds(60);
 
-    while (running_.load()) {
+    while (running_.load(std::memory_order_acquire)) {
+        while (freeze_background_loop_for_testing_.load(std::memory_order_acquire) &&
+               running_.load(std::memory_order_acquire)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        if (!running_.load(std::memory_order_acquire)) break;
+
+        if (!freeze_background_loop_for_testing_.load(std::memory_order_acquire)) {
+            last_audit_heartbeat_ms_.store(GetSteadyNowMs(), std::memory_order_release);
+        }
         AuditCycle();
+        if (!freeze_background_loop_for_testing_.load(std::memory_order_acquire)) {
+            last_audit_heartbeat_ms_.store(GetSteadyNowMs(), std::memory_order_release);
+        }
 
         auto now = std::chrono::steady_clock::now();
         if (config_.enableHeartbeat && 
@@ -466,8 +519,44 @@ void AntiCheatEngine::BackgroundLoop() {
 
         int waitMs = jitter(rng);
         auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(waitMs);
-        while (running_.load() && std::chrono::steady_clock::now() < deadline) {
+        while (running_.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < deadline) {
+            if (freeze_background_loop_for_testing_.load(std::memory_order_acquire)) {
+                break;
+            }
+            last_audit_heartbeat_ms_.store(GetSteadyNowMs(), std::memory_order_release);
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+    }
+}
+
+void AntiCheatEngine::UpdateAuditHeartbeat() {
+    if (!freeze_background_loop_for_testing_.load(std::memory_order_acquire)) {
+        last_audit_heartbeat_ms_.store(GetSteadyNowMs(), std::memory_order_release);
+    }
+}
+
+void AntiCheatEngine::WatchdogLoop() {
+    while (running_.load(std::memory_order_acquire)) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        if (!running_.load(std::memory_order_acquire)) break;
+        if (is_banned_.load(std::memory_order_acquire)) break;
+
+        uint64_t now = GetSteadyNowMs();
+        uint64_t last = last_audit_heartbeat_ms_.load(std::memory_order_acquire);
+        if (last > 0 && now > last && (now - last) > 3000) {
+            Logger::Instance().Error("Watchdog detected thread freeze or suspension (> 3000ms heartbeat deadline missed). Flagging tampering.");
+            DetectionEvent ev;
+            ev.type = DetectionType::HEARTBEAT_TAMPERING;
+            ev.severity = Severity::FATAL_BAN;
+            ev.component = "AntiCheatEngine::Watchdog";
+            ev.details = "Watchdog heartbeat timeout: background audit loop frozen or suspended (> 3000ms)";
+            ev.timestamp = static_cast<uint64_t>(std::time(nullptr));
+            ev.threat_score = 100;
+            ProcessDetection(ev);
+            if (!is_banned_.load(std::memory_order_acquire)) {
+                TriggerBan(ev.details, ev.type, ev.component);
+            }
+            break;
         }
     }
 }

@@ -31,7 +31,12 @@ public:
     static MemoryScanner& Instance();
 
     // Enumerate all active virtual memory regions of the current process
-    std::vector<MemoryRegion> QueryMemoryRegions();
+    std::vector<MemoryRegion> QueryMemoryRegions(bool force_refresh = false);
+
+    // Caches memory regions snapshot to eliminate redundant /proc/self/maps reads per cycle
+    void RefreshCache();
+    void ClearCache();
+    bool IsCacheValid() const;
 
     // Check for unbacked executable regions (e.g. manual mapping, shellcode, RWX allocations)
     std::vector<core::DetectionEvent> DetectUnbackedExecutableRegions();
@@ -65,6 +70,12 @@ public:
 
 private:
     MemoryScanner() = default;
+
+    std::vector<MemoryRegion> QueryMemoryRegionsInternal();
+
+    mutable std::mutex cache_mutex_;
+    std::vector<MemoryRegion> cached_regions_;
+    bool cache_valid_{false};
 
     std::mutex state_mutex_;
     std::map<uintptr_t, uintptr_t> seen_exec_regions_; // start -> end

@@ -4,6 +4,9 @@
 #include "noescape/core/obfuscation.hpp"
 #include <sys/ptrace.h>
 #include <sys/prctl.h>
+#include <sys/syscall.h>
+#include <linux/perf_event.h>
+#include <linux/hw_breakpoint.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <dirent.h>
@@ -13,6 +16,8 @@
 #include <algorithm>
 #include <cctype>
 #include <climits>
+#include <cstdint>
+#include <cerrno>
 
 namespace noescape::security {
 
@@ -24,6 +29,44 @@ std::string ToLower(const std::string& str) {
         return static_cast<char>(std::tolower(c));
     });
     return s;
+}
+
+static void __attribute__((noinline, used)) HardwareBpProbeTarget() {}
+
+static bool CheckThreadHwBp(pid_t tid) {
+    int fds[4];
+    int count = 0;
+    bool detected = false;
+
+    for (int i = 0; i < 4; ++i) {
+        struct perf_event_attr pe;
+        std::memset(&pe, 0, sizeof(pe));
+        pe.type = PERF_TYPE_BREAKPOINT;
+        pe.size = sizeof(pe);
+        pe.bp_type = HW_BREAKPOINT_X;
+        pe.bp_addr = reinterpret_cast<uintptr_t>(&HardwareBpProbeTarget);
+        pe.bp_len = sizeof(long);
+        pe.disabled = 1;
+        pe.exclude_kernel = 1;
+        pe.exclude_hv = 1;
+
+        int fd = static_cast<int>(syscall(__NR_perf_event_open, &pe, tid, -1, -1, 0));
+        if (fd >= 0) {
+            fds[count++] = fd;
+        } else {
+            if (errno == ENOSPC || errno == EBUSY) {
+                // Hardware breakpoint debug registers (DR0-DR3) exhausted prematurely
+                detected = true;
+            }
+            break;
+        }
+    }
+
+    for (int i = 0; i < count; ++i) {
+        close(fds[i]);
+    }
+
+    return detected;
 }
 
 } // namespace
@@ -72,31 +115,25 @@ bool AntiDebug::CheckWchanWait() {
 }
 
 bool AntiDebug::CheckHardwareBreakpoints() {
-    // Check all threads in /proc/self/task/ for tracer attachment
+    // 1. Check calling thread
+    if (CheckThreadHwBp(0)) {
+        return true;
+    }
+
+    // 2. Check all other threads in /proc/self/task/
+    pid_t selfTid = static_cast<pid_t>(syscall(SYS_gettid));
     DIR* taskDir = opendir(NOESCAPE_XOR("/proc/self/task"));
     if (taskDir) {
         struct dirent* entry = nullptr;
         while ((entry = readdir(taskDir)) != nullptr) {
-            if (entry->d_type != DT_DIR) continue;
+            if (entry->d_type != DT_DIR && entry->d_type != DT_UNKNOWN) continue;
             std::string tidStr = entry->d_name;
-            if (tidStr.empty() || !std::isdigit(tidStr[0])) continue;
+            if (tidStr.empty() || !std::isdigit(static_cast<unsigned char>(tidStr[0]))) continue;
 
-            std::string statusPath = std::string("/proc/self/task/") + tidStr + "/status";
-            std::ifstream statusFile(statusPath);
-            if (!statusFile.is_open()) continue;
-
-            std::string line;
-            std::string targetPrefix = NOESCAPE_XOR("TracerPid:");
-            while (std::getline(statusFile, line)) {
-                if (line.compare(0, targetPrefix.length(), targetPrefix) == 0) {
-                    std::istringstream iss(line.substr(targetPrefix.length()));
-                    int tracerPid = 0;
-                    if (iss >> tracerPid && tracerPid != 0) {
-                        closedir(taskDir);
-                        return true;
-                    }
-                    break;
-                }
+            pid_t tid = static_cast<pid_t>(std::strtol(tidStr.c_str(), nullptr, 10));
+            if (tid > 0 && tid != selfTid && CheckThreadHwBp(tid)) {
+                closedir(taskDir);
+                return true;
             }
         }
         closedir(taskDir);
@@ -143,7 +180,7 @@ bool AntiDebug::CheckKnownDebuggerProcesses(const std::vector<std::string>& blac
 
     struct dirent* entry = nullptr;
     while ((entry = readdir(procDir)) != nullptr) {
-        if (entry->d_type != DT_DIR) continue;
+        if (entry->d_type != DT_DIR && entry->d_type != DT_UNKNOWN) continue;
 
         // Check if directory name is numeric (PID)
         char* endPtr = nullptr;
@@ -197,6 +234,17 @@ std::vector<core::DetectionEvent> AntiDebug::PerformAudit(const std::vector<std:
         ev.details = "Process is waiting in ptrace_stop state via kernel wchan";
         ev.timestamp = static_cast<uint64_t>(time(nullptr));
         ev.threat_score = 80;
+        events.push_back(ev);
+    }
+
+    if (CheckHardwareBreakpoints()) {
+        core::DetectionEvent ev;
+        ev.type = core::DetectionType::ANTI_DEBUG_HARDWARE_BP;
+        ev.severity = core::Severity::CRITICAL;
+        ev.component = "AntiDebug::HardwareRegisters";
+        ev.details = "Hardware breakpoint detected in CPU debug registers (DR0-DR3)";
+        ev.timestamp = static_cast<uint64_t>(time(nullptr));
+        ev.threat_score = 90;
         events.push_back(ev);
     }
 

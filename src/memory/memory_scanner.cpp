@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <atomic>
 #include <climits>
+#include <set>
 
 #if defined(_WIN32)
 #include <windows.h>
@@ -27,7 +28,7 @@ namespace noescape::memory {
 namespace {
 #if !defined(_WIN32)
     thread_local sigjmp_buf g_scanJmpBuf;
-    thread_local bool g_scanActive = false;
+    thread_local volatile sig_atomic_t g_scanActive = 0;
 
     static struct sigaction g_oldSegv{};
     static struct sigaction g_oldBus{};
@@ -36,7 +37,7 @@ namespace {
 
     void ScanSigHandler(int sig, siginfo_t* info, void* ucontext) {
         if (g_scanActive) {
-            g_scanActive = false;
+            g_scanActive = 0;
             siglongjmp(g_scanJmpBuf, 1);
         }
         if (sig == SIGSEGV && g_guardInstalled.load(std::memory_order_acquire)) {
@@ -69,38 +70,133 @@ namespace {
 
     struct SafeScanGuard {
         std::unique_lock<std::mutex> lock;
-        bool localInstalled{false};
+        bool segvInstalled{false};
+        bool busInstalled{false};
 
         SafeScanGuard() : lock(g_scanGuardMutex) {
             struct sigaction sa{};
             sa.sa_sigaction = ScanSigHandler;
             sa.sa_flags = SA_SIGINFO;
             sigemptyset(&sa.sa_mask);
-            if (sigaction(SIGSEGV, &sa, &g_oldSegv) == 0 &&
-                sigaction(SIGBUS, &sa, &g_oldBus) == 0) {
+            if (sigaction(SIGSEGV, &sa, &g_oldSegv) == 0) {
+                segvInstalled = true;
+            }
+            if (sigaction(SIGBUS, &sa, &g_oldBus) == 0) {
+                busInstalled = true;
+            }
+            if (segvInstalled || busInstalled) {
                 g_guardInstalled.store(true, std::memory_order_release);
-                localInstalled = true;
             }
         }
 
         ~SafeScanGuard() {
-            if (localInstalled) {
-                g_guardInstalled.store(false, std::memory_order_release);
+            g_guardInstalled.store(false, std::memory_order_release);
+            if (segvInstalled) {
                 sigaction(SIGSEGV, &g_oldSegv, nullptr);
+            }
+            if (busInstalled) {
                 sigaction(SIGBUS, &g_oldBus, nullptr);
             }
-            g_scanActive = false;
+            g_scanActive = 0;
         }
     };
 #endif
+
+static bool ScanChunkSafe(uintptr_t chunkStart,
+                          size_t chunkSize,
+                          const std::vector<const CheatSignature*>& applicable,
+                          std::vector<PatternScanner::SignatureMatchResult>& outMatches) {
+#if !defined(_WIN32)
+    unsigned char probe[1];
+    static const size_t pageSize = []() {
+        long sz = sysconf(_SC_PAGESIZE);
+        return (sz > 0) ? static_cast<size_t>(sz) : 4096UL;
+    }();
+    uintptr_t pageMask = ~(pageSize - 1);
+    uintptr_t pageStart = chunkStart & pageMask;
+    uintptr_t pageEnd = (chunkStart + chunkSize - 1) & pageMask;
+
+    if (mincore(reinterpret_cast<void*>(pageStart), pageSize, probe) != 0 ||
+        (pageEnd > pageStart && mincore(reinterpret_cast<void*>(pageEnd), pageSize, probe) != 0)) {
+        return false;
+    }
+
+    if (sigsetjmp(g_scanJmpBuf, 1) != 0) {
+        g_scanActive = 0;
+        return false;
+    }
+    g_scanActive = 1;
+    outMatches = PatternScanner::ScanSignatures(
+        reinterpret_cast<const uint8_t*>(chunkStart),
+        chunkSize,
+        applicable,
+        chunkStart,
+        16
+    );
+    g_scanActive = 0;
+    return true;
+#else
+    __try {
+        outMatches = PatternScanner::ScanSignatures(
+            reinterpret_cast<const uint8_t*>(chunkStart),
+            chunkSize,
+            applicable,
+            chunkStart,
+            16
+        );
+        return true;
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+#endif
 }
+
+} // namespace
 
 MemoryScanner& MemoryScanner::Instance() {
     static MemoryScanner* instance = new MemoryScanner();
     return *instance;
 }
 
-std::vector<MemoryRegion> MemoryScanner::QueryMemoryRegions() {
+void MemoryScanner::RefreshCache() {
+    auto regions = QueryMemoryRegionsInternal();
+    std::lock_guard<std::mutex> lock(cache_mutex_);
+    cached_regions_ = std::move(regions);
+    cache_valid_ = true;
+}
+
+void MemoryScanner::ClearCache() {
+    std::lock_guard<std::mutex> lock(cache_mutex_);
+    cached_regions_.clear();
+    cache_valid_ = false;
+}
+
+bool MemoryScanner::IsCacheValid() const {
+    std::lock_guard<std::mutex> lock(cache_mutex_);
+    return cache_valid_;
+}
+
+std::vector<MemoryRegion> MemoryScanner::QueryMemoryRegions(bool force_refresh) {
+    if (!force_refresh) {
+        std::lock_guard<std::mutex> lock(cache_mutex_);
+        if (cache_valid_) {
+            return cached_regions_;
+        }
+    }
+
+    auto regions = QueryMemoryRegionsInternal();
+
+    {
+        std::lock_guard<std::mutex> lock(cache_mutex_);
+        if (cache_valid_) {
+            cached_regions_ = regions;
+        }
+    }
+
+    return regions;
+}
+
+std::vector<MemoryRegion> MemoryScanner::QueryMemoryRegionsInternal() {
     std::vector<MemoryRegion> regions;
 
 #if defined(_WIN32)
@@ -223,10 +319,20 @@ std::vector<core::DetectionEvent> MemoryScanner::DetectUnbackedExecutableRegions
             break;
         }
     }
+#if defined(NOESCAPE_SECURE_BUILD) || defined(NDEBUG)
+    const char* testEnv = std::getenv("NOESCAPE_TEST_MODE");
+    if (testEnv && (std::strcmp(testEnv, "1") == 0 || strcasecmp(testEnv, "true") == 0)) {
+        const char* allowJitEnv = std::getenv("NOESCAPE_ALLOW_JIT");
+        if (allowJitEnv && (std::strcmp(allowJitEnv, "1") == 0 || strcasecmp(allowJitEnv, "true") == 0)) {
+            isJitRuntime = true;
+        }
+    }
+#else
     const char* allowJitEnv = std::getenv("NOESCAPE_ALLOW_JIT");
     if (allowJitEnv && (std::strcmp(allowJitEnv, "1") == 0 || strcasecmp(allowJitEnv, "true") == 0)) {
         isJitRuntime = true;
     }
+#endif
 
     for (const auto& r : regions) {
         if (!r.executable) continue;
@@ -392,7 +498,6 @@ std::vector<core::DetectionEvent> MemoryScanner::ScanSignatures(const std::vecto
         // Non-executable heap and thread stacks contain normal runtime allocations, local variables,
         // and string tables. Skip non-executable heap/stack regions to eliminate false positives.
         if (!r.executable && (r.pathname == "[heap]" || r.pathname.rfind("[stack", 0) == 0)) continue;
-        if (r.size > 32 * 1024 * 1024) continue;
 
         const bool genuineFile = r.is_backed_by_file && !r.pathname.empty() && r.pathname[0] == '/' &&
                                  r.pathname.find("(deleted)") == std::string::npos;
@@ -407,77 +512,66 @@ std::vector<core::DetectionEvent> MemoryScanner::ScanSignatures(const std::vecto
         }
         if (applicable.empty()) continue;
 
-        std::vector<PatternScanner::SignatureMatchResult> matches;
+        // Chunk large memory blocks into safe segments (8MB) to prevent cheats hiding in >32MB allocations
+        constexpr size_t kChunkSize = 8 * 1024 * 1024; // 8 MB safe chunk size
+        constexpr size_t kOverlap = 4096;              // 4 KB page overlap to guarantee boundary signatures are detected
 
-#if !defined(_WIN32)
-        unsigned char probe[1];
-        if (mincore(reinterpret_cast<void*>(r.start), 4096, probe) != 0 ||
-            (r.size > 4096 && mincore(reinterpret_cast<void*>(r.end - 4096), 4096, probe) != 0)) {
-            continue;
-        }
+        size_t offset = 0;
+        std::set<std::pair<uintptr_t, const CheatSignature*>> seenMatches;
 
-        if (sigsetjmp(g_scanJmpBuf, 1) != 0) {
-            // Memory region unmapped or faulted concurrently; safely skip
-            g_scanActive = false;
-            continue;
-        }
-        g_scanActive = true;
-#endif
+        while (offset < r.size) {
+            size_t currentChunkSize = std::min(kChunkSize, r.size - offset);
+            uintptr_t chunkStart = r.start + offset;
 
-#if defined(_WIN32)
-        __try {
-            matches = PatternScanner::ScanSignatures(
-                reinterpret_cast<const uint8_t*>(r.start),
-                r.size,
-                applicable,
-                r.start,
-                16
-            );
-        } __except(EXCEPTION_EXECUTE_HANDLER) {
-            continue;
-        }
-#else
-        matches = PatternScanner::ScanSignatures(
-            reinterpret_cast<const uint8_t*>(r.start),
-            r.size,
-            applicable,
-            r.start,
-            16
-        );
-        g_scanActive = false;
-#endif
+            std::vector<PatternScanner::SignatureMatchResult> matches;
+            if (!ScanChunkSafe(chunkStart, currentChunkSize, applicable, matches)) {
+                if (currentChunkSize <= kOverlap || offset + currentChunkSize >= r.size) break;
+                offset += (currentChunkSize - kOverlap);
+                continue;
+            }
 
-        for (const auto& match : matches) {
-            if (!match.signature) continue;
-            const auto& sig = *match.signature;
+            for (const auto& match : matches) {
+                if (!match.signature) continue;
+                const auto& sig = *match.signature;
 
-            // Discard any match that falls within the anti-cheat's own signature table memory
-            bool isSelfMatch = false;
-            for (const auto& span : internalSpans) {
-                if (match.address < span.second && (match.address + sig.Length()) > span.first) {
-                    isSelfMatch = true;
-                    break;
+                // Deduplicate matches that fall in chunk overlap boundary
+                if (!seenMatches.insert({match.address, match.signature}).second) {
+                    continue;
                 }
-            }
-            if (isSelfMatch) continue;
 
-            core::DetectionEvent ev;
-            ev.type = core::DetectionType::MEMORY_SIGNATURE_MATCH;
-            ev.severity = sig.GetSeverity();
-            ev.threat_score = sig.GetThreatScore();
-            ev.component = std::string("MemoryScanner::") + CheatSignature::CategoryToString(sig.GetCategory());
+                // Discard any match that falls within the anti-cheat's own signature table memory
+                bool isSelfMatch = false;
+                for (const auto& span : internalSpans) {
+                    if (match.address < span.second && (match.address + sig.Length()) > span.first) {
+                        isSelfMatch = true;
+                        break;
+                    }
+                }
+                if (isSelfMatch) continue;
 
-            std::ostringstream ss;
-            ss << "[" << CheatSignature::CategoryToString(sig.GetCategory()) << "] "
-               << "Blacklisted signature matched: " << sig.GetName()
-               << " at address 0x" << std::hex << match.address
-               << " (Region: " << (r.pathname.empty() ? "[anon]" : r.pathname) << ")";
-            if (!sig.GetDescription().empty()) {
-                ss << " - " << sig.GetDescription();
+                core::DetectionEvent ev;
+                ev.type = core::DetectionType::MEMORY_SIGNATURE_MATCH;
+                ev.severity = sig.GetSeverity();
+                ev.threat_score = sig.GetThreatScore();
+                ev.component = std::string("MemoryScanner::") + CheatSignature::CategoryToString(sig.GetCategory());
+
+                std::ostringstream ss;
+                ss << "[" << CheatSignature::CategoryToString(sig.GetCategory()) << "] "
+                   << "Blacklisted signature matched: " << sig.GetName()
+                   << " at address 0x" << std::hex << match.address
+                   << " (Region: " << (r.pathname.empty() ? "[anon]" : r.pathname) << ")";
+                if (!sig.GetDescription().empty()) {
+                    ss << " - " << sig.GetDescription();
+                }
+                ev.details = ss.str();
+                ev.timestamp = static_cast<uint64_t>(std::time(nullptr));
+                events.push_back(ev);
             }
-            ev.details = ss.str();
-            ev.timestamp = static_cast<uint64_t>(std::time(nullptr));
-            events.push_back(ev);
+
+            if (currentChunkSize <= kOverlap || offset + currentChunkSize >= r.size) {
+                break;
+            }
+            offset += (currentChunkSize - kOverlap);
         }
     }
 
@@ -603,6 +697,10 @@ std::vector<core::DetectionEvent> MemoryScanner::DetectSleepingPayloads() {
 }
 
 std::vector<core::DetectionEvent> MemoryScanner::PerformAudit(const std::vector<CheatSignature>& signatures) {
+    bool hadCache = IsCacheValid();
+    if (!hadCache) {
+        RefreshCache();
+    }
     auto events = DetectUnbackedExecutableRegions();
     auto sigEvents = ScanSignatures(signatures);
     events.insert(events.end(), sigEvents.begin(), sigEvents.end());
@@ -610,10 +708,17 @@ std::vector<core::DetectionEvent> MemoryScanner::PerformAudit(const std::vector<
     events.insert(events.end(), modEvents.begin(), modEvents.end());
     auto sleepEvents = DetectSleepingPayloads();
     events.insert(events.end(), sleepEvents.begin(), sleepEvents.end());
+    if (!hadCache) {
+        ClearCache();
+    }
     return events;
 }
 
 std::vector<core::DetectionEvent> MemoryScanner::PerformAudit(const std::vector<Pattern>& patterns) {
+    bool hadCache = IsCacheValid();
+    if (!hadCache) {
+        RefreshCache();
+    }
     auto events = DetectUnbackedExecutableRegions();
     auto sigEvents = ScanSignatures(patterns);
     events.insert(events.end(), sigEvents.begin(), sigEvents.end());
@@ -621,6 +726,9 @@ std::vector<core::DetectionEvent> MemoryScanner::PerformAudit(const std::vector<
     events.insert(events.end(), modEvents.begin(), modEvents.end());
     auto sleepEvents = DetectSleepingPayloads();
     events.insert(events.end(), sleepEvents.begin(), sleepEvents.end());
+    if (!hadCache) {
+        ClearCache();
+    }
     return events;
 }
 

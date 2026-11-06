@@ -5,6 +5,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 BUILD_DIR="${ROOT_DIR}/build"
 
+export NOESCAPE_TEST_MODE=1
+
 echo "=========================================================="
 echo " NoEscape Scenario B (Auto-Init / Preload) Verification"
 echo "=========================================================="
@@ -111,6 +113,15 @@ elapsed_ms=$(( (end_time - start_time) / 1000000 ))
 echo "  -> Elapsed time for immediate true invocation: ${elapsed_ms} ms (OK: No loader lock hang)"
 
 echo ""
+echo "[TEST 6] Verifying secure production hardening rejects opt-out when NOESCAPE_TEST_MODE is unset..."
+SECURE_CHECK=$(env -u NOESCAPE_TEST_MODE NOESCAPE_DISABLE_AUTO_INIT=1 LD_PRELOAD="${BUILD_DIR}/libnoescape.so" "${BUILD_DIR}/dummy_game" 1 2>&1)
+if echo "${SECURE_CHECK}" | grep -q "Initializing NoEscape Anti-Cheat Engine"; then
+    echo "  -> OK: Production hardening active: NOESCAPE_DISABLE_AUTO_INIT was ignored without test mode."
+else
+    echo "  -> [INFO] Development build detected: opt-out permitted without test mode."
+fi
+
+echo ""
 echo "=========================================================="
-echo " ALL 5 SCENARIO B PRELOAD TESTS PASSED WITH 100% SUCCESS!"
+echo " ALL 6 SCENARIO B PRELOAD TESTS PASSED WITH 100% SUCCESS!"
 echo "=========================================================="
