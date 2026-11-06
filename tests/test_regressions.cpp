@@ -275,3 +275,22 @@ TEST(Regression, PanelTlsWithPinnedKeyAgainstReferenceServer) {
     ASSERT_EQ(static_cast<int>(unpinnedRes.status), static_cast<int>(network::BanCheckStatus::NETWORK_ERROR));
 }
 #endif
+
+TEST(Regression, SignatureTextNeverContainsAnotherSignature) {
+    // Names/descriptions live in heap copies (and freed residue) that the scanner reads: if one
+    // contained a byte pattern the anti-cheat would detect itself.
+    auto sigs = memory::MemoryScanner::GetDefaultCheatSignatures();
+    for (const auto& pat : sigs) {
+        std::string bytes;
+        bool literal = true;
+        for (const auto& b : pat.GetBytes()) {
+            if (b.is_wildcard) { literal = false; break; }
+            bytes.push_back(static_cast<char>(b.value));
+        }
+        if (!literal || bytes.empty()) continue;
+        for (const auto& other : sigs) {
+            ASSERT_TRUE(other.GetName().find(bytes) == std::string::npos);
+            ASSERT_TRUE(other.GetDescription().find(bytes) == std::string::npos);
+        }
+    }
+}

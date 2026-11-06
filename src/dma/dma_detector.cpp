@@ -40,7 +40,7 @@ inline uint64_t ReadTsc() {
 #endif
 }
 
-inline void MemoryBarrier() {
+inline void FullFence() {
 #if defined(__x86_64__) || defined(_M_X64)
     _mm_mfence();
 #elif defined(__GNUC__)
@@ -77,17 +77,17 @@ uint64_t DmaDetector::MeasureBufferTraversal() {
     }
 #endif
 
-    MemoryBarrier();
+    FullFence();
     uint64_t t0 = ReadTsc();
-    MemoryBarrier();
+    FullFence();
 
     for (size_t i = 0; i < size; i += stride) {
         sink += ptr[i];
     }
 
-    MemoryBarrier();
+    FullFence();
     uint64_t t1 = ReadTsc();
-    MemoryBarrier();
+    FullFence();
 
     (void)sink;
     return (t1 > t0) ? (t1 - t0) : 0;
