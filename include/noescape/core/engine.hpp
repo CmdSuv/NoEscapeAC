@@ -88,7 +88,6 @@ private:
     std::atomic<uint64_t> last_heavy_scan_ms_{0};
     std::atomic<bool> freeze_background_loop_for_testing_{false};
 
-    ThreadPool thread_pool_;
     network::PanelClient panel_client_;
     kinematics::AimAnalyzer aim_analyzer_;
     kinematics::PhantomMonitor phantom_monitor_;
@@ -113,6 +112,7 @@ private:
     void NetworkLoop();
     uint32_t panel_failures_{0};
 
+    std::thread background_thread_;
     std::thread watchdog_thread_;
     std::thread network_thread_;
     std::atomic<uint64_t> last_audit_heartbeat_ms_{0};

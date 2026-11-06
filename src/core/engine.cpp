@@ -47,7 +47,6 @@ uint64_t GetSteadyNowMs() {
 
 AntiCheatEngine::AntiCheatEngine(EngineConfig config)
     : config_(std::move(config)),
-      thread_pool_(2),
       panel_client_(config_.panelUrl, config_.secretKey, config_.panelPinSha256),
       aim_analyzer_(64) {}
 
@@ -533,9 +532,8 @@ void AntiCheatEngine::Start() {
     // Background audits scan incrementally (256 MiB per cycle) so frame-time cost stays bounded
     memory::MemoryScanner::Instance().SetScanBudget(256u << 20);
 
-    thread_pool_.Enqueue([this]() {
-        BackgroundLoop();
-    });
+    // Dedicated thread (not a pool): the engine can be Stop()ped and Start()ed again
+    background_thread_ = std::thread([this]() { BackgroundLoop(); });
 
     // Network I/O (DNS, connect, recv) must never stall the audit loop or the watchdog
     if (config_.enableHeartbeat || config_.verifyPanelBan) {
@@ -557,7 +555,9 @@ void AntiCheatEngine::Stop() {
     if (network_thread_.joinable()) {
         network_thread_.join();
     }
-    thread_pool_.Stop();
+    if (background_thread_.joinable()) {
+        background_thread_.join();
+    }
     memory::MemoryScanner::Instance().SetProgressCallback(nullptr);
     memory::MemoryScanner::Instance().SetScanBudget(0);
 }

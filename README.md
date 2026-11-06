@@ -88,6 +88,16 @@ cmake --build build -j$(nproc)
 
 ---
 
+### ⚖️ What this is — and is not
+
+NoEscapeAC is a **user-mode (Ring-3) detection and deterrence layer**. It runs with the same privileges as the game, so be realistic about its limits:
+
+- A cheat running *inside* the process (or with higher privileges: kernel drivers, hypervisors, DMA hardware) can in principle tamper with any client-side check. Self-integrity, hook and memory checks raise the cost; they do not make bypass impossible.
+- Purely **external, read-only** cheats (most ESP/radar tools) cannot be observed from user mode at all.
+- Pattern/name based detections are signatures: they catch off-the-shelf tools and lazy modifications, not custom builds.
+- Therefore the client should be one signal among several. For competitive titles, pair it with **server-side** validation (fog-of-war culling, movement/aim statistics, mandatory signed heartbeats) and treat client reports as evidence, not verdicts.
+- Roll new rules out in *report-only* mode first (`enforce_ban = false`) and watch false-positive telemetry before enabling bans.
+
 ### 🔐 Integration Notes
 
 - **Always set a unique `secret_key` and `panel_url`.** The built-in default key is public; a warning is logged when it is used.
