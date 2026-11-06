@@ -379,7 +379,7 @@ TEST(Phase3, SignedPanelProtocolAgainstReferenceServer) {
     ev.component = "Test";
     ev.details = "path \"C:\\x\" line\nbreak";
     ASSERT_TRUE(good.SendBanReport(ev, 100));
-    std::system("pkill -f 'reference_server.py 18431' >/dev/null 2>&1");
+    (void)!std::system("pkill -f 'reference_server.py 18431' >/dev/null 2>&1");
     std::this_thread::sleep_for(std::chrono::milliseconds(300));
 
     // Server 2: this device is globally banned
@@ -387,7 +387,7 @@ TEST(Phase3, SignedPanelProtocolAgainstReferenceServer) {
     ASSERT_EQ(std::system(cmd.c_str()), 0);
     std::this_thread::sleep_for(std::chrono::milliseconds(700));
     ASSERT_EQ(static_cast<int>(good.QueryBanStatus().status), static_cast<int>(network::BanCheckStatus::BANNED));
-    std::system("pkill -f 'reference_server.py 18431' >/dev/null 2>&1");
+    (void)!std::system("pkill -f 'reference_server.py 18431' >/dev/null 2>&1");
 
     // Unreachable server: never reported clean
     std::this_thread::sleep_for(std::chrono::milliseconds(300));

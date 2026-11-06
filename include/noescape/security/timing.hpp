@@ -3,6 +3,7 @@
 #include <chrono>
 #include <optional>
 #include <cstdint>
+#include <mutex>
 #include "noescape/core/types.hpp"
 
 namespace noescape::security {
@@ -17,14 +18,16 @@ public:
     // Checks current delta ratio against baseline
     std::optional<core::DetectionEvent> CheckSpeedhack();
 
-    double GetCyclesPerMs() const { return cycles_per_ms_; }
-    bool IsCalibrated() const { return calibrated_; }
+    double GetCyclesPerMs() const { std::lock_guard<std::mutex> l(mutex_); return cycles_per_ms_; }
+    bool IsCalibrated() const { std::lock_guard<std::mutex> l(mutex_); return calibrated_; }
 
 private:
     TimingIntegrity() = default;
 
     uint64_t ReadHardwareTsc() const;
 
+    mutable std::mutex mutex_;
+    bool CalibrateLocked(uint32_t calibrationMs);
     bool calibrated_{false};
     double cycles_per_ms_{0.0};
     uint64_t last_tsc_{0};

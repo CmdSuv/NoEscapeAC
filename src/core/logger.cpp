@@ -57,6 +57,17 @@ void Logger::Error(const std::string& msg) {
     PrintFormatted("ERROR", "\033[31m", msg);
 }
 
+namespace {
+std::string StripControl(const std::string& in) {
+    std::string out = in;
+    for (char& c : out) {
+        unsigned char u = static_cast<unsigned char>(c);
+        if (u < 0x20 || u == 0x7f) c = '?'; // blocks terminal escape / log-line injection
+    }
+    return out;
+}
+} // namespace
+
 void Logger::SecurityAlert(const DetectionEvent& event) {
     AlertCallback cb;
     {
@@ -65,7 +76,7 @@ void Logger::SecurityAlert(const DetectionEvent& event) {
         ss << "\033[1;31m[SECURITY ALERT: " << DetectionEvent::TypeToString(event.type)
            << " | SEVERITY: " << DetectionEvent::SeverityToString(event.severity)
            << " | SCORE: +" << event.threat_score << "]\033[0m "
-           << "Component: " << event.component << " - " << event.details;
+           << "Component: " << StripControl(event.component) << " - " << StripControl(event.details);
         PrintFormatted("ALERT", "\033[41;37m", ss.str());
         cb = alert_cb_;
     }

@@ -1,5 +1,6 @@
 #include "noescape/forensics/process_analyzer.hpp"
 #include "noescape/core/obfuscation.hpp"
+#include "noescape/core/envutil.hpp"
 #include <algorithm>
 #include <cctype>
 #include <cstring>
@@ -56,12 +57,12 @@ bool ProcessAnalyzer::CheckCurrentProcessEnvironment() {
             std::string item = token.substr(first, (last - first + 1));
             if (item.empty()) continue;
 
-            bool itemSafe = (item.find("libextest.so") != std::string::npos ||
-                             item.find("libgamemode") != std::string::npos ||
-                             item.find("libmangohud") != std::string::npos ||
-                             item.find("libvkbasalt") != std::string::npos ||
-                             item.find("libnoescape") != std::string::npos ||
-                             item.find("noescape") != std::string::npos);
+            std::string base = core::BaseName(item);
+            bool itemSafe = false;
+            for (const char* ok : {"libextest.so", "libgamemode", "libmangohud", "libvkbasalt",
+                                   "libnoescape", "gameoverlayrenderer", "libsteam"}) {
+                if (base.rfind(ok, 0) == 0) { itemSafe = true; break; }
+            }
             if (!itemSafe) {
                 return false;
             }
@@ -189,6 +190,7 @@ std::vector<ProcessRecord> ProcessAnalyzer::EnumerateProcesses() {
                                             lowerVal.find("libgamemode") != std::string::npos ||
                                             lowerVal.find("libmangohud") != std::string::npos ||
                                             lowerVal.find("libvkbasalt") != std::string::npos ||
+                                            lowerVal.find("gameoverlayrenderer") != std::string::npos ||
                                             lowerVal.find("libeatmydata") != std::string::npos ||
                                             lowerVal.find("libfakeroot") != std::string::npos);
                         bool isSuspiciousLocation = (lowerVal.find("/dev/shm") != std::string::npos ||
@@ -244,8 +246,9 @@ std::vector<core::DetectionEvent> ProcessAnalyzer::AuditProcesses(
         // 1. Blacklisted process name or path
         for (const auto& bl : blacklist) {
             std::string lowerBl = ToLower(bl);
-            if (!lowerBl.empty() && 
-                (lowerName.find(lowerBl) != std::string::npos || lowerPath.find(lowerBl) != std::string::npos)) {
+            if (!lowerBl.empty() &&
+                (core::NameMatchesEntry(lowerName, lowerBl) ||
+                 core::NameMatchesEntry(core::BaseName(lowerPath), lowerBl))) {
                 core::DetectionEvent ev;
                 ev.type = core::DetectionType::SUSPICIOUS_PROCESS_DETECTED;
                 ev.severity = core::Severity::HIGH;
@@ -274,27 +277,36 @@ std::vector<core::DetectionEvent> ProcessAnalyzer::AuditProcesses(
 
                 core::DetectionEvent ev;
                 ev.type = core::DetectionType::SUSPICIOUS_PROCESS_DETECTED;
-                ev.severity = core::Severity::HIGH;
+                ev.severity = core::Severity::MEDIUM;
                 ev.component = "ProcessAnalyzer::CmdlineInspection";
                 ev.details = "Suspicious commandline injection argument found in PID " +
-                             std::to_string(proc.pid) + ": " + proc.cmdline;
+                             std::to_string(proc.pid) + ": matched '" + cmdBl + "'";
                 ev.timestamp = static_cast<uint64_t>(std::time(nullptr));
-                ev.threat_score = 75;
+                ev.threat_score = 40;
                 events.push_back(ev);
                 break;
             }
         }
 
         // 3. Executed binary deleted from disk (Anti-Forensics trick)
-        if (proc.is_deleted_binary) {
+        // A binary deleted by a package upgrade (or runc/Chrome re-exec via memfd) is routine; only
+        // executables running from volatile locations are a meaningful anti-forensics signal.
+        const bool volatileExe = lowerPath.rfind("/dev/shm", 0) == 0 || lowerPath.rfind("/tmp", 0) == 0 ||
+                                 lowerPath.rfind("/var/tmp", 0) == 0 || lowerPath.rfind("/memfd:", 0) == 0;
+        const bool benignExe = lowerPath.find("runc") != std::string::npos ||
+                               lowerPath.find("memfd:libffi") != std::string::npos ||
+                               lowerPath.find("memfd:chrome") != std::string::npos ||
+                               lowerPath.find("memfd:snapd") != std::string::npos ||
+                               lowerPath.find("memfd:sbx") != std::string::npos;
+        if (proc.is_deleted_binary && volatileExe && !benignExe) {
             core::DetectionEvent ev;
             ev.type = core::DetectionType::FORENSICS_ARTIFACT_DETECTED;
-            ev.severity = core::Severity::CRITICAL;
+            ev.severity = core::Severity::HIGH;
             ev.component = "ProcessAnalyzer::AntiForensics";
             ev.details = "Process executing unlinked memory-ghosted/deleted executable: PID " +
                          std::to_string(proc.pid) + " (" + proc.path + ")";
             ev.timestamp = static_cast<uint64_t>(std::time(nullptr));
-            ev.threat_score = 85;
+            ev.threat_score = 50;
             events.push_back(ev);
         }
 

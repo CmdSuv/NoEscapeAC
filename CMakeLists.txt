@@ -5,12 +5,23 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+option(NOESCAPE_WERROR "Treat warnings as errors (CI only; breaks on newer toolchains)" OFF)
 # Optimization & Compiler Flags
 if(MSVC)
-    add_compile_options(/W4 /arch:AVX2 /permissive- /utf-8 /EHsc /WX)
+    add_compile_options(/W4 /arch:AVX2 /permissive- /utf-8 /EHsc)
     add_compile_definitions(_CRT_SECURE_NO_WARNINGS)
 else()
-    add_compile_options(-O3 -Wall -Wextra -Werror -Wno-unused-parameter -mavx2 -msse2 -pthread)
+    # AVX2 is selected at runtime inside the pattern scanner (target attribute + cpu check);
+    # never compile the whole library with -mavx2 or it faults on CPUs without AVX2.
+    add_compile_options(-O3 -Wall -Wextra -Wno-unused-parameter -pthread)
+endif()
+
+if(NOESCAPE_WERROR)
+    if(MSVC)
+        add_compile_options(/WX)
+    else()
+        add_compile_options(-Werror)
+    endif()
 endif()
 
 # Strict Production Build Flag (strips environment overrides)
@@ -89,9 +100,12 @@ endif()
 # Vanguard Ban UI Helper executable
 add_custom_target(noescape_ban_ui ALL
     COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_CURRENT_SOURCE_DIR}/tools/noescape_ban_ui.py ${CMAKE_CURRENT_BINARY_DIR}/noescape_ban_ui
-    COMMAND chmod +x ${CMAKE_CURRENT_BINARY_DIR}/noescape_ban_ui
-    COMMENT "Installing Vanguard Ban UI executable into build tree"
+    COMMENT "Installing ban UI helper into build tree"
 )
+if(NOT WIN32)
+    add_custom_command(TARGET noescape_ban_ui POST_BUILD
+        COMMAND chmod +x ${CMAKE_CURRENT_BINARY_DIR}/noescape_ban_ui)
+endif()
 
 # Comprehensive Unit Test Suite
 set(TEST_SOURCES
@@ -111,6 +125,7 @@ set(TEST_SOURCES
     tests/test_blackbox.cpp
     tests/test_audit_remediation.cpp
     tests/test_signatures.cpp
+    tests/test_regressions.cpp
 )
 
 add_executable(noescape_tests ${TEST_SOURCES})

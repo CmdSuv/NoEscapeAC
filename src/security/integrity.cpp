@@ -122,6 +122,7 @@ bool IntegrityChecker::LocateTextSection(uintptr_t& outStart, size_t& outSize) {
 }
 
 bool IntegrityChecker::Initialize() {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (initialized_) return true;
 
     if (!LocateTextSection(text_start_, text_size_)) {
@@ -143,6 +144,7 @@ std::string IntegrityChecker::ComputeCurrentTextHash() const {
 }
 
 std::optional<core::DetectionEvent> IntegrityChecker::VerifyIntegrity() {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (!initialized_) {
         if (!Initialize()) return std::nullopt;
     }

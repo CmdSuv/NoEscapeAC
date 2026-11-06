@@ -42,9 +42,19 @@ std::optional<core::DetectionEvent> AimAnalyzer::PushSample(const AngleSample& s
     AngleSample s = sample;
     if (!history_.empty()) {
         if (s.timestamp_ms < history_.back().timestamp_ms) {
-            // Drop out-of-order timestamps
-            return std::nullopt;
+            if (history_.back().timestamp_ms - s.timestamp_ms < 1000) {
+                // Minor out-of-order sample: drop it
+                return std::nullopt;
+            }
+            // Clock reset (level load / timer restart): start a fresh trajectory instead of
+            // silently discarding every future sample.
+            history_.clear();
+        } else if (s.timestamp_ms - history_.back().timestamp_ms > 500) {
+            // Long gap (pause, alt-tab, respawn, camera cut): trajectories must not span it
+            history_.clear();
         }
+    }
+    if (!history_.empty()) {
         if (s.timestamp_ms == history_.back().timestamp_ms) {
             // High-polling rate sub-millisecond mouse event: assign micro-increment
             s.timestamp_ms = history_.back().timestamp_ms + 1;
@@ -112,7 +122,7 @@ std::optional<core::DetectionEvent> AimAnalyzer::CheckInstantSnap() {
 
         core::DetectionEvent ev;
         ev.type = core::DetectionType::KINEMATICS_AIMBOT_SNAP;
-        ev.severity = core::Severity::FATAL_BAN;
+        ev.severity = core::Severity::HIGH; // a single frame-paced flick-and-stop is plausible for humans
         ev.component = "Kinematics::SnapDetector";
 
         std::ostringstream ss;
@@ -121,7 +131,7 @@ std::optional<core::DetectionEvent> AimAnalyzer::CheckInstantSnap() {
            << dist2 << " deg, jerk=" << jerk << " deg/s^3)";
         ev.details = ss.str();
         ev.timestamp = static_cast<uint64_t>(std::time(nullptr));
-        ev.threat_score = 100;
+        ev.threat_score = 60;
         return ev;
     }
 
@@ -145,6 +155,10 @@ std::optional<core::DetectionEvent> AimAnalyzer::CheckPerfectLinearity() {
     float lineLenSq = vP * vP + vY * vY;
 
     if (lineLenSq < 1.0f) return std::nullopt;
+
+    // Pure horizontal/vertical sweeps (gamepad stick, low-sens mouse panning) are trivially "linear"
+    // for humans; only diagonal trajectories carry signal.
+    if (std::min(std::abs(vP), std::abs(vY)) < 1.0f) return std::nullopt;
 
     std::vector<float> perpDists;
     perpDists.reserve(min_samples_);
@@ -176,7 +190,7 @@ std::optional<core::DetectionEvent> AimAnalyzer::CheckPerfectLinearity() {
     if (varPerp < linearity_threshold_ && maxPerp < 0.10f) {
         core::DetectionEvent ev;
         ev.type = core::DetectionType::KINEMATICS_PERFECT_LINEARITY;
-        ev.severity = core::Severity::CRITICAL;
+        ev.severity = core::Severity::HIGH;
         ev.component = "Kinematics::LinearityAnalyzer";
 
         std::ostringstream ss;
@@ -185,7 +199,7 @@ std::optional<core::DetectionEvent> AimAnalyzer::CheckPerfectLinearity() {
            << ", max_deviation=" << maxPerp << " deg";
         ev.details = ss.str();
         ev.timestamp = static_cast<uint64_t>(std::time(nullptr));
-        ev.threat_score = 90;
+        ev.threat_score = 60;
         return ev;
     }
 
@@ -214,6 +228,12 @@ std::optional<core::DetectionEvent> AimAnalyzer::CheckArtificialSmoothing() {
 
     if (velocities.size() < 6 || totalMovement < 8.0f) {
         return std::nullopt;
+    }
+    {
+        const auto& st = history_[n - min_samples_];
+        float nP = history_.back().pitch - st.pitch;
+        float nY = NormalizeAngleDelta(history_.back().yaw - st.yaw);
+        if (std::min(std::abs(nP), std::abs(nY)) < 1.0f) return std::nullopt; // axis-aligned sweep
     }
 
     double meanVel = std::accumulate(velocities.begin(), velocities.end(), 0.0) / velocities.size();
