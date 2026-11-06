@@ -1,5 +1,6 @@
 #pragma once
 #include <functional>
+#include <atomic>
 
 #include <string>
 #include <vector>
@@ -69,6 +70,15 @@ public:
     static std::vector<CheatSignature> GetDefaultCheatSignatures();
     static std::vector<Pattern> GetDefaultCheatPatterns();
 
+    // Limits how many bytes one ScanSignatures() pass reads (0 = unlimited, the default).
+    // With a budget the scan becomes incremental and resumes where the previous pass stopped,
+    // which bounds the cost of every audit cycle regardless of the host's memory size.
+    void SetScanBudget(size_t bytes_per_pass);
+
+    // Declares that the host legitimately generates code at runtime (embedded JIT)
+    void SetHostUsesJit(bool v) { host_uses_jit_.store(v); }
+    bool HostUsesJit() const { return host_uses_jit_.load(); }
+
     // Called after each scanned chunk so callers (watchdog) can see forward progress
     void SetProgressCallback(std::function<void()> cb) {
         std::lock_guard<std::mutex> l(cache_mutex_);
@@ -77,6 +87,7 @@ public:
 
 private:
     std::function<void()> progress_cb_;
+    std::atomic<bool> host_uses_jit_{false};
     int cache_users_{0};
     MemoryScanner() = default;
 
@@ -87,6 +98,8 @@ private:
     bool cache_valid_{false};
 
     std::mutex state_mutex_;
+    size_t scan_budget_bytes_{0};
+    uintptr_t scan_cursor_{0};
     std::map<uintptr_t, uintptr_t> seen_exec_regions_; // start -> end
     size_t module_cursor_{0};
 };

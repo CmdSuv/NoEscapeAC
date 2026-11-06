@@ -2,6 +2,8 @@
 #include "noescape/network/crypto_util.hpp"
 #include "noescape/core/obfuscation.hpp"
 
+#include <cstring>
+
 #if defined(_WIN32)
 #include <windows.h>
 #else

@@ -1,17 +1,31 @@
 #include "noescape/network/panel_client.hpp"
 #include "noescape/network/crypto_util.hpp"
-#include <sstream>
-#include <ctime>
-#include <cstring>
-#include <chrono>
+
+#include <algorithm>
 #include <cctype>
+#include <chrono>
+#include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <ctime>
+#include <mutex>
+#include <random>
+#include <sstream>
+#include <vector>
 
 #if defined(_WIN32)
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <windows.h>
+#include <winhttp.h>
+#include <wincrypt.h>
+#if defined(_MSC_VER)
 #pragma comment(lib, "ws2_32.lib")
+#pragma comment(lib, "winhttp.lib")
+#pragma comment(lib, "crypt32.lib")
+#endif
 using socket_t = SOCKET;
+#define INVALID_SOCK INVALID_SOCKET
 #define IS_VALID_SOCKET(s) ((s) != INVALID_SOCKET)
 #define CLOSE_SOCKET(s) closesocket(s)
 #else
@@ -22,78 +36,173 @@ using socket_t = SOCKET;
 #include <unistd.h>
 #include <poll.h>
 #include <fcntl.h>
+#include <cerrno>
+#include <csignal>
 using socket_t = int;
+#define INVALID_SOCK (-1)
 #define IS_VALID_SOCKET(s) ((s) >= 0)
 #define CLOSE_SOCKET(s) close(s)
+#if defined(NOESCAPE_HAS_OPENSSL)
+#include <openssl/ssl.h>
+#include <openssl/err.h>
+#include <openssl/x509.h>
+#endif
 #endif
 
 namespace noescape::network {
 
 namespace {
 
+using Clock = std::chrono::steady_clock;
+constexpr size_t kMaxResponse = 64 * 1024;
+
 void EnsureNetworkInit() {
 #if defined(_WIN32)
-    static bool initialized = false;
-    if (!initialized) {
+    static std::once_flag once;
+    std::call_once(once, []() {
         WSADATA wsa;
         WSAStartup(MAKEWORD(2, 2), &wsa);
-        initialized = true;
-    }
+    });
 #endif
 }
 
-bool ConnectWithTimeout(socket_t sock, const struct sockaddr* addr, socklen_t addrlen, uint32_t timeout_ms) {
+int RemainingMs(Clock::time_point deadline) {
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - Clock::now()).count();
+    return ms > 0 ? static_cast<int>(ms) : 0;
+}
+
+void SetSocketTimeouts(socket_t sock, int ms) {
+    if (ms <= 0) ms = 1;
+#if defined(_WIN32)
+    DWORD tv = static_cast<DWORD>(ms);
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&tv), sizeof(tv));
+    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char*>(&tv), sizeof(tv));
+#else
+    struct timeval tv{};
+    tv.tv_sec = ms / 1000;
+    tv.tv_usec = (ms % 1000) * 1000;
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+#endif
+}
+
+bool ConnectWithTimeout(socket_t sock, const struct sockaddr* addr, socklen_t addrlen, int timeout_ms) {
 #if defined(_WIN32)
     u_long mode = 1;
     ioctlsocket(sock, FIONBIO, &mode);
     int res = connect(sock, addr, static_cast<int>(addrlen));
-    if (res == 0) {
-        mode = 0;
-        ioctlsocket(sock, FIONBIO, &mode);
-        return true;
+    if (res != 0 && WSAGetLastError() != WSAEWOULDBLOCK) return false;
+    if (res != 0) {
+        fd_set writeSet, errSet;
+        FD_ZERO(&writeSet);
+        FD_ZERO(&errSet);
+        FD_SET(sock, &writeSet);
+        FD_SET(sock, &errSet);
+        timeval tv{};
+        tv.tv_sec = timeout_ms / 1000;
+        tv.tv_usec = (timeout_ms % 1000) * 1000;
+        if (select(0, nullptr, &writeSet, &errSet, &tv) <= 0 || !FD_ISSET(sock, &writeSet) || FD_ISSET(sock, &errSet)) {
+            return false;
+        }
     }
-    if (WSAGetLastError() != WSAEWOULDBLOCK) {
-        return false;
-    }
-    fd_set writeSet, errSet;
-    FD_ZERO(&writeSet);
-    FD_ZERO(&errSet);
-    FD_SET(sock, &writeSet);
-    FD_SET(sock, &errSet);
-    timeval tv{};
-    tv.tv_sec = timeout_ms / 1000;
-    tv.tv_usec = (timeout_ms % 1000) * 1000;
-    if (select(0, nullptr, &writeSet, &errSet, &tv) > 0 && FD_ISSET(sock, &writeSet) && !FD_ISSET(sock, &errSet)) {
-        mode = 0;
-        ioctlsocket(sock, FIONBIO, &mode);
-        return true;
-    }
-    return false;
+    mode = 0;
+    ioctlsocket(sock, FIONBIO, &mode);
+    return true;
 #else
     int flags = fcntl(sock, F_GETFL, 0);
     fcntl(sock, F_SETFL, flags | O_NONBLOCK);
     int res = connect(sock, addr, addrlen);
-    if (res == 0) {
-        fcntl(sock, F_SETFL, flags);
-        return true;
-    }
-    if (errno != EINPROGRESS) {
-        return false;
-    }
-    struct pollfd pfd{};
-    pfd.fd = sock;
-    pfd.events = POLLOUT;
-    int pollRes = poll(&pfd, 1, static_cast<int>(timeout_ms));
-    if (pollRes > 0 && (pfd.revents & POLLOUT) && !(pfd.revents & (POLLERR | POLLHUP))) {
+    if (res != 0 && errno != EINPROGRESS) return false;
+    if (res != 0) {
+        struct pollfd pfd{};
+        pfd.fd = sock;
+        pfd.events = POLLOUT;
+        int pollRes = poll(&pfd, 1, timeout_ms);
+        if (pollRes <= 0 || !(pfd.revents & POLLOUT) || (pfd.revents & (POLLERR | POLLHUP))) return false;
         int err = 0;
         socklen_t len = sizeof(err);
-        if (getsockopt(sock, SOL_SOCKET, SO_ERROR, &err, &len) == 0 && err == 0) {
-            fcntl(sock, F_SETFL, flags);
-            return true;
-        }
+        if (getsockopt(sock, SOL_SOCKET, SO_ERROR, &err, &len) != 0 || err != 0) return false;
     }
-    return false;
+    fcntl(sock, F_SETFL, flags);
+    return true;
 #endif
+}
+
+// Resolves and connects (IPv4 and IPv6). getaddrinfo itself cannot be cancelled, which is one
+// reason the engine runs all panel I/O on its own thread.
+socket_t ConnectTcp(const std::string& host, uint16_t port, Clock::time_point deadline) {
+    struct addrinfo hints{}, *servinfo = nullptr;
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    std::string portStr = std::to_string(port);
+    if (getaddrinfo(host.c_str(), portStr.c_str(), &hints, &servinfo) != 0 || !servinfo) {
+        return INVALID_SOCK;
+    }
+    socket_t result = INVALID_SOCK;
+    for (auto* ai = servinfo; ai && RemainingMs(deadline) > 0; ai = ai->ai_next) {
+        socket_t sock = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+        if (!IS_VALID_SOCKET(sock)) continue;
+        if (ConnectWithTimeout(sock, ai->ai_addr, static_cast<socklen_t>(ai->ai_addrlen), RemainingMs(deadline))) {
+            result = sock;
+            break;
+        }
+        CLOSE_SOCKET(sock);
+    }
+    freeaddrinfo(servinfo);
+    return result;
+}
+
+int SendFlags() {
+#if defined(MSG_NOSIGNAL)
+    return MSG_NOSIGNAL; // a peer reset must not SIGPIPE-kill the host game
+#else
+    return 0;
+#endif
+}
+
+std::string BuildRequest(const PanelClient::ParsedUrl& t, const char* method, const std::string& body,
+                         const std::string& signature) {
+    std::ostringstream req;
+    req << method << " " << t.path << " HTTP/1.1\r\n"
+        << "Host: " << t.host;
+    if (!((t.secure && t.port == 443) || (!t.secure && t.port == 80))) req << ":" << t.port;
+    req << "\r\n"
+        << "User-Agent: NoEscapeAC/7\r\n"
+        << "Connection: close\r\n";
+    if (!signature.empty()) req << "X-NoEscape-Signature: " << signature << "\r\n";
+    if (!body.empty() || std::strcmp(method, "POST") == 0) {
+        req << "Content-Type: application/json\r\n"
+            << "Content-Length: " << body.size() << "\r\n";
+    }
+    req << "\r\n" << body;
+    return req.str();
+}
+
+PanelClient::HttpResult ParseHttpResponse(const std::string& raw) {
+    PanelClient::HttpResult r;
+    if (raw.rfind("HTTP/1.", 0) != 0 || raw.size() < 12) return r;
+    size_t hdrEnd = raw.find("\r\n\r\n");
+    if (hdrEnd == std::string::npos) return r;
+    r.status = std::atoi(raw.c_str() + 9);
+    std::string headers = raw.substr(0, hdrEnd);
+    std::string body = raw.substr(hdrEnd + 4);
+    std::transform(headers.begin(), headers.end(), headers.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (headers.find("transfer-encoding: chunked") != std::string::npos) {
+        std::string decoded;
+        size_t p = 0;
+        while (p < body.size()) {
+            size_t eol = body.find("\r\n", p);
+            if (eol == std::string::npos) break;
+            unsigned long n = std::strtoul(body.substr(p, eol - p).c_str(), nullptr, 16);
+            if (n == 0 || n > kMaxResponse || eol + 2 + n > body.size()) break;
+            decoded.append(body, eol + 2, n);
+            p = eol + 2 + n + 2;
+        }
+        body = decoded;
+    }
+    r.body = body;
+    return r;
 }
 
 std::string JsonEscape(const std::string& in) {
@@ -107,28 +216,139 @@ std::string JsonEscape(const std::string& in) {
             case '\r': out += "\\r"; break;
             case '\t': out += "\\t"; break;
             default:
-                if (c < 0x20) { char b[8]; snprintf(b, sizeof(b), "\\u%04x", c); out += b; }
+                if (c < 0x20) { char b[8]; std::snprintf(b, sizeof(b), "\\u%04x", c); out += b; }
                 else out += static_cast<char>(c);
         }
     }
     return out;
 }
 
+std::string NormalizePin(const std::string& pin) {
+    std::string out;
+    for (char c : pin) {
+        if (std::isxdigit(static_cast<unsigned char>(c))) {
+            out += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        }
+    }
+    return out.size() == 64 ? out : std::string();
+}
+
+#if !defined(_WIN32) && defined(NOESCAPE_HAS_OPENSSL)
+SSL_CTX* ClientContext() {
+    static SSL_CTX* ctx = []() -> SSL_CTX* {
+        SSL_CTX* c = SSL_CTX_new(TLS_client_method());
+        if (!c) return nullptr;
+        SSL_CTX_set_min_proto_version(c, TLS1_2_VERSION);
+        SSL_CTX_set_default_verify_paths(c);
+        SSL_CTX_set_mode(c, SSL_MODE_AUTO_RETRY);
+        return c;
+    }();
+    return ctx;
+}
+
+std::string PeerSpkiSha256(SSL* ssl) {
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+    X509* cert = SSL_get1_peer_certificate(ssl);
+#else
+    X509* cert = SSL_get_peer_certificate(ssl);
+#endif
+    if (!cert) return "";
+    std::string out;
+    int len = i2d_X509_PUBKEY(X509_get_X509_PUBKEY(cert), nullptr);
+    if (len > 0) {
+        std::vector<unsigned char> der(static_cast<size_t>(len));
+        unsigned char* p = der.data();
+        if (i2d_X509_PUBKEY(X509_get_X509_PUBKEY(cert), &p) == len) {
+            out = CryptoUtil::Sha256(der.data(), der.size());
+        }
+    }
+    X509_free(cert);
+    return out;
+}
+#endif
+
+#if defined(_WIN32)
+std::wstring Widen(const std::string& s) {
+    if (s.empty()) return L"";
+    int n = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, nullptr, 0);
+    if (n <= 0) return L"";
+    std::wstring w(static_cast<size_t>(n), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, w.data(), n);
+    if (!w.empty() && w.back() == L'\0') w.pop_back();
+    return w;
+}
+
+std::string WinCertSpkiSha256(HINTERNET hRequest) {
+    PCCERT_CONTEXT cert = nullptr;
+    DWORD sz = sizeof(cert);
+    if (!WinHttpQueryOption(hRequest, WINHTTP_OPTION_SERVER_CERT_CONTEXT, &cert, &sz) || !cert) return "";
+    std::string out;
+    DWORD len = 0;
+    if (CryptEncodeObject(X509_ASN_ENCODING, X509_PUBLIC_KEY_INFO, &cert->pCertInfo->SubjectPublicKeyInfo, nullptr, &len) && len) {
+        std::vector<BYTE> der(len);
+        if (CryptEncodeObject(X509_ASN_ENCODING, X509_PUBLIC_KEY_INFO, &cert->pCertInfo->SubjectPublicKeyInfo, der.data(), &len)) {
+            out = CryptoUtil::Sha256(der.data(), len);
+        }
+    }
+    CertFreeCertificateContext(cert);
+    return out;
+}
+#endif
+
 } // namespace
 
-PanelClient::PanelClient(std::string base_url, std::string secret_key)
+PanelClient::PanelClient(std::string base_url, std::string secret_key, std::string spki_pin_sha256_hex)
     : base_url_(std::move(base_url)),
       secret_key_(std::move(secret_key)),
+      pin_(NormalizePin(spki_pin_sha256_hex)),
       hwid_(CryptoUtil::GetMachineHWID()) {
     EnsureNetworkInit();
+#if !defined(_WIN32)
+    // OpenSSL writes cannot pass MSG_NOSIGNAL: make sure a peer reset never kills the game.
+    // Only replaces the *default* disposition; a host-installed handler is left untouched.
+    static std::once_flag once;
+    std::call_once(once, []() {
+        struct sigaction sa{};
+        if (sigaction(SIGPIPE, nullptr, &sa) == 0 && sa.sa_handler == SIG_DFL) {
+            sa.sa_handler = SIG_IGN;
+            sigaction(SIGPIPE, &sa, nullptr);
+        }
+    });
+#endif
 }
 
 PanelClient::~PanelClient() = default;
+
+void PanelClient::SetPin(std::string spki_pin_sha256_hex) {
+    pin_ = NormalizePin(spki_pin_sha256_hex);
+}
+
+bool PanelClient::TlsSupported() {
+#if defined(_WIN32) || defined(NOESCAPE_HAS_OPENSSL)
+    return true;
+#else
+    return false;
+#endif
+}
+
+std::string PanelClient::RandomNonce() {
+    // 128 random bits; random_device is backed by getrandom()/BCryptGenRandom on supported toolchains
+    std::random_device rd;
+    uint8_t buf[16];
+    for (size_t i = 0; i < sizeof(buf); i += 4) {
+        uint32_t v = rd();
+        std::memcpy(buf + i, &v, 4);
+    }
+    return CryptoUtil::ToHex(buf, sizeof(buf));
+}
 
 PanelClient::ParsedUrl PanelClient::ParseUrl(const std::string& url) {
     ParsedUrl res;
     res.port = 80;
     res.path = "/";
+
+    // Reject header injection through the URL
+    if (url.find_first_of("\r\n \t") != std::string::npos) res.valid = false;
 
     std::string s = url;
     size_t protoPos = s.find("://");
@@ -149,151 +369,183 @@ PanelClient::ParsedUrl PanelClient::ParseUrl(const std::string& url) {
         hostPort = s;
     }
 
-    size_t colonPos = hostPort.find(':');
-    if (colonPos != std::string::npos) {
-        res.host = hostPort.substr(0, colonPos);
-        long port = std::strtol(hostPort.substr(colonPos + 1).c_str(), nullptr, 10);
-        if (port <= 0 || port > 65535) res.valid = false;
+    auto parsePort = [&](const std::string& p) {
+        char* end = nullptr;
+        long port = std::strtol(p.c_str(), &end, 10);
+        if (p.empty() || !end || *end != '\0' || port <= 0 || port > 65535) res.valid = false;
         else res.port = static_cast<uint16_t>(port);
+    };
+
+    if (!hostPort.empty() && hostPort[0] == '[') {               // [IPv6]:port
+        size_t close = hostPort.find(']');
+        if (close == std::string::npos) { res.valid = false; return res; }
+        res.host = hostPort.substr(1, close - 1);
+        if (close + 1 < hostPort.size()) {
+            if (hostPort[close + 1] != ':') { res.valid = false; return res; }
+            parsePort(hostPort.substr(close + 2));
+        }
     } else {
-        res.host = hostPort;
+        size_t colonPos = hostPort.find(':');
+        if (colonPos != std::string::npos) {
+            res.host = hostPort.substr(0, colonPos);
+            parsePort(hostPort.substr(colonPos + 1));
+        } else {
+            res.host = hostPort;
+        }
     }
     if (res.host.empty()) res.valid = false;
-
     return res;
 }
 
-std::string PanelClient::HttpPost(const ParsedUrl& target, const std::string& body, uint32_t timeout_ms) {
+PanelClient::HttpResult PanelClient::Request(const ParsedUrl& target, const char* method,
+                                             const std::string& body, uint32_t timeout_ms) const {
+    HttpResult result;
+    if (!target.valid) return result;
     EnsureNetworkInit();
-    // Never silently downgrade https:// to cleartext HTTP; TLS is not implemented.
-    if (!target.valid || target.secure) return "";
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms * 2);
-
-    struct addrinfo hints{}, *servinfo = nullptr;
-    hints.ai_family = AF_INET;
-    hints.ai_socktype = SOCK_STREAM;
-
-    std::string portStr = std::to_string(target.port);
-    if (getaddrinfo(target.host.c_str(), portStr.c_str(), &hints, &servinfo) != 0 || !servinfo) {
-        return "";
-    }
-
-    socket_t sock = socket(servinfo->ai_family, servinfo->ai_socktype, servinfo->ai_protocol);
-    if (!IS_VALID_SOCKET(sock)) {
-        freeaddrinfo(servinfo);
-        return "";
-    }
+    // Hard deadline for the whole exchange (name resolution excluded, see ConnectTcp)
+    const auto deadline = Clock::now() + std::chrono::milliseconds(timeout_ms);
+    const std::string signature = body.empty() ? std::string() : CryptoUtil::HmacSha256(secret_key_, body);
 
 #if defined(_WIN32)
-    DWORD tv = timeout_ms;
-    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&tv), sizeof(tv));
-    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char*>(&tv), sizeof(tv));
+    if (target.secure) {
+        // WinHTTP: system TLS stack + certificate store; the pin is enforced before the body is sent
+        HINTERNET hSession = WinHttpOpen(L"NoEscapeAC/7", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+                                         WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+        if (!hSession) return result;
+        int t = static_cast<int>(timeout_ms);
+        WinHttpSetTimeouts(hSession, t, t, t, t);
+        DWORD protocols = WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2;
+#if defined(WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_3)
+        protocols |= WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_3;
+#endif
+        WinHttpSetOption(hSession, WINHTTP_OPTION_SECURE_PROTOCOLS, &protocols, sizeof(protocols));
+        HINTERNET hConnect = WinHttpConnect(hSession, Widen(target.host).c_str(), target.port, 0);
+        HINTERNET hRequest = hConnect ? WinHttpOpenRequest(hConnect, Widen(method).c_str(), Widen(target.path).c_str(),
+                                                           nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
+                                                           WINHTTP_FLAG_SECURE) : nullptr;
+        if (hRequest) {
+            if (!pin_.empty()) {
+                // With a pin the server key itself is the trust anchor (self-signed panels allowed)
+                DWORD flags = SECURITY_FLAG_IGNORE_UNKNOWN_CA | SECURITY_FLAG_IGNORE_CERT_CN_INVALID |
+                              SECURITY_FLAG_IGNORE_CERT_DATE_INVALID;
+                WinHttpSetOption(hRequest, WINHTTP_OPTION_SECURITY_FLAGS, &flags, sizeof(flags));
+            }
+            std::wstring headers = L"Content-Type: application/json\r\n";
+            if (!signature.empty()) headers += L"X-NoEscape-Signature: " + Widen(signature) + L"\r\n";
+            bool ok = WinHttpSendRequest(hRequest, headers.c_str(), static_cast<DWORD>(-1L),
+                                         WINHTTP_NO_REQUEST_DATA, 0, static_cast<DWORD>(body.size()), 0) != FALSE;
+            if (ok && !pin_.empty()) {
+                std::string spki = WinCertSpkiSha256(hRequest);
+                if (spki.empty() || !CryptoUtil::ConstantTimeEquals(spki, pin_)) {
+                    result.pin_mismatch = true;
+                    ok = false;
+                }
+            }
+            DWORD written = 0;
+            if (ok && !body.empty()) {
+                ok = WinHttpWriteData(hRequest, body.data(), static_cast<DWORD>(body.size()), &written) &&
+                     written == body.size();
+            }
+            if (ok && WinHttpReceiveResponse(hRequest, nullptr)) {
+                DWORD code = 0, sz = sizeof(code);
+                WinHttpQueryHeaders(hRequest, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                                    WINHTTP_HEADER_NAME_BY_INDEX, &code, &sz, WINHTTP_NO_HEADER_INDEX);
+                std::string data;
+                DWORD avail = 0;
+                while (data.size() < kMaxResponse && RemainingMs(deadline) > 0 &&
+                       WinHttpQueryDataAvailable(hRequest, &avail) && avail > 0) {
+                    std::string chunk(std::min<DWORD>(avail, 8192), '\0');
+                    DWORD read = 0;
+                    if (!WinHttpReadData(hRequest, chunk.data(), static_cast<DWORD>(chunk.size()), &read) || read == 0) break;
+                    data.append(chunk.data(), read);
+                }
+                result.status = static_cast<int>(code);
+                result.body = data;
+            }
+            WinHttpCloseHandle(hRequest);
+        }
+        if (hConnect) WinHttpCloseHandle(hConnect);
+        WinHttpCloseHandle(hSession);
+        return result;
+    }
 #else
-    struct timeval tv{};
-    tv.tv_sec = timeout_ms / 1000;
-    tv.tv_usec = (timeout_ms % 1000) * 1000;
-    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    if (target.secure) {
+#if !defined(NOESCAPE_HAS_OPENSSL)
+        return result; // no TLS in this build: refuse rather than silently downgrade to cleartext
+#else
+        SSL_CTX* ctx = ClientContext();
+        if (!ctx) return result;
+        socket_t sock = ConnectTcp(target.host, target.port, deadline);
+        if (!IS_VALID_SOCKET(sock)) return result;
+        SetSocketTimeouts(sock, RemainingMs(deadline));
+        SSL* ssl = SSL_new(ctx);
+        if (!ssl) { CLOSE_SOCKET(sock); return result; }
+        SSL_set_fd(ssl, sock);
+        SSL_set_tlsext_host_name(ssl, target.host.c_str());
+        if (pin_.empty()) {
+            // No pin: full WebPKI validation including hostname
+            SSL_set_verify(ssl, SSL_VERIFY_PEER, nullptr);
+            SSL_set1_host(ssl, target.host.c_str());
+        } else {
+            SSL_set_verify(ssl, SSL_VERIFY_NONE, nullptr); // trust is established by the pin below
+        }
+        std::string raw;
+        bool ok = SSL_connect(ssl) == 1;
+        if (ok && !pin_.empty()) {
+            std::string spki = PeerSpkiSha256(ssl);
+            if (spki.empty() || !CryptoUtil::ConstantTimeEquals(spki, pin_)) {
+                result.pin_mismatch = true;
+                ok = false; // nothing (not even the request line) is sent to an unpinned server
+            }
+        }
+        if (ok) {
+            std::string req = BuildRequest(target, method, body, signature);
+            size_t off = 0;
+            while (ok && off < req.size() && RemainingMs(deadline) > 0) {
+                int w = SSL_write(ssl, req.data() + off, static_cast<int>(req.size() - off));
+                if (w <= 0) ok = false; else off += static_cast<size_t>(w);
+            }
+            char buf[4096];
+            while (ok && raw.size() < kMaxResponse && RemainingMs(deadline) > 0) {
+                SetSocketTimeouts(sock, RemainingMs(deadline));
+                int n = SSL_read(ssl, buf, sizeof(buf));
+                if (n <= 0) break;
+                raw.append(buf, static_cast<size_t>(n));
+            }
+            SSL_shutdown(ssl);
+        }
+        ERR_clear_error();
+        SSL_free(ssl);
+        CLOSE_SOCKET(sock);
+        if (result.pin_mismatch) return result;
+        return ParseHttpResponse(raw);
+#endif
+    }
 #endif
 
-    if (!ConnectWithTimeout(sock, servinfo->ai_addr, static_cast<socklen_t>(servinfo->ai_addrlen), timeout_ms)) {
-        CLOSE_SOCKET(sock);
-        freeaddrinfo(servinfo);
-        return "";
+    // Plain HTTP (development / trusted networks only)
+    socket_t sock = ConnectTcp(target.host, target.port, deadline);
+    if (!IS_VALID_SOCKET(sock)) return result;
+    std::string req = BuildRequest(target, method, body, signature);
+    size_t off = 0;
+    bool ok = true;
+    while (off < req.size() && RemainingMs(deadline) > 0) {
+        SetSocketTimeouts(sock, RemainingMs(deadline));
+        int n = send(sock, req.data() + off, static_cast<int>(req.size() - off), SendFlags());
+        if (n <= 0) { ok = false; break; }
+        off += static_cast<size_t>(n);
     }
-    freeaddrinfo(servinfo);
-
-    std::ostringstream req;
-    req << "POST " << target.path << " HTTP/1.1\r\n"
-        << "Host: " << target.host << ((target.port == 80) ? std::string() : ":" + std::to_string(target.port)) << "\r\n"
-        << "Content-Type: application/json\r\n"
-        << "Content-Length: " << body.length() << "\r\n"
-        << "Connection: close\r\n\r\n"
-        << body;
-
-    std::string reqStr = req.str();
-    if (send(sock, reqStr.c_str(), static_cast<int>(reqStr.length()), 0) <= 0) {
-        CLOSE_SOCKET(sock);
-        return "";
+    std::string raw;
+    char buf[4096];
+    // Bounded in total time and size: a slow-drip or endless response cannot stall the caller
+    while (ok && raw.size() < kMaxResponse && RemainingMs(deadline) > 0) {
+        SetSocketTimeouts(sock, RemainingMs(deadline));
+        int n = recv(sock, buf, sizeof(buf), 0);
+        if (n <= 0) break;
+        raw.append(buf, static_cast<size_t>(n));
     }
-
-    std::string response;
-    char buf[1024];
-    int bytes = 0;
-    // Bounded in total time and size: a slow-drip or endless response must not stall the caller
-    constexpr size_t kMaxResponse = 64 * 1024;
-    while (response.size() < kMaxResponse && std::chrono::steady_clock::now() < deadline &&
-           (bytes = recv(sock, buf, sizeof(buf) - 1, 0)) > 0) {
-        response.append(buf, bytes);
-    }
-
     CLOSE_SOCKET(sock);
-    return response;
-}
-
-std::string PanelClient::HttpGet(const ParsedUrl& target, uint32_t timeout_ms) {
-    EnsureNetworkInit();
-    // Never silently downgrade https:// to cleartext HTTP; TLS is not implemented.
-    if (!target.valid || target.secure) return "";
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms * 2);
-
-    struct addrinfo hints{}, *servinfo = nullptr;
-    hints.ai_family = AF_INET;
-    hints.ai_socktype = SOCK_STREAM;
-
-    std::string portStr = std::to_string(target.port);
-    if (getaddrinfo(target.host.c_str(), portStr.c_str(), &hints, &servinfo) != 0 || !servinfo) {
-        return "";
-    }
-
-    socket_t sock = socket(servinfo->ai_family, servinfo->ai_socktype, servinfo->ai_protocol);
-    if (!IS_VALID_SOCKET(sock)) {
-        freeaddrinfo(servinfo);
-        return "";
-    }
-
-#if defined(_WIN32)
-    DWORD tv = timeout_ms;
-    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&tv), sizeof(tv));
-    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char*>(&tv), sizeof(tv));
-#else
-    struct timeval tv{};
-    tv.tv_sec = timeout_ms / 1000;
-    tv.tv_usec = (timeout_ms % 1000) * 1000;
-    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
-#endif
-
-    if (!ConnectWithTimeout(sock, servinfo->ai_addr, static_cast<socklen_t>(servinfo->ai_addrlen), timeout_ms)) {
-        CLOSE_SOCKET(sock);
-        freeaddrinfo(servinfo);
-        return "";
-    }
-    freeaddrinfo(servinfo);
-
-    std::ostringstream req;
-    req << "GET " << target.path << " HTTP/1.1\r\n"
-        << "Host: " << target.host << ((target.port == 80) ? std::string() : ":" + std::to_string(target.port)) << "\r\n"
-        << "Connection: close\r\n\r\n";
-
-    std::string reqStr = req.str();
-    if (send(sock, reqStr.c_str(), static_cast<int>(reqStr.length()), 0) <= 0) {
-        CLOSE_SOCKET(sock);
-        return "";
-    }
-
-    std::string response;
-    char buf[1024];
-    int bytes = 0;
-    // Bounded in total time and size: a slow-drip or endless response must not stall the caller
-    constexpr size_t kMaxResponse = 64 * 1024;
-    while (response.size() < kMaxResponse && std::chrono::steady_clock::now() < deadline &&
-           (bytes = recv(sock, buf, sizeof(buf) - 1, 0)) > 0) {
-        response.append(buf, bytes);
-    }
-
-    CLOSE_SOCKET(sock);
-    return response;
+    return ParseHttpResponse(raw);
 }
 
 HeartbeatPacket PanelClient::ConstructHeartbeat(uint32_t current_threat_score, const std::string& status) {
@@ -303,128 +555,96 @@ HeartbeatPacket PanelClient::ConstructHeartbeat(uint32_t current_threat_score, c
     pkt.threat_score = current_threat_score;
     pkt.events_count = 0;
     pkt.status = status;
+    pkt.nonce = RandomNonce();
 
     std::ostringstream payload;
-    payload << pkt.hwid << ":" << pkt.timestamp << ":" << pkt.threat_score << ":" << pkt.status;
+    payload << pkt.hwid << ":" << pkt.timestamp << ":" << pkt.threat_score << ":" << pkt.status << ":" << pkt.nonce;
     pkt.hmac_signature = CryptoUtil::HmacSha256(secret_key_, payload.str());
-
     return pkt;
 }
 
 bool PanelClient::SendHeartbeat(uint32_t current_threat_score, const std::string& status) {
     auto pkt = ConstructHeartbeat(current_threat_score, status);
-
     std::ostringstream json;
     json << "{"
-         << "\"hwid\":\"" << pkt.hwid << "\","
+         << "\"hwid\":\"" << JsonEscape(pkt.hwid) << "\","
          << "\"timestamp\":" << pkt.timestamp << ","
          << "\"threat_score\":" << pkt.threat_score << ","
-         << "\"status\":\"" << pkt.status << "\","
-         << "\"signature\":\"" << pkt.hmac_signature << "\""
+         << "\"status\":\"" << JsonEscape(pkt.status) << "\","
+         << "\"nonce\":\"" << pkt.nonce << "\""
          << "}";
-
-    ParsedUrl parsed = ParseUrl(base_url_ + "/heartbeat");
-    std::string resp = HttpPost(parsed, json.str(), 1500);
-    return resp.rfind("HTTP/1.1 2", 0) == 0 || resp.rfind("HTTP/1.0 2", 0) == 0;
+    auto res = Request(ParseUrl(base_url_ + "/heartbeat"), "POST", json.str(), 2000);
+    return res.status >= 200 && res.status < 300;
 }
 
 bool PanelClient::SendBanReport(const core::DetectionEvent& event, uint32_t current_threat_score) {
     uint64_t now = static_cast<uint64_t>(std::time(nullptr));
-    std::ostringstream payload;
-    payload << hwid_ << ":" << now << ":" << core::DetectionEvent::TypeToString(event.type)
-            << ":" << event.details;
-    std::string sig = CryptoUtil::HmacSha256(secret_key_, payload.str());
-
     std::ostringstream json;
     json << "{"
-         << "\"hwid\":\"" << hwid_ << "\","
+         << "\"hwid\":\"" << JsonEscape(hwid_) << "\","
          << "\"timestamp\":" << now << ","
+         << "\"nonce\":\"" << RandomNonce() << "\","
          << "\"threat_score\":" << current_threat_score << ","
          << "\"type\":\"" << core::DetectionEvent::TypeToString(event.type) << "\","
          << "\"severity\":\"" << core::DetectionEvent::SeverityToString(event.severity) << "\","
          << "\"component\":\"" << JsonEscape(event.component) << "\","
-         << "\"details\":\"" << JsonEscape(event.details) << "\","
-         << "\"signature\":\"" << sig << "\""
+         << "\"details\":\"" << JsonEscape(event.details) << "\""
          << "}";
-
-    ParsedUrl parsed = ParseUrl(base_url_ + "/alert");
-    std::string resp = HttpPost(parsed, json.str(), 2000);
-    return resp.rfind("HTTP/1.1 2", 0) == 0 || resp.rfind("HTTP/1.0 2", 0) == 0;
+    // The whole body is authenticated (X-NoEscape-Signature), so no field can be altered and
+    // there is no field-concatenation ambiguity.
+    auto res = Request(ParseUrl(base_url_ + "/alert"), "POST", json.str(), 2000);
+    return res.status >= 200 && res.status < 300;
 }
 
 BanCheckResult PanelClient::QueryBanStatus() {
     BanCheckResult result;
-    uint64_t now = static_cast<uint64_t>(std::time(nullptr));
-    std::string path = base_url_ + "/check?hwid=" + hwid_ + "&nonce=" + std::to_string(now);
-    ParsedUrl parsed = ParseUrl(path);
-    std::string resp = HttpGet(parsed, 1500);
+    const std::string nonce = RandomNonce(); // unpredictable: a recorded reply cannot be replayed
+    auto res = Request(ParseUrl(base_url_ + "/check?hwid=" + hwid_ + "&nonce=" + nonce), "GET", "", 2000);
 
-    if (resp.empty()) {
+    if (res.pin_mismatch) {
+        result.status = BanCheckStatus::SIGNATURE_INVALID;
+        result.reason = "Panel TLS certificate does not match the configured pin (MitM or fake panel)";
+        return result;
+    }
+    if (res.status == 0) {
         result.status = BanCheckStatus::NETWORK_ERROR;
         result.reason = "Backend server unreachable or timeout";
         return result;
     }
-
-    if (resp.rfind("HTTP/1.1 2", 0) != 0 && resp.rfind("HTTP/1.0 2", 0) != 0) {
+    if (res.status < 200 || res.status >= 300) {
         result.status = BanCheckStatus::NETWORK_ERROR;
-        result.reason = "Backend returned a non-2xx status";
+        result.reason = "Backend returned HTTP " + std::to_string(res.status);
         return result;
     }
 
-    // Signature is mandatory and bound to hwid + status + our nonce (anti-replay, anti-strip)
-    bool isBanned = (resp.find("\"banned\":true") != std::string::npos);
-    bool isClean = (resp.find("\"banned\":false") != std::string::npos);
-    size_t sigPos = resp.find("\"signature\":\"");
-    size_t sigEnd = (sigPos == std::string::npos) ? std::string::npos : resp.find('"', sigPos + 13);
+    const std::string& body = res.body;
+    bool isBanned = body.find("\"banned\":true") != std::string::npos;
+    bool isClean = body.find("\"banned\":false") != std::string::npos;
+    size_t sigPos = body.find("\"signature\":\"");
+    size_t sigEnd = (sigPos == std::string::npos) ? std::string::npos : body.find('"', sigPos + 13);
     if (sigEnd == std::string::npos || isBanned == isClean) {
         result.status = BanCheckStatus::SIGNATURE_INVALID;
         result.reason = "Missing signature or ambiguous panel response";
         return result;
     }
-    std::string serverSig = resp.substr(sigPos + 13, sigEnd - (sigPos + 13));
-    std::string expectedSig = CryptoUtil::HmacSha256(
-        secret_key_, hwid_ + ":" + (isBanned ? "1" : "0") + ":" + std::to_string(now));
+    std::string serverSig = body.substr(sigPos + 13, sigEnd - (sigPos + 13));
+    std::string expectedSig = CryptoUtil::HmacSha256(secret_key_, hwid_ + ":" + (isBanned ? "1" : "0") + ":" + nonce);
     if (!CryptoUtil::ConstantTimeEquals(serverSig, expectedSig)) {
         result.status = BanCheckStatus::SIGNATURE_INVALID;
         result.reason = "Panel response HMAC signature validation failed (Tampered or MitM)";
         return result;
     }
 
-    if (resp.find("\"banned\":true") != std::string::npos ||
-        resp.find("banned:1") != std::string::npos) {
-        result.status = BanCheckStatus::BANNED;
-        result.reason = "Global Hardware ID Blacklist Match";
-        return result;
-    }
-
-    if (resp.find("\"banned\":false") != std::string::npos ||
-        resp.find("banned:0") != std::string::npos) {
-        result.status = BanCheckStatus::CLEAN;
-        result.reason = "Hardware ID is clean";
-        return result;
-    }
-
-    // Response arrived but did not match expected JSON schema
-    result.status = BanCheckStatus::NETWORK_ERROR;
-    result.reason = "Malformed response payload from backend";
+    result.status = isBanned ? BanCheckStatus::BANNED : BanCheckStatus::CLEAN;
+    result.reason = isBanned ? "Global Hardware ID Blacklist Match" : "Hardware ID is clean";
     return result;
 }
 
 bool PanelClient::CheckBanStatus(bool& out_is_banned, std::string& out_reason) {
     auto res = QueryBanStatus();
-    if (res.status == BanCheckStatus::BANNED) {
-        out_is_banned = true;
-        out_reason = res.reason;
-        return true;
-    } else if (res.status == BanCheckStatus::CLEAN) {
-        out_is_banned = false;
-        out_reason = res.reason;
-        return true;
-    } else {
-        out_is_banned = false;
-        out_reason = res.reason;
-        return false;
-    }
+    out_is_banned = (res.status == BanCheckStatus::BANNED);
+    out_reason = res.reason;
+    return res.status == BanCheckStatus::BANNED || res.status == BanCheckStatus::CLEAN;
 }
 
 } // namespace noescape::network

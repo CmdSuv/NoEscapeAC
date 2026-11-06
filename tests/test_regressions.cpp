@@ -125,7 +125,7 @@ TEST(Regression, PersistentFindingDoesNotSnowballIntoBan) {
     cfg.showBanUi = false;
     cfg.terminateProcessOnBan = false;
     cfg.enableHeartbeat = false;
-    setenv("NOESCAPE_TEST_MODE", "1", 1);
+    // NOESCAPE_TEST_MODE=1 is set by test_main (no ban UI / process termination)
     core::AntiCheatEngine engine(cfg);
     core::DetectionEvent ev;
     ev.type = core::DetectionType::ANTI_DEBUG_TOOL;
@@ -156,3 +156,122 @@ TEST(Regression, ScannerHasNoStringSignatureInstantBan) {
         }
     }
 }
+
+#if !defined(_WIN32)
+#include "noescape/memory/unhooker.hpp"
+#include <dlfcn.h>
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <unistd.h>
+
+namespace {
+bool PokeText(uintptr_t addr, const void* data, size_t len) {
+    int fd = open("/proc/self/mem", O_RDWR | O_CLOEXEC);
+    if (fd < 0) return false;
+    bool ok = pwrite(fd, data, len, static_cast<off_t>(addr)) == static_cast<ssize_t>(len);
+    close(fd);
+    return ok;
+}
+} // namespace
+
+TEST(Regression, UnhookerDetectsAndRestoresRealLibcDetour) {
+    void* libc = dlopen("libc.so.6", RTLD_NOW | RTLD_NOLOAD);
+    if (!libc) return;
+    auto target = reinterpret_cast<uintptr_t>(dlsym(libc, "process_vm_writev"));
+    if (!target) return;
+
+    uint8_t original[16];
+    std::memcpy(original, reinterpret_cast<const void*>(target), sizeof(original));
+
+    // Detour into an anonymous stub (injected-cheat style), placed within rel32 range
+    void* stub = mmap(reinterpret_cast<void*>((target & ~0xFFFull) - (64ull << 20)), 4096,
+                      PROT_READ | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    ASSERT_TRUE(stub != MAP_FAILED);
+    int64_t rel = static_cast<int64_t>(reinterpret_cast<uintptr_t>(stub)) - static_cast<int64_t>(target + 5);
+    if (rel > INT32_MAX || rel < INT32_MIN) { munmap(stub, 4096); return; }
+    uint8_t jmp[5] = {0xE9};
+    int32_t r32 = static_cast<int32_t>(rel);
+    std::memcpy(jmp + 1, &r32, 4);
+    ASSERT_TRUE(PokeText(target, jmp, sizeof(jmp)));
+
+    bool found = false;
+    for (const auto& ev : memory::Unhooker::Instance().AuditSystemHooks()) {
+        if (ev.details.find("'process_vm_writev'") != std::string::npos) {
+            found = true;
+            ASSERT_EQ(static_cast<int>(ev.severity), static_cast<int>(core::Severity::CRITICAL));
+            ASSERT_TRUE(ev.details.find("RESTORED") != std::string::npos);
+        }
+    }
+    bool restored = std::memcmp(reinterpret_cast<const void*>(target), original, sizeof(original)) == 0;
+    if (!restored) PokeText(target, original, sizeof(original)); // never leave libc patched
+    munmap(stub, 4096);
+    ASSERT_TRUE(found);
+    ASSERT_TRUE(restored);
+}
+
+TEST(Regression, UnhookerCleanProcessHasNoConfirmedHooks) {
+    for (const auto& ev : memory::Unhooker::Instance().AuditSystemHooks()) {
+        // Sanitizer interceptors are interposers, never inline patches of libc itself
+        ASSERT_NE(static_cast<int>(ev.severity), static_cast<int>(core::Severity::CRITICAL));
+    }
+}
+#endif
+
+#if !defined(_WIN32)
+#include "noescape/network/panel_client.hpp"
+#include <fstream>
+#include <sstream>
+
+TEST(Regression, PanelUrlParsingRejectsInjectionAndBadPorts) {
+    using PC = network::PanelClient;
+    ASSERT_TRUE(PC::ParseUrl("https://panel.example.com/api").secure);
+    ASSERT_EQ(PC::ParseUrl("https://panel.example.com/api").port, 443);
+    ASSERT_EQ(PC::ParseUrl("http://[::1]:8443/x").host, std::string("::1"));
+    ASSERT_EQ(PC::ParseUrl("http://[::1]:8443/x").port, 8443);
+    ASSERT_FALSE(PC::ParseUrl("http://h:99999/").valid);
+    ASSERT_FALSE(PC::ParseUrl("http://h:12ab/").valid);
+    ASSERT_FALSE(PC::ParseUrl("http://h/a\r\nX-Evil: 1").valid);
+    ASSERT_FALSE(PC::ParseUrl("ftp://h/").valid);
+}
+
+TEST(Regression, PanelTlsWithPinnedKeyAgainstReferenceServer) {
+    if (!network::PanelClient::TlsSupported()) return;
+    if (std::system("python3 --version >/dev/null 2>&1 && openssl version >/dev/null 2>&1") != 0) return;
+    const std::string dir = "/tmp/noescape_tls_test";
+    std::string gen = "mkdir -p " + dir + " && openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes "
+                      "-keyout " + dir + "/k.pem -out " + dir + "/c.pem -days 2 -subj /CN=localhost >/dev/null 2>&1 && "
+                      "openssl x509 -in " + dir + "/c.pem -pubkey -noout | openssl pkey -pubin -outform der | "
+                      "sha256sum | cut -d' ' -f1 > " + dir + "/pin";
+    ASSERT_EQ(std::system(gen.c_str()), 0);
+    std::ifstream pf(dir + "/pin");
+    std::string pin;
+    pf >> pin;
+    ASSERT_EQ(pin.size(), 64u);
+
+    const char* secret = "TlsSecret";
+    std::string start = "NOESCAPE_REF_TLS_CERT=" + dir + "/c.pem NOESCAPE_REF_TLS_KEY=" + dir + "/k.pem python3 " +
+                        std::string(NOESCAPE_SOURCE_DIR) + "/tools/reference_server.py 18432 " + secret +
+                        " >/dev/null 2>&1 &";
+    ASSERT_EQ(std::system(start.c_str()), 0);
+    std::this_thread::sleep_for(std::chrono::milliseconds(800));
+
+    network::PanelClient pinned("https://127.0.0.1:18432/api/ac", secret, pin);
+    auto okRes = pinned.QueryBanStatus();
+    bool heartbeatOk = pinned.SendHeartbeat(5, "HEALTHY");
+
+    std::string wrongPin(64, 'a');
+    network::PanelClient mitm("https://127.0.0.1:18432/api/ac", secret, wrongPin);
+    auto mitmRes = mitm.QueryBanStatus();
+
+    // No pin: WebPKI validation must reject the self-signed certificate
+    network::PanelClient unpinned("https://127.0.0.1:18432/api/ac", secret);
+    auto unpinnedRes = unpinned.QueryBanStatus();
+
+    (void)!std::system("pkill -f 'reference_server.py 18432' >/dev/null 2>&1");
+
+    ASSERT_EQ(static_cast<int>(okRes.status), static_cast<int>(network::BanCheckStatus::CLEAN));
+    ASSERT_TRUE(heartbeatOk);
+    ASSERT_EQ(static_cast<int>(mitmRes.status), static_cast<int>(network::BanCheckStatus::SIGNATURE_INVALID));
+    ASSERT_EQ(static_cast<int>(unpinnedRes.status), static_cast<int>(network::BanCheckStatus::NETWORK_ERROR));
+}
+#endif

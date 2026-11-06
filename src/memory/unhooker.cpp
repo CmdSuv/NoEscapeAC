@@ -1,8 +1,11 @@
 #include "noescape/memory/unhooker.hpp"
 #include "noescape/memory/memory_scanner.hpp"
+#include <algorithm>
 #include <cstring>
 #include <ctime>
 #include <fstream>
+#include <map>
+#include <mutex>
 #include <sstream>
 #include <iomanip>
 
@@ -11,6 +14,7 @@
 #else
 #include <dlfcn.h>
 #include <elf.h>
+#include <fcntl.h>
 #include <sys/mman.h>
 #include <unistd.h>
 #endif
@@ -24,13 +28,18 @@ Unhooker& Unhooker::Instance() {
 
 namespace {
 
+constexpr size_t kPrologueLen = 16;
+
 bool IsReadableAddress(uintptr_t target, size_t len = sizeof(uintptr_t)) {
     if (target < 0x10000) return false;
 #if defined(_WIN32)
     MEMORY_BASIC_INFORMATION mbi{};
     if (VirtualQuery(reinterpret_cast<LPCVOID>(target), &mbi, sizeof(mbi)) != 0) {
         if (mbi.State == MEM_COMMIT && !(mbi.Protect & PAGE_NOACCESS) && !(mbi.Protect & PAGE_GUARD)) {
-            return (mbi.Protect & (PAGE_READONLY | PAGE_READWRITE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE)) != 0;
+            uintptr_t regionEnd = reinterpret_cast<uintptr_t>(mbi.BaseAddress) + mbi.RegionSize;
+            return target + len <= regionEnd &&
+                   (mbi.Protect & (PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READ |
+                                   PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)) != 0;
         }
     }
     return false;
@@ -45,6 +54,220 @@ bool IsReadableAddress(uintptr_t target, size_t len = sizeof(uintptr_t)) {
 #endif
 }
 
+std::string BaseNameOf(const std::string& p) {
+    size_t s = p.find_last_of("/\\");
+    return s == std::string::npos ? p : p.substr(s + 1);
+}
+
+std::string Hex(uintptr_t v) {
+    std::ostringstream ss;
+    ss << "0x" << std::hex << v;
+    return ss.str();
+}
+
+// Original on-disk bytes of a function prologue. `mask[i] == false` means "do not compare /
+// restore this byte" (it is patched by the loader through a base relocation).
+struct DiskPrologue {
+    bool valid{false};
+    uint8_t bytes[kPrologueLen]{};
+    bool mask[kPrologueLen]{};
+};
+
+std::mutex g_cacheMutex;
+std::map<uintptr_t, DiskPrologue> g_diskCache;
+
+#if defined(_WIN32)
+
+std::string ModuleOfAddress(uintptr_t addr, std::wstring* widePath = nullptr) {
+    HMODULE mod = nullptr;
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                            reinterpret_cast<LPCWSTR>(addr), &mod) || !mod) {
+        return "";
+    }
+    wchar_t path[MAX_PATH * 2]{};
+    if (!GetModuleFileNameW(mod, path, MAX_PATH * 2)) return "";
+    if (widePath) *widePath = path;
+    char utf8[MAX_PATH * 4]{};
+    WideCharToMultiByte(CP_UTF8, 0, path, -1, utf8, sizeof(utf8), nullptr, nullptr);
+    return utf8;
+}
+
+// Reads the function's bytes from the PE file on disk, translating RVA -> file offset through
+// the section table and masking every byte touched by a base relocation.
+DiskPrologue ReadDiskPrologue(uintptr_t addr) {
+    DiskPrologue out;
+    std::wstring path;
+    if (ModuleOfAddress(addr, &path).empty()) return out;
+    HMODULE mod = nullptr;
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                            reinterpret_cast<LPCWSTR>(addr), &mod)) {
+        return out;
+    }
+    const uint32_t rva = static_cast<uint32_t>(addr - reinterpret_cast<uintptr_t>(mod));
+
+    HANDLE f = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE, nullptr,
+                           OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (f == INVALID_HANDLE_VALUE) return out;
+    LARGE_INTEGER sz{};
+    if (!GetFileSizeEx(f, &sz) || sz.QuadPart <= 0 || sz.QuadPart > (512ll << 20)) { CloseHandle(f); return out; }
+    std::vector<uint8_t> file(static_cast<size_t>(sz.QuadPart));
+    DWORD got = 0;
+    bool ok = ReadFile(f, file.data(), static_cast<DWORD>(file.size()), &got, nullptr) && got == file.size();
+    CloseHandle(f);
+    if (!ok || file.size() < sizeof(IMAGE_DOS_HEADER)) return out;
+
+    auto rd = [&](size_t off, size_t len) { return off + len <= file.size(); };
+    auto dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(file.data());
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE || !rd(static_cast<size_t>(dos->e_lfanew), sizeof(IMAGE_NT_HEADERS64))) return out;
+    auto nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(file.data() + dos->e_lfanew);
+    if (nt->Signature != IMAGE_NT_SIGNATURE || nt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC) return out;
+
+    const size_t secOff = static_cast<size_t>(dos->e_lfanew) + offsetof(IMAGE_NT_HEADERS64, OptionalHeader) +
+                          nt->FileHeader.SizeOfOptionalHeader;
+    const WORD nsec = nt->FileHeader.NumberOfSections;
+    if (!rd(secOff, static_cast<size_t>(nsec) * sizeof(IMAGE_SECTION_HEADER))) return out;
+    auto sections = reinterpret_cast<const IMAGE_SECTION_HEADER*>(file.data() + secOff);
+
+    auto rvaToOff = [&](uint32_t r, size_t len, size_t& offOut) {
+        for (WORD i = 0; i < nsec; ++i) {
+            const auto& s = sections[i];
+            uint32_t vsz = std::max<uint32_t>(s.Misc.VirtualSize, s.SizeOfRawData);
+            if (r >= s.VirtualAddress && r + len <= s.VirtualAddress + vsz &&
+                r + len <= s.VirtualAddress + s.SizeOfRawData) {
+                offOut = static_cast<size_t>(s.PointerToRawData) + (r - s.VirtualAddress);
+                return rd(offOut, len);
+            }
+        }
+        return false;
+    };
+
+    size_t codeOff = 0;
+    if (!rvaToOff(rva, kPrologueLen, codeOff)) return out;
+    std::memcpy(out.bytes, file.data() + codeOff, kPrologueLen);
+    for (bool& m : out.mask) m = true;
+
+    // Mask bytes covered by base relocations (absolute addresses rebased by the loader)
+    const auto& relDir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC];
+    size_t relOff = 0;
+    if (relDir.VirtualAddress && relDir.Size && rvaToOff(relDir.VirtualAddress, relDir.Size, relOff)) {
+        size_t p = relOff, end = relOff + relDir.Size;
+        while (p + sizeof(IMAGE_BASE_RELOCATION) <= end) {
+            auto blk = reinterpret_cast<const IMAGE_BASE_RELOCATION*>(file.data() + p);
+            if (blk->SizeOfBlock < sizeof(IMAGE_BASE_RELOCATION) || p + blk->SizeOfBlock > end) break;
+            size_t n = (blk->SizeOfBlock - sizeof(IMAGE_BASE_RELOCATION)) / sizeof(WORD);
+            auto ent = reinterpret_cast<const WORD*>(file.data() + p + sizeof(IMAGE_BASE_RELOCATION));
+            for (size_t i = 0; i < n; ++i) {
+                int type = ent[i] >> 12;
+                uint32_t at = blk->VirtualAddress + (ent[i] & 0x0FFF);
+                size_t width = (type == IMAGE_REL_BASED_DIR64) ? 8 : (type == IMAGE_REL_BASED_HIGHLOW ? 4 : 0);
+                for (size_t b = 0; b < width; ++b) {
+                    uint32_t byteRva = at + static_cast<uint32_t>(b);
+                    if (byteRva >= rva && byteRva < rva + kPrologueLen) out.mask[byteRva - rva] = false;
+                }
+            }
+            p += blk->SizeOfBlock;
+        }
+    }
+    out.valid = true;
+    return out;
+}
+
+#else // Linux
+
+void* LibcHandle() {
+    static void* h = []() -> void* {
+        void* x = dlopen("libc.so.6", RTLD_NOW | RTLD_NOLOAD);
+        return x;
+    }();
+    return h;
+}
+
+std::string ModuleOfAddress(uintptr_t addr) {
+    Dl_info info{};
+    if (dladdr(reinterpret_cast<void*>(addr), &info) && info.dli_fname && info.dli_fname[0]) {
+        return info.dli_fname;
+    }
+    // dladdr only knows ELF objects; fall back to the mapping's backing file
+    for (const auto& r : MemoryScanner::Instance().QueryMemoryRegions()) {
+        if (addr >= r.start && addr < r.end) {
+            return r.is_backed_by_file ? r.pathname : "";
+        }
+    }
+    return "";
+}
+
+DiskPrologue ReadDiskPrologue(uintptr_t addr) {
+    DiskPrologue out;
+    Dl_info dlinfo{};
+    if (!dladdr(reinterpret_cast<void*>(addr), &dlinfo) || !dlinfo.dli_fname || !dlinfo.dli_fbase ||
+        dlinfo.dli_fname[0] != '/') {
+        return out; // vDSO / anonymous: no on-disk reference
+    }
+    std::ifstream diskFile(dlinfo.dli_fname, std::ios::binary);
+    if (!diskFile.is_open()) return out;
+
+    Elf64_Ehdr eh{};
+    diskFile.read(reinterpret_cast<char*>(&eh), sizeof(eh));
+    if (diskFile.gcount() != static_cast<std::streamsize>(sizeof(eh)) ||
+        std::memcmp(eh.e_ident, ELFMAG, SELFMAG) != 0 || eh.e_ident[EI_CLASS] != ELFCLASS64 ||
+        eh.e_phentsize < sizeof(Elf64_Phdr) || eh.e_phnum > 512) {
+        return out;
+    }
+    const uint64_t vaddr = addr - reinterpret_cast<uintptr_t>(dlinfo.dli_fbase);
+    for (uint16_t i = 0; i < eh.e_phnum; ++i) {
+        Elf64_Phdr ph{};
+        diskFile.seekg(static_cast<std::streamoff>(eh.e_phoff + static_cast<uint64_t>(i) * eh.e_phentsize));
+        diskFile.read(reinterpret_cast<char*>(&ph), sizeof(ph));
+        if (diskFile.gcount() != static_cast<std::streamsize>(sizeof(ph))) return out;
+        if (ph.p_type != PT_LOAD || vaddr < ph.p_vaddr || vaddr + kPrologueLen > ph.p_vaddr + ph.p_filesz) continue;
+        diskFile.seekg(static_cast<std::streamoff>(ph.p_offset + (vaddr - ph.p_vaddr)));
+        diskFile.read(reinterpret_cast<char*>(out.bytes), kPrologueLen);
+        if (diskFile.gcount() != static_cast<std::streamsize>(kPrologueLen)) return out;
+        for (bool& m : out.mask) m = true; // PIC text carries no load-time relocations
+        out.valid = true;
+        return out;
+    }
+    return out;
+}
+
+// Writes through /proc/self/mem: the kernel performs the write with FOLL_FORCE, so read-only
+// text can be patched without ever making the page writable+executable (no RWX window that
+// another thread or a cheat could abuse).
+bool WriteViaProcMem(uintptr_t addr, const uint8_t* data, size_t len) {
+    int fd = open("/proc/self/mem", O_RDWR | O_CLOEXEC);
+    if (fd < 0) return false;
+    ssize_t w = pwrite(fd, data, len, static_cast<off_t>(addr));
+    close(fd);
+    if (w != static_cast<ssize_t>(len)) return false;
+    __builtin___clear_cache(reinterpret_cast<char*>(addr), reinterpret_cast<char*>(addr + len));
+    return true;
+}
+
+#endif
+
+DiskPrologue CachedDiskPrologue(uintptr_t addr) {
+    {
+        std::lock_guard<std::mutex> l(g_cacheMutex);
+        auto it = g_diskCache.find(addr);
+        if (it != g_diskCache.end()) return it->second;
+    }
+    DiskPrologue d = ReadDiskPrologue(addr);
+    std::lock_guard<std::mutex> l(g_cacheMutex);
+    if (g_diskCache.size() > 4096) g_diskCache.clear();
+    g_diskCache[addr] = d;
+    return d;
+}
+
+bool IsWhitelistedInterposer(const std::string& module) {
+    std::string b = BaseNameOf(module);
+    for (const char* ok : {"libasan", "libtsan", "libubsan", "liblsan", "libhwasan", "libnoescape",
+                           "libmangohud", "libgamemode", "gameoverlayrenderer", "libvkbasalt",
+                           "libc.so", "libpthread", "ld-linux", "libdl.so"}) {
+        if (b.rfind(ok, 0) == 0) return true;
+    }
+    return false;
+}
+
 } // namespace
 
 std::optional<HookInfo> Unhooker::InspectFunction(const char* name, void* function_ptr) {
@@ -56,203 +279,247 @@ std::optional<HookInfo> Unhooker::InspectFunction(const char* name, void* functi
     }
 
     const auto* code = static_cast<const uint8_t*>(function_ptr);
+    HookInfo info;
+    info.function_name = name ? name : "Unknown";
+    info.function_address = addr;
 
     // Pattern 1: E9 xx xx xx xx -> JMP rel32
     if (code[0] == 0xE9) {
         int32_t relOffset = 0;
         std::memcpy(&relOffset, code + 1, sizeof(relOffset));
-        uintptr_t dest = addr + 5 + relOffset;
-
-        HookInfo info;
-        info.function_name = name ? name : "Unknown";
-        info.function_address = addr;
         info.hook_type = "JMP_REL32 (0xE9)";
-        info.target_destination = dest;
+        info.target_destination = addr + 5 + static_cast<intptr_t>(relOffset);
         info.patched_bytes.assign(code, code + 5);
         return info;
     }
-
-    // Pattern 2: EB xx -> JMP rel8 (short jump to hook stub)
+    // Pattern 2: EB xx -> JMP rel8
     if (code[0] == 0xEB) {
         int8_t rel = static_cast<int8_t>(code[1]);
-        uintptr_t dest = addr + 2 + rel;
-
-        HookInfo info;
-        info.function_name = name ? name : "Unknown";
-        info.function_address = addr;
         info.hook_type = "JMP_REL8 (0xEB)";
-        info.target_destination = dest;
+        info.target_destination = addr + 2 + rel;
         info.patched_bytes.assign(code, code + 2);
         return info;
     }
-
-    // Pattern 3: FF 25 xx xx xx xx -> JMP [RIP + disp32] (x64 indirect jump)
+    // Pattern 3: FF 25 disp32 -> JMP [RIP + disp32]
     if (code[0] == 0xFF && code[1] == 0x25) {
         int32_t disp = 0;
         std::memcpy(&disp, code + 2, sizeof(disp));
-        uintptr_t targetPtr = addr + 6 + disp;
+        uintptr_t targetPtr = addr + 6 + static_cast<intptr_t>(disp);
         uintptr_t dest = 0;
-        // Verify address mapping safely before dereferencing to prevent SIGSEGV
         if (IsReadableAddress(targetPtr, sizeof(dest))) {
             std::memcpy(&dest, reinterpret_cast<const void*>(targetPtr), sizeof(dest));
         }
-
-        HookInfo info;
-        info.function_name = name ? name : "Unknown";
-        info.function_address = addr;
         info.hook_type = "JMP_RIP_DISP32 (0xFF 0x25)";
         info.target_destination = dest;
         info.patched_bytes.assign(code, code + 6);
         return info;
     }
-
-    // Pattern 4: 48 B8 [imm64] FF E0 -> MOV RAX, imm64; JMP RAX
+    // Pattern 4: 48 B8 imm64 FF E0 -> MOV RAX, imm64; JMP RAX
     if (code[0] == 0x48 && code[1] == 0xB8 && code[10] == 0xFF && code[11] == 0xE0) {
         uint64_t dest = 0;
         std::memcpy(&dest, code + 2, sizeof(dest));
-
-        HookInfo info;
-        info.function_name = name ? name : "Unknown";
-        info.function_address = addr;
         info.hook_type = "MOV_RAX_JMP_RAX (0x48 0xB8 ... 0xFF 0xE0)";
         info.target_destination = static_cast<uintptr_t>(dest);
         info.patched_bytes.assign(code, code + 12);
         return info;
     }
-
-    // Pattern 5: 49 BA [imm64] 41 FF E2 -> MOV R10, imm64; JMP R10 (MinHook / Detours 64-bit jump)
+    // Pattern 5: 49 BA imm64 41 FF E2 -> MOV R10, imm64; JMP R10
     if (code[0] == 0x49 && code[1] == 0xBA && code[10] == 0x41 && code[11] == 0xFF && code[12] == 0xE2) {
         uint64_t dest = 0;
         std::memcpy(&dest, code + 2, sizeof(dest));
-
-        HookInfo info;
-        info.function_name = name ? name : "Unknown";
-        info.function_address = addr;
         info.hook_type = "MOV_R10_JMP_R10 (0x49 0xBA ... 0x41 0xFF 0xE2)";
         info.target_destination = static_cast<uintptr_t>(dest);
         info.patched_bytes.assign(code, code + 13);
         return info;
     }
-
-    // Pattern 6: 49 BB [imm64] 41 FF E3 -> MOV R11, imm64; JMP R11
+    // Pattern 6: 49 BB imm64 41 FF E3 -> MOV R11, imm64; JMP R11
     if (code[0] == 0x49 && code[1] == 0xBB && code[10] == 0x41 && code[11] == 0xFF && code[12] == 0xE3) {
         uint64_t dest = 0;
         std::memcpy(&dest, code + 2, sizeof(dest));
-
-        HookInfo info;
-        info.function_name = name ? name : "Unknown";
-        info.function_address = addr;
         info.hook_type = "MOV_R11_JMP_R11 (0x49 0xBB ... 0x41 0xFF 0xE3)";
         info.target_destination = static_cast<uintptr_t>(dest);
         info.patched_bytes.assign(code, code + 13);
         return info;
     }
-
-    // Pattern 7: 68 [imm32_low] C7 44 24 04 [imm32_high] C3 -> Push-Ret x64 Jump
+    // Pattern 7: 68 imm32 C7 44 24 04 imm32 C3 -> push/ret 64-bit jump
     if (code[0] == 0x68 && code[5] == 0xC7 && code[6] == 0x44 && code[7] == 0x24 && code[8] == 0x04 && code[13] == 0xC3) {
         uint32_t low = 0, high = 0;
         std::memcpy(&low, code + 1, sizeof(low));
         std::memcpy(&high, code + 9, sizeof(high));
-        uint64_t dest = (static_cast<uint64_t>(high) << 32) | low;
-
-        HookInfo info;
-        info.function_name = name ? name : "Unknown";
-        info.function_address = addr;
         info.hook_type = "PUSH_RET_X64 (0x68 ... 0xC3)";
-        info.target_destination = static_cast<uintptr_t>(dest);
+        info.target_destination = static_cast<uintptr_t>((static_cast<uint64_t>(high) << 32) | low);
         info.patched_bytes.assign(code, code + 14);
         return info;
     }
-
-    // Pattern 8: CC -> Software Breakpoint (INT 3)
+    // Pattern 8: CC -> software breakpoint
     if (code[0] == 0xCC) {
-        HookInfo info;
-        info.function_name = name ? name : "Unknown";
-        info.function_address = addr;
         info.hook_type = "SOFTWARE_BREAKPOINT (0xCC)";
         info.target_destination = 0;
         info.patched_bytes.assign(code, code + 1);
         return info;
     }
-
     return std::nullopt;
 }
 
 std::vector<core::DetectionEvent> Unhooker::AuditSystemHooks() {
     std::vector<core::DetectionEvent> events;
 
-    std::vector<std::pair<const char*, void*>> apisToCheck;
+    struct Api { const char* name; void* ptr; bool restorable; };
+    std::vector<Api> apis;
 
 #if defined(_WIN32)
-    HMODULE hNtdll = GetModuleHandleA("ntdll.dll");
-    if (hNtdll) {
-        apisToCheck.emplace_back("NtQueryInformationProcess", GetProcAddress(hNtdll, "NtQueryInformationProcess"));
-        apisToCheck.emplace_back("NtSetInformationThread", GetProcAddress(hNtdll, "NtSetInformationThread"));
-        apisToCheck.emplace_back("NtProtectVirtualMemory", GetProcAddress(hNtdll, "NtProtectVirtualMemory"));
-    }
-    HMODULE hKernel32 = GetModuleHandleA("kernel32.dll");
-    if (hKernel32) {
-        apisToCheck.emplace_back("CreateRemoteThread", GetProcAddress(hKernel32, "CreateRemoteThread"));
-        apisToCheck.emplace_back("VirtualProtect", GetProcAddress(hKernel32, "VirtualProtect"));
-    }
+    auto add = [&](HMODULE m, const char* fn, bool restorable) {
+        if (!m) return;
+        if (void* p = reinterpret_cast<void*>(GetProcAddress(m, fn))) apis.push_back({fn, p, restorable});
+    };
+    HMODULE ntdll = GetModuleHandleA("ntdll.dll");
+    HMODULE kbase = GetModuleHandleA("kernelbase.dll");
+    HMODULE k32 = GetModuleHandleA("kernel32.dll");
+    for (const char* fn : {"NtQueryInformationProcess", "NtSetInformationThread", "NtProtectVirtualMemory",
+                           "NtReadVirtualMemory", "NtWriteVirtualMemory", "NtQueryVirtualMemory",
+                           "NtCreateThreadEx", "LdrLoadDll", "NtQueryPerformanceCounter"}) add(ntdll, fn, true);
+    for (const char* fn : {"VirtualProtect", "ReadProcessMemory", "WriteProcessMemory",
+                           "QueryPerformanceCounter", "GetTickCount64"}) add(kbase, fn, true);
+    for (const char* fn : {"CreateRemoteThread", "VirtualProtect"}) add(k32, fn, true);
 #else
-    apisToCheck.emplace_back("read", dlsym(RTLD_DEFAULT, "read"));
-    apisToCheck.emplace_back("write", dlsym(RTLD_DEFAULT, "write"));
-    apisToCheck.emplace_back("open", dlsym(RTLD_DEFAULT, "open"));
-    apisToCheck.emplace_back("mprotect", dlsym(RTLD_DEFAULT, "mprotect"));
-    apisToCheck.emplace_back("ptrace", dlsym(RTLD_DEFAULT, "ptrace"));
-#endif
+    void* libc = LibcHandle();
+    // Resolve the implementation inside libc itself: dlsym(RTLD_DEFAULT) would return the first
+    // interposer in the global scope (LD_PRELOAD libraries, sanitizer interceptors).
+    auto resolve = [&](const char* fn) -> void* {
+        return libc ? dlsym(libc, fn) : dlsym(RTLD_DEFAULT, fn);
+    };
+    for (const char* fn : {"read", "write", "open", "openat", "mmap", "mprotect", "ptrace",
+                           "clock_gettime", "gettimeofday", "nanosleep", "clock_nanosleep",
+                           "connect", "send", "recv", "sendto", "recvfrom",
+                           "process_vm_readv", "process_vm_writev", "dlopen", "dlsym"}) {
+        if (void* p = resolve(fn)) apis.push_back({fn, p, true});
+    }
 
-    for (const auto& [apiName, pfn] : apisToCheck) {
-        if (!pfn) continue;
-
-        auto hook = InspectFunction(apiName, pfn);
-        if (hook) {
-            bool restored = AutoRestoreHook(*hook);
-
+    // Symbol interposition: an LD_PRELOAD'ed library overriding time / memory / tracing APIs
+    // (classic Linux speedhack and memory-hiding technique).
+    if (libc) {
+        for (const char* fn : {"clock_gettime", "gettimeofday", "time", "nanosleep", "clock_nanosleep",
+                               "process_vm_readv", "process_vm_writev", "ptrace"}) {
+            void* real = dlsym(libc, fn);
+            void* seen = dlsym(RTLD_DEFAULT, fn);
+            if (!real || !seen || real == seen) continue;
+            std::string mod = ModuleOfAddress(reinterpret_cast<uintptr_t>(seen));
+            if (IsWhitelistedInterposer(mod)) continue;
             core::DetectionEvent ev;
             ev.type = core::DetectionType::INLINE_HOOK_DETECTED;
-            ev.severity = core::Severity::CRITICAL;
-            ev.component = "Unhooker::InlineInterceptor";
-
-            std::ostringstream ss;
-            ss << "Inline hook detected on routine '" << hook->function_name 
-               << "' [0x" << std::hex << hook->function_address << "] "
-               << "Hook Type: " << hook->hook_type 
-               << " -> Target: 0x" << hook->target_destination;
-            if (restored) {
-                ss << " [RESTORATION SUCCESS: Function prologue neutralized and restored to clean state]";
-            }
-            ev.details = ss.str();
+            ev.severity = core::Severity::HIGH;
+            ev.component = "Unhooker::SymbolInterposition";
+            ev.details = std::string("Libc routine '") + fn + "' is interposed by " +
+                         (mod.empty() ? std::string("anonymous memory") : BaseNameOf(mod));
             ev.timestamp = static_cast<uint64_t>(std::time(nullptr));
-            ev.threat_score = 90;
+            ev.threat_score = mod.empty() ? 90 : 60;
             events.push_back(ev);
         }
+    }
+#endif
+
+    for (const auto& api : apis) {
+        uintptr_t addr = reinterpret_cast<uintptr_t>(api.ptr);
+        if (!IsReadableAddress(addr, kPrologueLen)) continue;
+        const auto* mem = reinterpret_cast<const uint8_t*>(addr);
+
+        DiskPrologue disk = CachedDiskPrologue(addr);
+        bool modified = false;
+        if (disk.valid) {
+            for (size_t i = 0; i < kPrologueLen; ++i) {
+                if (disk.mask[i] && mem[i] != disk.bytes[i]) { modified = true; break; }
+            }
+            // Identical to the on-disk image: a jmp/stub prologue is the function's genuine code
+            // (e.g. kernel32 forwarders "jmp [rip+X]", musl/glibc tail calls).
+            if (!modified) continue;
+        }
+
+        auto hook = InspectFunction(api.name, api.ptr);
+        if (!modified && !hook) continue; // no disk reference and no hook pattern
+
+        HookInfo info;
+        if (hook) {
+            info = *hook;
+        } else {
+            info.function_name = api.name;
+            info.function_address = addr;
+            info.hook_type = "PROLOGUE_MODIFIED (differs from on-disk image)";
+            info.patched_bytes.assign(mem, mem + kPrologueLen);
+        }
+
+        // Classify where the detour leads. A detour into another signed/installed module is
+        // typically an overlay, AV/EDR or accessibility hook; a detour into anonymous memory is
+        // the hallmark of injected code.
+        std::string targetModule;
+        if (info.target_destination) {
+            targetModule = ModuleOfAddress(info.target_destination);
+        }
+        const bool intoModule = !targetModule.empty();
+        const bool breakpoint = info.hook_type.rfind("SOFTWARE_BREAKPOINT", 0) == 0;
+
+        core::DetectionEvent ev;
+        ev.type = core::DetectionType::INLINE_HOOK_DETECTED;
+        ev.component = "Unhooker::InlineInterceptor";
+        ev.timestamp = static_cast<uint64_t>(std::time(nullptr));
+        if (!disk.valid) {
+            ev.severity = core::Severity::MEDIUM;   // unconfirmed: no on-disk reference
+            ev.threat_score = 30;
+        } else if (intoModule) {
+            ev.severity = core::Severity::MEDIUM;   // third-party module detour
+            ev.threat_score = 30;
+        } else if (breakpoint) {
+            ev.severity = core::Severity::HIGH;     // debugger software breakpoint
+            ev.threat_score = 60;
+        } else {
+            ev.severity = core::Severity::CRITICAL; // detour into unbacked memory / unknown patch
+            ev.threat_score = 90;
+        }
+
+        bool restored = false;
+        // Only neutralise patches we are confident about; never "unhook" another installed module
+        // (that would break AV/EDR or overlays and is not evidence of cheating on its own).
+        if (disk.valid && api.restorable && !intoModule) {
+            restored = AutoRestoreHook(info);
+        }
+
+        std::ostringstream ss;
+        ss << "Inline hook detected on routine '" << info.function_name << "' [" << Hex(info.function_address)
+           << "] Hook Type: " << info.hook_type;
+        if (info.target_destination) {
+            ss << " -> Target: " << Hex(info.target_destination)
+               << (intoModule ? " (" + BaseNameOf(targetModule) + ")" : std::string(" (unbacked memory)"));
+        }
+        if (restored) ss << " [RESTORED to on-disk prologue]";
+        ev.details = ss.str();
+        events.push_back(ev);
     }
 
     return events;
 }
 
 bool Unhooker::RestoreHook(const HookInfo& hook, const uint8_t* original_bytes, size_t length) {
-    if (hook.function_address == 0 || !original_bytes || length == 0) return false;
-
+    if (hook.function_address == 0 || !original_bytes || length == 0 || length > 64) return false;
     void* targetAddr = reinterpret_cast<void*>(hook.function_address);
 
 #if defined(_WIN32)
-    DWORD oldProtect = 0;
-    if (!VirtualProtect(targetAddr, length, PAGE_EXECUTE_READWRITE, &oldProtect)) {
+    // WriteProcessMemory adjusts protection internally and restores it atomically from our view
+    SIZE_T written = 0;
+    if (!WriteProcessMemory(GetCurrentProcess(), targetAddr, original_bytes, length, &written) || written != length) {
         return false;
     }
-    std::memcpy(targetAddr, original_bytes, length);
-    VirtualProtect(targetAddr, length, oldProtect, &oldProtect);
     FlushInstructionCache(GetCurrentProcess(), targetAddr, length);
     return true;
 #else
+    if (WriteViaProcMem(hook.function_address, original_bytes, length)) {
+        return true;
+    }
+
+    // Fallback (e.g. /proc unavailable): briefly add write permission, never dropping exec so
+    // concurrently running threads keep executing.
     long pageSize = sysconf(_SC_PAGESIZE);
     if (pageSize <= 0) pageSize = 4096;
-
-    uintptr_t pageStart = hook.function_address & ~(pageSize - 1);
-    size_t mappingLen = (hook.function_address + length - pageStart + pageSize - 1) & ~(pageSize - 1);
+    uintptr_t pageStart = hook.function_address & ~(static_cast<uintptr_t>(pageSize) - 1);
+    size_t mappingLen = (hook.function_address + length - pageStart + pageSize - 1) & ~(static_cast<uintptr_t>(pageSize) - 1);
 
     int originalProt = PROT_READ | PROT_EXEC;
     for (const auto& reg : MemoryScanner::Instance().QueryMemoryRegions()) {
@@ -264,13 +531,10 @@ bool Unhooker::RestoreHook(const HookInfo& hook, const uint8_t* original_bytes, 
             break;
         }
     }
-
     if (mprotect(reinterpret_cast<void*>(pageStart), mappingLen, PROT_READ | PROT_WRITE | PROT_EXEC) != 0) {
         return false;
     }
-
     std::memcpy(targetAddr, original_bytes, length);
-
     mprotect(reinterpret_cast<void*>(pageStart), mappingLen, originalProt);
     __builtin___clear_cache(static_cast<char*>(targetAddr), static_cast<char*>(targetAddr) + length);
     return true;
@@ -279,45 +543,25 @@ bool Unhooker::RestoreHook(const HookInfo& hook, const uint8_t* original_bytes, 
 
 bool Unhooker::AutoRestoreHook(const HookInfo& hook) {
     if (hook.function_address == 0) return false;
+    DiskPrologue disk = CachedDiskPrologue(hook.function_address);
+    if (!disk.valid) return false;
 
-#if defined(_WIN32)
-    // PE file offsets differ from RVAs (section alignment); restoring from a naive
-    // offset would corrupt code, so automatic restoration is disabled until a
-    // section-aware mapping is implemented.
-    return false;
-#else
-    Dl_info dlinfo{};
-    if (!dladdr(reinterpret_cast<void*>(hook.function_address), &dlinfo) || !dlinfo.dli_fname || !dlinfo.dli_fbase) {
-        return false;
+    // Restore byte-by-byte only where the disk image is authoritative (relocated bytes keep the
+    // loader's value), coalescing contiguous runs into single writes.
+    const auto* mem = reinterpret_cast<const uint8_t*>(hook.function_address);
+    bool any = false, ok = true;
+    size_t i = 0;
+    while (i < kPrologueLen) {
+        if (!disk.mask[i] || mem[i] == disk.bytes[i]) { ++i; continue; }
+        size_t j = i;
+        while (j < kPrologueLen && disk.mask[j]) ++j;
+        HookInfo part = hook;
+        part.function_address = hook.function_address + i;
+        ok = RestoreHook(part, disk.bytes + i, j - i) && ok;
+        any = true;
+        i = j;
     }
-
-    std::ifstream diskFile(dlinfo.dli_fname, std::ios::binary);
-    if (!diskFile.is_open()) return false;
-
-    Elf64_Ehdr eh{};
-    diskFile.read(reinterpret_cast<char*>(&eh), sizeof(eh));
-    if (diskFile.gcount() != static_cast<std::streamsize>(sizeof(eh)) ||
-        std::memcmp(eh.e_ident, ELFMAG, SELFMAG) != 0 || eh.e_ident[EI_CLASS] != ELFCLASS64) {
-        return false;
-    }
-
-    // Translate virtual address -> file offset through PT_LOAD program headers
-    const uint64_t vaddr = hook.function_address - reinterpret_cast<uintptr_t>(dlinfo.dli_fbase);
-    for (uint16_t i = 0; i < eh.e_phnum; ++i) {
-        Elf64_Phdr ph{};
-        diskFile.seekg(static_cast<std::streamoff>(eh.e_phoff + static_cast<uint64_t>(i) * eh.e_phentsize));
-        diskFile.read(reinterpret_cast<char*>(&ph), sizeof(ph));
-        if (diskFile.gcount() != static_cast<std::streamsize>(sizeof(ph))) return false;
-        if (ph.p_type != PT_LOAD || vaddr < ph.p_vaddr || vaddr + 16 > ph.p_vaddr + ph.p_filesz) continue;
-
-        uint8_t originalBytes[16]{};
-        diskFile.seekg(static_cast<std::streamoff>(ph.p_offset + (vaddr - ph.p_vaddr)));
-        diskFile.read(reinterpret_cast<char*>(originalBytes), sizeof(originalBytes));
-        if (diskFile.gcount() != static_cast<std::streamsize>(sizeof(originalBytes))) return false;
-        return RestoreHook(hook, originalBytes, sizeof(originalBytes));
-    }
-    return false;
-#endif
+    return any && ok;
 }
 
 } // namespace noescape::memory

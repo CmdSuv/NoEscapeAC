@@ -92,6 +92,11 @@ struct DetectionEvent {
 struct EngineConfig {
     std::string panelUrl{"http://127.0.0.1:8080/api/ac"};
     std::string secretKey{"NoEscape_Secret_Key_v2.0"};
+    // Optional SHA-256 (hex) of the panel's TLS SubjectPublicKeyInfo. When set, https:// panel
+    // connections succeed only if the server presents exactly this key.
+    std::string panelPinSha256{""};
+    // Host embeds a JIT (LuaJIT, V8/CEF, Mono, ...): anonymous executable memory is expected.
+    bool hostUsesJit{false};
     std::string blackboxDumpDirectory{""};
     bool enforceBanOnViolation{true};
     uint32_t banScoreThreshold{100};

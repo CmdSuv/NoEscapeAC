@@ -10,6 +10,15 @@
 #define NOESCAPE_X86 1
 #endif
 
+// The scanner deliberately reads arbitrary process memory (including allocator redzones), so it
+// must not be instrumented by AddressSanitizer / HWASan, or every audit would report a false
+// "overflow". Production builds are unaffected.
+#if defined(__clang__) || defined(__GNUC__)
+#define NOESCAPE_NO_SANITIZE __attribute__((no_sanitize("address", "hwaddress")))
+#else
+#define NOESCAPE_NO_SANITIZE
+#endif
+
 namespace noescape::memory {
 
 Pattern::Pattern(std::string_view ida_pattern, std::string name) 
@@ -60,7 +69,7 @@ Pattern::Pattern(const uint8_t* bytes, const char* mask, std::string name)
     }
 }
 
-inline bool PatternScanner::MatchAt(const uint8_t* ptr, const Pattern& pattern) {
+NOESCAPE_NO_SANITIZE inline bool PatternScanner::MatchAt(const uint8_t* ptr, const Pattern& pattern) {
     const auto& bytes = pattern.GetBytes();
     const size_t len = bytes.size();
     for (size_t i = 0; i < len; ++i) {
@@ -71,7 +80,7 @@ inline bool PatternScanner::MatchAt(const uint8_t* ptr, const Pattern& pattern) 
     return true;
 }
 
-const uint8_t* PatternScanner::ScanScalar(
+NOESCAPE_NO_SANITIZE const uint8_t* PatternScanner::ScanScalar(
     const uint8_t* data, 
     size_t size, 
     const Pattern& pattern
@@ -101,7 +110,7 @@ const uint8_t* PatternScanner::ScanScalar(
 
 namespace {
 
-inline bool MatchAtFree(const uint8_t* ptr, const Pattern& pattern) {
+NOESCAPE_NO_SANITIZE inline bool MatchAtFree(const uint8_t* ptr, const Pattern& pattern) {
     const auto& bytes = pattern.GetBytes();
     for (size_t i = 0; i < bytes.size(); ++i) {
         if (!bytes[i].is_wildcard && ptr[i] != bytes[i].value) return false;
@@ -109,7 +118,7 @@ inline bool MatchAtFree(const uint8_t* ptr, const Pattern& pattern) {
     return true;
 }
 
-const uint8_t* ScanScalarFree(const uint8_t* data, size_t size, const Pattern& pattern) {
+NOESCAPE_NO_SANITIZE const uint8_t* ScanScalarFree(const uint8_t* data, size_t size, const Pattern& pattern) {
     if (size < pattern.Length()) return nullptr;
     if (!pattern.HasNonWildcard()) return data;
     const size_t max_scan = size - pattern.Length();
@@ -150,7 +159,7 @@ const uint8_t* ScanScalarFree(const uint8_t* data, size_t size, const Pattern& p
 #if defined(NOESCAPE_RUNTIME_DISPATCH)
 __attribute__((target("avx2")))
 #endif
-const uint8_t* ScanAvx2Impl(const uint8_t* data, size_t size, const Pattern& pattern) {
+NOESCAPE_NO_SANITIZE const uint8_t* ScanAvx2Impl(const uint8_t* data, size_t size, const Pattern& pattern) {
 #if defined(__AVX2__) || defined(NOESCAPE_RUNTIME_DISPATCH)
     NOESCAPE_SIMD_BODY(32, _mm256_set1_epi8, _mm256_loadu_si256, _mm256_cmpeq_epi8, _mm256_movemask_epi8, __m256i)
 #else
@@ -158,7 +167,7 @@ const uint8_t* ScanAvx2Impl(const uint8_t* data, size_t size, const Pattern& pat
 #endif
 }
 
-const uint8_t* ScanSse2Impl(const uint8_t* data, size_t size, const Pattern& pattern) {
+NOESCAPE_NO_SANITIZE const uint8_t* ScanSse2Impl(const uint8_t* data, size_t size, const Pattern& pattern) {
     NOESCAPE_SIMD_BODY(16, _mm_set1_epi8, _mm_loadu_si128, _mm_cmpeq_epi8, _mm_movemask_epi8, __m128i)
 }
 

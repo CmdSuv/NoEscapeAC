@@ -30,6 +30,9 @@ void SetActiveEngine(std::shared_ptr<noescape::core::AntiCheatEngine> e) {
 
 // Dedicated high-frequency input mutex to guarantee zero-stutter mouse processing
 std::mutex g_input_mutex;
+std::mutex g_preinit_mutex;
+std::string g_panel_pin;
+bool g_host_uses_jit = false;
 float g_accum_pitch = 0.0f;
 float g_accum_yaw = 0.0f;
 
@@ -102,6 +105,11 @@ int NoEscape_Init(const NoEscapeConfig* config) {
         engineCfg.enableHeartbeat = false;
     }
 
+    {
+        std::lock_guard<std::mutex> l(g_preinit_mutex);
+        engineCfg.panelPinSha256 = g_panel_pin;
+        engineCfg.hostUsesJit = g_host_uses_jit;
+    }
     g_engine = std::make_shared<noescape::core::AntiCheatEngine>(engineCfg);
 
     // Wire violation callback to notify the registered C callback for every detection event
@@ -211,6 +219,16 @@ bool NoEscape_IsBanned(void) {
     auto engine = ActiveEngine();
     if (!engine) return false;
     return engine->IsBanned();
+}
+
+void NoEscape_SetPanelPin(const char* spki_sha256_hex) {
+    std::lock_guard<std::mutex> l(g_preinit_mutex);
+    g_panel_pin = spki_sha256_hex ? spki_sha256_hex : "";
+}
+
+void NoEscape_SetHostUsesJit(bool uses_jit) {
+    std::lock_guard<std::mutex> l(g_preinit_mutex);
+    g_host_uses_jit = uses_jit;
 }
 
 void NoEscape_SetViolationCallback(NoEscapeViolationCallback callback) {

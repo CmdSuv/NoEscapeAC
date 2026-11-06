@@ -104,13 +104,17 @@ std::vector<ProcessRecord> ProcessAnalyzer::EnumerateProcesses() {
 
             HANDLE hProc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pe.th32ProcessID);
             if (hProc) {
-                char fullPath[MAX_PATH]{};
+                // Wide APIs: ANSI variants mangle non-ASCII paths (e.g. C:\Users\Yiğit\...) into '?'
+                // which made GetFileAttributes fail and flagged every such process as "deleted".
+                wchar_t fullPathW[MAX_PATH]{};
                 DWORD size = MAX_PATH;
-                if (QueryFullProcessImageNameA(hProc, 0, fullPath, &size)) {
-                    rec.path = fullPath;
-                    // Detect unlinked / ghosted executables on Windows
-                    DWORD attrs = GetFileAttributesA(fullPath);
-                    if (attrs == INVALID_FILE_ATTRIBUTES) {
+                if (QueryFullProcessImageNameW(hProc, 0, fullPathW, &size)) {
+                    char utf8[MAX_PATH * 4]{};
+                    WideCharToMultiByte(CP_UTF8, 0, fullPathW, -1, utf8, sizeof(utf8), nullptr, nullptr);
+                    rec.path = utf8;
+                    DWORD attrs = GetFileAttributesW(fullPathW);
+                    DWORD err = (attrs == INVALID_FILE_ATTRIBUTES) ? GetLastError() : 0;
+                    if (attrs == INVALID_FILE_ATTRIBUTES && (err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND)) {
                         rec.is_deleted_binary = true;
                     }
                 }
@@ -292,7 +296,8 @@ std::vector<core::DetectionEvent> ProcessAnalyzer::AuditProcesses(
         // A binary deleted by a package upgrade (or runc/Chrome re-exec via memfd) is routine; only
         // executables running from volatile locations are a meaningful anti-forensics signal.
         const bool volatileExe = lowerPath.rfind("/dev/shm", 0) == 0 || lowerPath.rfind("/tmp", 0) == 0 ||
-                                 lowerPath.rfind("/var/tmp", 0) == 0 || lowerPath.rfind("/memfd:", 0) == 0;
+                                 lowerPath.rfind("/var/tmp", 0) == 0 || lowerPath.rfind("/memfd:", 0) == 0 ||
+                                 lowerPath.find("\\temp\\") != std::string::npos;
         const bool benignExe = lowerPath.find("runc") != std::string::npos ||
                                lowerPath.find("memfd:libffi") != std::string::npos ||
                                lowerPath.find("memfd:chrome") != std::string::npos ||

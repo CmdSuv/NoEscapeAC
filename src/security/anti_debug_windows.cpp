@@ -8,8 +8,12 @@
 #include <intrin.h>
 #include <algorithm>
 #include <cctype>
+#include <ctime>
+#include "noescape/core/envutil.hpp"
 
+#if defined(_MSC_VER)
 #pragma comment(lib, "ntdll.lib")
+#endif
 
 namespace noescape::security {
 
@@ -66,15 +70,15 @@ bool AntiDebug::IsDebuggerAttached() {
 #else
         DWORD ntGlobalFlag = *reinterpret_cast<PDWORD>(reinterpret_cast<PBYTE>(peb) + 0x68);
 #endif
-        if (ntGlobalFlag & 0x70) return true;
+        (void)ntGlobalFlag; // heap-debug flags are set by gflags/AppVerifier too: not used as proof
     }
 
     // 4. NtQueryInformationProcess (ProcessDebugPort = 7)
     HMODULE hNtdll = GetModuleHandleA(NOESCAPE_XOR("ntdll.dll"));
     if (hNtdll) {
-        auto pNtQuery = reinterpret_cast<pfnNtQueryInformationProcess>(
+        auto pNtQuery = reinterpret_cast<pfnNtQueryInformationProcess>(reinterpret_cast<void*>(
             GetProcAddress(hNtdll, NOESCAPE_XOR("NtQueryInformationProcess"))
-        );
+        ));
         if (pNtQuery) {
             DWORD_PTR debugPort = 0;
             NTSTATUS status = pNtQuery(GetCurrentProcess(), 7, &debugPort, sizeof(debugPort), nullptr);
@@ -138,9 +142,9 @@ bool AntiDebug::HideCurrentThread() {
     HMODULE hNtdll = GetModuleHandleA(NOESCAPE_XOR("ntdll.dll"));
     if (!hNtdll) return false;
 
-    auto pNtSetInfo = reinterpret_cast<pfnNtSetInformationThread>(
+    auto pNtSetInfo = reinterpret_cast<pfnNtSetInformationThread>(reinterpret_cast<void*>(
         GetProcAddress(hNtdll, NOESCAPE_XOR("NtSetInformationThread"))
-    );
+    ));
     if (!pNtSetInfo) return false;
 
     // ThreadHideFromDebugger = 0x11
@@ -160,9 +164,12 @@ bool AntiDebug::CheckKnownDebuggerProcesses(const std::vector<std::string>& blac
             char nameBuf[MAX_PATH]{};
             WideCharToMultiByte(CP_UTF8, 0, pe.szExeFile, -1, nameBuf, MAX_PATH, nullptr, nullptr);
             std::string exeName = ToLower(nameBuf);
+            if (exeName.size() > 4 && exeName.compare(exeName.size() - 4, 4, ".exe") == 0) {
+                exeName.resize(exeName.size() - 4);
+            }
 
             for (const auto& target : blacklist) {
-                if (exeName.find(ToLower(target)) != std::string::npos) {
+                if (core::NameMatchesEntry(exeName, ToLower(target))) {
                     detectedName = nameBuf;
                     CloseHandle(snap);
                     return true;
@@ -184,7 +191,7 @@ std::vector<core::DetectionEvent> AntiDebug::PerformAudit(const std::vector<std:
         ev.severity = core::Severity::FATAL_BAN;
         ev.component = "AntiDebug::WindowsDebugger";
         ev.details = "Active debugger detected via PEB / RemoteDebugger / ProcessDebugPort";
-        ev.timestamp = static_cast<uint64_t>(GetTickCount64());
+        ev.timestamp = static_cast<uint64_t>(std::time(nullptr));
         ev.threat_score = 100;
         events.push_back(ev);
     }
@@ -195,7 +202,7 @@ std::vector<core::DetectionEvent> AntiDebug::PerformAudit(const std::vector<std:
         ev.severity = core::Severity::CRITICAL;
         ev.component = "AntiDebug::HardwareRegisters";
         ev.details = "Hardware breakpoint detected in CPU debug registers (DR0-DR7)";
-        ev.timestamp = static_cast<uint64_t>(GetTickCount64());
+        ev.timestamp = static_cast<uint64_t>(std::time(nullptr));
         ev.threat_score = 90;
         events.push_back(ev);
     }
@@ -207,8 +214,8 @@ std::vector<core::DetectionEvent> AntiDebug::PerformAudit(const std::vector<std:
         ev.severity = core::Severity::HIGH;
         ev.component = "AntiDebug::ProcessScanner";
         ev.details = "Known debugger / memory dumper running: " + detectedTool;
-        ev.timestamp = static_cast<uint64_t>(GetTickCount64());
-        ev.threat_score = 70;
+        ev.timestamp = static_cast<uint64_t>(std::time(nullptr));
+        ev.threat_score = 20; // also scored by ProcessAnalyzer
         events.push_back(ev);
     }
 

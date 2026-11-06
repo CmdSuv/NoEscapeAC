@@ -48,7 +48,7 @@ uint64_t GetSteadyNowMs() {
 AntiCheatEngine::AntiCheatEngine(EngineConfig config)
     : config_(std::move(config)),
       thread_pool_(2),
-      panel_client_(config_.panelUrl, config_.secretKey),
+      panel_client_(config_.panelUrl, config_.secretKey, config_.panelPinSha256),
       aim_analyzer_(64) {}
 
 AntiCheatEngine::~AntiCheatEngine() {
@@ -60,6 +60,14 @@ bool AntiCheatEngine::Initialize() {
 
     // Must run before HideCurrentThread(): it opens /proc/self handles that become
     // inaccessible once the process is marked non-dumpable.
+    memory::MemoryScanner::Instance().SetHostUsesJit(config_.hostUsesJit);
+    if (config_.panelUrl.rfind("https://", 0) == 0 && !network::PanelClient::TlsSupported()) {
+        Logger::Instance().Warn("Panel URL is https:// but this build has no TLS support: panel I/O is disabled.");
+    } else if (config_.panelUrl.rfind("http://", 0) == 0 &&
+               config_.panelUrl.find("://127.0.0.1") == std::string::npos &&
+               config_.panelUrl.find("://localhost") == std::string::npos) {
+        Logger::Instance().Warn("Panel URL uses cleartext http:// over the network; use https:// with a pin.");
+    }
     if (config_.enableMemoryScan) {
         memory::CanaryMonitor::Instance().Initialize();
         default_signatures_ = memory::MemoryScanner::GetDefaultCheatSignatures();
@@ -508,6 +516,8 @@ void AntiCheatEngine::Start() {
 
     // Long memory scans report progress so a legitimately slow scan is not mistaken for a freeze
     memory::MemoryScanner::Instance().SetProgressCallback([this]() { UpdateAuditHeartbeat(); });
+    // Background audits scan incrementally (256 MiB per cycle) so frame-time cost stays bounded
+    memory::MemoryScanner::Instance().SetScanBudget(256u << 20);
 
     thread_pool_.Enqueue([this]() {
         BackgroundLoop();
@@ -535,6 +545,7 @@ void AntiCheatEngine::Stop() {
     }
     thread_pool_.Stop();
     memory::MemoryScanner::Instance().SetProgressCallback(nullptr);
+    memory::MemoryScanner::Instance().SetScanBudget(0);
 }
 
 void AntiCheatEngine::NetworkLoop() {

@@ -30,6 +30,20 @@ if(NOESCAPE_SECURE_BUILD)
     add_compile_definitions(NOESCAPE_SECURE_BUILD)
 endif()
 
+# TLS for the panel client: OpenSSL on POSIX (optional), WinHTTP on Windows (always available).
+option(NOESCAPE_WITH_TLS "Enable https:// panel transport (OpenSSL on POSIX)" ON)
+set(NOESCAPE_TLS_LIBS "")
+if(NOESCAPE_WITH_TLS AND NOT WIN32)
+    find_package(OpenSSL)
+    if(OPENSSL_FOUND)
+        set(NOESCAPE_TLS_LIBS OpenSSL::SSL OpenSSL::Crypto)
+        add_compile_definitions(NOESCAPE_HAS_OPENSSL)
+        message(STATUS "NoEscape: TLS panel transport enabled (OpenSSL ${OPENSSL_VERSION})")
+    else()
+        message(WARNING "NoEscape: OpenSSL not found - https:// panel URLs will be refused")
+    endif()
+endif()
+
 # Core Include Directories
 include_directories(
     ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -65,12 +79,14 @@ set(CORE_SOURCES
 
 # Static Library Target (libnoescape.a / noescape_static.lib)
 add_library(noescape_core STATIC ${CORE_SOURCES})
+# Consumers of the static library must not see __declspec(dllimport) on the C API
+target_compile_definitions(noescape_core PUBLIC NOESCAPE_STATIC)
 if(WIN32)
     set_target_properties(noescape_core PROPERTIES OUTPUT_NAME "noescape_static")
-    target_link_libraries(noescape_core PUBLIC ws2_32 psapi advapi32 wintrust crypt32)
+    target_link_libraries(noescape_core PUBLIC ws2_32 psapi advapi32 wintrust crypt32 winhttp)
 else()
     set_target_properties(noescape_core PROPERTIES OUTPUT_NAME "noescape")
-    target_link_libraries(noescape_core PUBLIC pthread dl)
+    target_link_libraries(noescape_core PUBLIC pthread dl ${NOESCAPE_TLS_LIBS})
 endif()
 
 # Shared Library Target (libnoescape.so / noescape.dll)
@@ -78,9 +94,9 @@ add_library(noescape_shared SHARED ${CORE_SOURCES})
 set_target_properties(noescape_shared PROPERTIES OUTPUT_NAME "noescape")
 target_compile_definitions(noescape_shared PRIVATE NOESCAPE_EXPORTS NOESCAPE_BUILD_SHARED)
 if(WIN32)
-    target_link_libraries(noescape_shared PUBLIC ws2_32 psapi advapi32 wintrust crypt32)
+    target_link_libraries(noescape_shared PUBLIC ws2_32 psapi advapi32 wintrust crypt32 winhttp)
 else()
-    target_link_libraries(noescape_shared PUBLIC pthread dl)
+    target_link_libraries(noescape_shared PUBLIC pthread dl ${NOESCAPE_TLS_LIBS})
 endif()
 
 # Standalone Client Application

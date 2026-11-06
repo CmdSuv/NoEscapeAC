@@ -114,18 +114,30 @@ static bool ScanChunkSafe(uintptr_t chunkStart,
                           const std::vector<const CheatSignature*>& applicable,
                           std::vector<PatternScanner::SignatureMatchResult>& outMatches) {
 #if !defined(_WIN32)
-    unsigned char probe[1];
     static const size_t pageSize = []() {
         long sz = sysconf(_SC_PAGESIZE);
         return (sz > 0) ? static_cast<size_t>(sz) : 4096UL;
     }();
     uintptr_t pageMask = ~(pageSize - 1);
     uintptr_t pageStart = chunkStart & pageMask;
-    uintptr_t pageEnd = (chunkStart + chunkSize - 1) & pageMask;
+    size_t span = ((chunkStart + chunkSize - pageStart) + pageSize - 1) & pageMask;
 
-    if (mincore(reinterpret_cast<void*>(pageStart), pageSize, probe) != 0 ||
-        (pageEnd > pageStart && mincore(reinterpret_cast<void*>(pageEnd), pageSize, probe) != 0)) {
+    // One mincore() over the whole chunk: fails if any page is unmapped (region changed under
+    // us) and tells us whether anything is resident. A chunk with no resident page is either
+    // never-touched reservation (reads as zeros) or fully swapped out: skip it instead of
+    // faulting in gigabytes of zero pages.
+    thread_local std::vector<unsigned char> residency;
+    residency.assign(span / pageSize, 0);
+    if (mincore(reinterpret_cast<void*>(pageStart), span, residency.data()) != 0) {
         return false;
+    }
+    bool anyResident = false;
+    for (unsigned char v : residency) {
+        if (v & 1) { anyResident = true; break; }
+    }
+    if (!anyResident) {
+        outMatches.clear();
+        return true;
     }
 
     if (sigsetjmp(g_scanJmpBuf, 1) != 0) {
@@ -143,18 +155,18 @@ static bool ScanChunkSafe(uintptr_t chunkStart,
     g_scanActive = 0;
     return true;
 #else
-    __try {
-        outMatches = PatternScanner::ScanSignatures(
-            reinterpret_cast<const uint8_t*>(chunkStart),
-            chunkSize,
-            applicable,
-            chunkStart,
-            16
-        );
-        return true;
-    } __except(EXCEPTION_EXECUTE_HANDLER) {
+    // Windows: never dereference foreign pages directly. Copy the chunk with ReadProcessMemory,
+    // which fails cleanly on decommitted/guard/no-access pages instead of faulting (and needs no
+    // compiler-specific SEH, which also cannot be mixed with C++ object unwinding).
+    thread_local std::vector<uint8_t> copyBuf;
+    if (copyBuf.size() < chunkSize) copyBuf.resize(chunkSize);
+    SIZE_T got = 0;
+    if (!ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<LPCVOID>(chunkStart), copyBuf.data(), chunkSize, &got) ||
+        got != chunkSize) {
         return false;
     }
+    outMatches = PatternScanner::ScanSignatures(copyBuf.data(), chunkSize, applicable, chunkStart, 16);
+    return true;
 #endif
 }
 
@@ -231,7 +243,10 @@ std::vector<MemoryRegion> MemoryScanner::QueryMemoryRegionsInternal() {
             reg.size = mbi.RegionSize;
             reg.end = reg.start + reg.size;
 
-            reg.readable = (mbi.Protect & (PAGE_READONLY | PAGE_READWRITE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE)) != 0;
+            const bool inaccessible = (mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS)) != 0;
+            reg.readable = !inaccessible &&
+                (mbi.Protect & (PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READ |
+                                PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)) != 0;
             reg.writable = (mbi.Protect & (PAGE_READWRITE | PAGE_EXECUTE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_WRITECOPY)) != 0;
             reg.executable = (mbi.Protect & (PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)) != 0;
             reg.is_shared = (mbi.Type == MEM_MAPPED || mbi.Type == MEM_IMAGE);
@@ -306,7 +321,7 @@ std::vector<core::DetectionEvent> MemoryScanner::DetectUnbackedExecutableRegions
 
     // Check if host process is a JIT runtime (such as Java JVM / HotSpot or explicitly enabled JIT).
     // In Java/Minecraft, HotSpot allocates anonymous executable memory for its JIT CodeCache.
-    bool isJitRuntime = false;
+    bool isJitRuntime = HostUsesJit();
 #if !defined(_WIN32)
     char exePathBuf[PATH_MAX]{};
     ssize_t exeLen = readlink(NOESCAPE_XOR("/proc/self/exe"), exePathBuf, sizeof(exePathBuf) - 1);
@@ -516,9 +531,26 @@ std::vector<core::DetectionEvent> MemoryScanner::ScanSignatures(const std::vecto
     SafeScanGuard safeGuard;
 #endif
 
+    size_t budget = 0;
+    uintptr_t cursor = 0;
+    {
+        std::lock_guard<std::mutex> l(state_mutex_);
+        budget = scan_budget_bytes_;
+        cursor = scan_cursor_;
+    }
+    size_t scannedBytes = 0;
+    bool budgetExhausted = false;
+    uintptr_t nextCursor = 0;
+
     for (const auto& r : regions) {
+        if (budgetExhausted) break;
+        // Incremental mode: resume where the previous (budget-limited) pass stopped
+        if (budget && r.end <= cursor) continue;
         // Skip special kernel mapped regions, device memory, or unreadable/empty segments
         if (!r.readable || r.size == 0) continue;
+        // Multi-GiB anonymous reservations (sanitizer shadow, emulator/JIT address-space
+        // reservations) are not real memory; scanning them would take minutes.
+        if (!r.is_backed_by_file && r.size > (64ull << 30)) continue;
         if (r.pathname.rfind("[vvar", 0) == 0 || r.pathname == "[vsyscall]" || 
             r.pathname == "[vectors]" || r.pathname == "[vdso]") continue;
         if (r.pathname.rfind("/dev/", 0) == 0) continue;
@@ -544,9 +576,17 @@ std::vector<core::DetectionEvent> MemoryScanner::ScanSignatures(const std::vecto
         constexpr size_t kOverlap = 4096;              // 4 KB page overlap to guarantee boundary signatures are detected
 
         size_t offset = 0;
+        if (budget && cursor > r.start && cursor < r.end) {
+            offset = static_cast<size_t>(cursor - r.start) & ~static_cast<size_t>(4095);
+        }
         std::set<std::pair<uintptr_t, const CheatSignature*>> seenMatches;
 
         while (offset < r.size) {
+            if (budget && scannedBytes >= budget) {
+                budgetExhausted = true;
+                nextCursor = r.start + offset;
+                break;
+            }
             size_t currentChunkSize = std::min(kChunkSize, r.size - offset);
             uintptr_t chunkStart = r.start + offset;
 
@@ -556,6 +596,7 @@ std::vector<core::DetectionEvent> MemoryScanner::ScanSignatures(const std::vecto
                 if (cb) cb();
             }
             std::vector<PatternScanner::SignatureMatchResult> matches;
+            scannedBytes += currentChunkSize;
             if (!ScanChunkSafe(chunkStart, currentChunkSize, applicable, matches)) {
                 if (currentChunkSize <= kOverlap || offset + currentChunkSize >= r.size) break;
                 offset += (currentChunkSize - kOverlap);
@@ -607,7 +648,17 @@ std::vector<core::DetectionEvent> MemoryScanner::ScanSignatures(const std::vecto
         }
     }
 
+    if (budget) {
+        std::lock_guard<std::mutex> l(state_mutex_);
+        scan_cursor_ = budgetExhausted ? nextCursor : 0; // wrap around after a full pass
+    }
     return events;
+}
+
+void MemoryScanner::SetScanBudget(size_t bytes_per_pass) {
+    std::lock_guard<std::mutex> l(state_mutex_);
+    scan_budget_bytes_ = bytes_per_pass;
+    scan_cursor_ = 0;
 }
 
 std::vector<core::DetectionEvent> MemoryScanner::ScanSignatures(const std::vector<Pattern>& patterns) {
@@ -629,6 +680,9 @@ std::vector<core::DetectionEvent> MemoryScanner::ScanSignatures(const std::vecto
     return ScanSignatures(sigs);
 }
 
+#if defined(__clang__) || defined(__GNUC__)
+__attribute__((no_sanitize("address", "hwaddress")))
+#endif
 std::vector<core::DetectionEvent> MemoryScanner::DetectModifiedModules() {
     std::vector<core::DetectionEvent> events;
 #if defined(_WIN32)

@@ -78,6 +78,18 @@ bool CanaryMonitor::Initialize(size_t page_count) {
         uint64_t v = rng();
         std::memcpy(&expected_[i], &v, std::min<size_t>(8, size_ - i));
     }
+    // Honeypot layout: besides random noise, seed the canary with values that look like typical
+    // game state (health/armor/ammo/money as int32 and float). "Scan for value, then write"
+    // memory editors (Cheat Engine style) hit these first, turning a generic scan into a detection.
+    {
+        const int32_t ints[] = {100, 100, 30, 90, 800, 16000, 1, 0};
+        const float floats[] = {100.0f, 100.0f, 1.0f, 250.0f, 0.5f};
+        const size_t stride = 512;
+        for (size_t off = 64; off + 64 <= size_; off += stride) {
+            std::memcpy(&expected_[off], ints, sizeof(ints));
+            std::memcpy(&expected_[off + sizeof(ints)], floats, sizeof(floats));
+        }
+    }
     std::memcpy(base_, expected_.data(), size_); // also populates every page
 
 #if defined(_WIN32)
@@ -189,6 +201,22 @@ std::vector<core::DetectionEvent> CanaryMonitor::Check() {
     }
 
     ResetTracking();
+
+    // Close the check/reset window: a content-changing write that landed after PageWasWritten()
+    // but before the soft-dirty reset would otherwise be forgotten.
+    if (events.empty() && std::memcmp(base_, expected_.data(), size_) != 0) {
+        core::DetectionEvent ev;
+        ev.type = core::DetectionType::CANARY_TAMPERED;
+        ev.severity = core::Severity::CRITICAL;
+        ev.component = "CanaryMonitor";
+        ev.details = "Write to tripwire memory that no legitimate code touches (content modified) - "
+                     "external process memory write suspected";
+        ev.timestamp = static_cast<uint64_t>(std::time(nullptr));
+        ev.threat_score = 90;
+        events.push_back(ev);
+        std::memcpy(base_, expected_.data(), size_);
+        ResetTracking();
+    }
     return events;
 }
 
