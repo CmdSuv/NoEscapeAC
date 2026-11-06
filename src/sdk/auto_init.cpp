@@ -70,6 +70,7 @@ DWORD WINAPI WindowsAutoInitWorker(LPVOID lpParam) {
     NoEscapeConfig cfg = NoEscape_GetDefaultConfig();
 
     // Stack buffers for environment overrides (NoEscape_Init copies into std::string immediately)
+    DWORD len = 0;
     char urlBuf[256]{};
     len = GetEnvironmentVariableA("NOESCAPE_PANEL_URL", urlBuf, sizeof(urlBuf));
     if (len > 0) {
@@ -80,6 +81,12 @@ DWORD WINAPI WindowsAutoInitWorker(LPVOID lpParam) {
     len = GetEnvironmentVariableA("NOESCAPE_SECRET_KEY", keyBuf, sizeof(keyBuf));
     if (len > 0) {
         cfg.secret_key = keyBuf;
+    }
+
+    char pinBuf[128]{};
+    len = GetEnvironmentVariableA("NOESCAPE_PANEL_PIN", pinBuf, sizeof(pinBuf));
+    if (len > 0 && len < sizeof(pinBuf)) {
+        NoEscape_SetPanelPin(pinBuf);
     }
 
     char dumpBuf[MAX_PATH]{};
@@ -313,6 +320,11 @@ void* LinuxAutoInitWorker(void* arg) {
     const char* secretKeyEnv = std::getenv("NOESCAPE_SECRET_KEY");
     if (secretKeyEnv && std::strlen(secretKeyEnv) > 0) {
         cfg.secret_key = secretKeyEnv;
+    }
+
+    const char* pinEnv = std::getenv("NOESCAPE_PANEL_PIN");
+    if (pinEnv && std::strlen(pinEnv) > 0) {
+        NoEscape_SetPanelPin(pinEnv);
     }
 
     const char* dumpDirEnv = std::getenv("NOESCAPE_DUMP_DIR");

@@ -484,25 +484,25 @@ std::vector<core::DetectionEvent> OverlayDetector::AuditSwapchainHooks() {
 #if defined(_WIN32)
     HMODULE hOpengl = GetModuleHandleA("opengl32.dll");
     if (hOpengl) {
-        graphicsApis.emplace_back("wglSwapBuffers", GetProcAddress(hOpengl, "wglSwapBuffers"));
+        graphicsApis.emplace_back("wglSwapBuffers", reinterpret_cast<void*>(GetProcAddress(hOpengl, "wglSwapBuffers")));
     }
     HMODULE hDxgi = GetModuleHandleA("dxgi.dll");
     if (hDxgi) {
-        graphicsApis.emplace_back("CreateDXGIFactory", GetProcAddress(hDxgi, "CreateDXGIFactory"));
-        graphicsApis.emplace_back("CreateDXGIFactory1", GetProcAddress(hDxgi, "CreateDXGIFactory1"));
-        graphicsApis.emplace_back("CreateDXGIFactory2", GetProcAddress(hDxgi, "CreateDXGIFactory2"));
+        graphicsApis.emplace_back("CreateDXGIFactory", reinterpret_cast<void*>(GetProcAddress(hDxgi, "CreateDXGIFactory")));
+        graphicsApis.emplace_back("CreateDXGIFactory1", reinterpret_cast<void*>(GetProcAddress(hDxgi, "CreateDXGIFactory1")));
+        graphicsApis.emplace_back("CreateDXGIFactory2", reinterpret_cast<void*>(GetProcAddress(hDxgi, "CreateDXGIFactory2")));
     }
     HMODULE hD3d11 = GetModuleHandleA("d3d11.dll");
     if (hD3d11) {
-        graphicsApis.emplace_back("D3D11CreateDeviceAndSwapChain", GetProcAddress(hD3d11, "D3D11CreateDeviceAndSwapChain"));
+        graphicsApis.emplace_back("D3D11CreateDeviceAndSwapChain", reinterpret_cast<void*>(GetProcAddress(hD3d11, "D3D11CreateDeviceAndSwapChain")));
     }
     HMODULE hD3d9 = GetModuleHandleA("d3d9.dll");
     if (hD3d9) {
-        graphicsApis.emplace_back("Direct3DCreate9", GetProcAddress(hD3d9, "Direct3DCreate9"));
+        graphicsApis.emplace_back("Direct3DCreate9", reinterpret_cast<void*>(GetProcAddress(hD3d9, "Direct3DCreate9")));
     }
     HMODULE hVulkan = GetModuleHandleA("vulkan-1.dll");
     if (hVulkan) {
-        graphicsApis.emplace_back("vkQueuePresentKHR", GetProcAddress(hVulkan, "vkQueuePresentKHR"));
+        graphicsApis.emplace_back("vkQueuePresentKHR", reinterpret_cast<void*>(GetProcAddress(hVulkan, "vkQueuePresentKHR")));
     }
 #else
     void* pGlx = dlsym(RTLD_DEFAULT, "glXSwapBuffers");
