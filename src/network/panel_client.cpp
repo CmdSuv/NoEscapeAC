@@ -223,6 +223,33 @@ std::string JsonEscape(const std::string& in) {
     return out;
 }
 
+std::string JsonString(const std::string& body, const std::string& key, size_t from = 0) {
+    std::string pat = "\"" + key + "\":\"";
+    size_t p = body.find(pat, from);
+    if (p == std::string::npos) return "";
+    p += pat.size();
+    size_t e = body.find('"', p);
+    return e == std::string::npos ? std::string() : body.substr(p, e - p);
+}
+
+bool JsonNumber(const std::string& body, const std::string& key, size_t from, uint64_t& out) {
+    std::string pat = "\"" + key + "\":";
+    size_t p = body.find(pat, from);
+    if (p == std::string::npos) return false;
+    p += pat.size();
+    if (p >= body.size() || !std::isdigit(static_cast<unsigned char>(body[p]))) return false;
+    out = std::strtoull(body.c_str() + p, nullptr, 10);
+    return true;
+}
+
+bool IsToken(const std::string& v, size_t maxLen) {
+    if (v.empty() || v.size() > maxLen) return false;
+    for (char c : v) {
+        if (!(std::isalnum(static_cast<unsigned char>(c)) || c == '-' || c == '_')) return false;
+    }
+    return true;
+}
+
 std::string NormalizePin(const std::string& pin) {
     std::string out;
     for (char c : pin) {
@@ -564,6 +591,11 @@ HeartbeatPacket PanelClient::ConstructHeartbeat(uint32_t current_threat_score, c
 }
 
 bool PanelClient::SendHeartbeat(uint32_t current_threat_score, const std::string& status) {
+    return Heartbeat(current_threat_score, status).ok;
+}
+
+HeartbeatResult PanelClient::Heartbeat(uint32_t current_threat_score, const std::string& status) {
+    HeartbeatResult out;
     auto pkt = ConstructHeartbeat(current_threat_score, status);
     std::ostringstream json;
     json << "{"
@@ -574,6 +606,45 @@ bool PanelClient::SendHeartbeat(uint32_t current_threat_score, const std::string
          << "\"nonce\":\"" << pkt.nonce << "\""
          << "}";
     auto res = Request(ParseUrl(base_url_ + "/heartbeat"), "POST", json.str(), 2000);
+    out.ok = res.status >= 200 && res.status < 300;
+    if (!out.ok) return out;
+
+    // Optional attestation challenge. It is only honoured when its signature (bound to our
+    // HWID and this heartbeat's nonce) verifies - a forged challenge must not make us do work or
+    // leak anything.
+    size_t cp = res.body.find("\"challenge\":{");
+    if (cp != std::string::npos) {
+        AttestChallenge c;
+        c.id = JsonString(res.body, "id", cp);
+        c.nonce = JsonString(res.body, "nonce", cp);
+        std::string sig = JsonString(res.body, "sig", cp);
+        bool nums = JsonNumber(res.body, "offset", cp, c.offset) && JsonNumber(res.body, "length", cp, c.length);
+        c.present = true;
+        std::string expected = CryptoUtil::HmacSha256(
+            secret_key_, "challenge:" + hwid_ + ":" + pkt.nonce + ":" + c.id + ":" + c.nonce + ":" +
+                         std::to_string(c.offset) + ":" + std::to_string(c.length));
+        if (!nums || !IsToken(c.id, 64) || !IsToken(c.nonce, 128) ||
+            !CryptoUtil::ConstantTimeEquals(sig, expected)) {
+            c = AttestChallenge{};
+            c.present = true;
+            c.forged = true;
+        }
+        out.challenge = c;
+    }
+    return out;
+}
+
+bool PanelClient::SendAttestation(const AttestChallenge& challenge, const std::string& answer_hex) {
+    if (!challenge.present || challenge.forged) return false;
+    std::ostringstream json;
+    json << "{"
+         << "\"hwid\":\"" << JsonEscape(hwid_) << "\","
+         << "\"timestamp\":" << static_cast<uint64_t>(std::time(nullptr)) << ","
+         << "\"nonce\":\"" << RandomNonce() << "\","
+         << "\"challenge_id\":\"" << challenge.id << "\","
+         << "\"answer\":\"" << answer_hex << "\""
+         << "}";
+    auto res = Request(ParseUrl(base_url_ + "/attest"), "POST", json.str(), 2000);
     return res.status >= 200 && res.status < 300;
 }
 

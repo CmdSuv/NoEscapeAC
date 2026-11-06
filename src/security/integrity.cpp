@@ -184,6 +184,20 @@ std::string IntegrityChecker::ComputeCurrentTextHash() const {
     return network::CryptoUtil::Sha256(reinterpret_cast<const uint8_t*>(text_start_), text_size_);
 }
 
+bool IntegrityChecker::Attest(const std::string& secret_key, const std::string& id, const std::string& nonce,
+                              uint64_t offset, uint64_t length, std::string& out_hex) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    if (!initialized_ && !Initialize()) return false;
+    constexpr uint64_t kMaxAttestBytes = 1u << 20;
+    if (length == 0 || length > kMaxAttestBytes || offset > text_size_ || length > text_size_ - offset) {
+        return false;
+    }
+    std::string msg = id + ":" + nonce + ":";
+    msg.append(reinterpret_cast<const char*>(text_start_ + offset), static_cast<size_t>(length));
+    out_hex = network::CryptoUtil::HmacSha256(secret_key, msg);
+    return true;
+}
+
 std::optional<core::DetectionEvent> IntegrityChecker::VerifyIntegrity() {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (!initialized_) {

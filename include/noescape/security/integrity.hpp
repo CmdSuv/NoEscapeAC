@@ -23,6 +23,14 @@ public:
     std::string GetBaselineHash() const { std::lock_guard<std::recursive_mutex> l(mutex_); return baseline_hash_; }
     std::string ComputeCurrentTextHash() const;
 
+    // Remote attestation: HMAC(secret, id ":" nonce ":" <bytes of [offset, offset+length) of the
+    // executable segment>). Returns false when the range is invalid. The server holds the
+    // reference image and recomputes the same value, so a patched client cannot answer correctly
+    // without keeping an unpatched copy of its code around.
+    bool Attest(const std::string& secret_key, const std::string& id, const std::string& nonce,
+                uint64_t offset, uint64_t length, std::string& out_hex);
+    size_t TextSize() const { std::lock_guard<std::recursive_mutex> l(mutex_); return text_size_; }
+
 private:
     IntegrityChecker() = default;
 

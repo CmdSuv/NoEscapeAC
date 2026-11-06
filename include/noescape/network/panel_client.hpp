@@ -39,6 +39,22 @@ struct BanCheckResult {
 //                the server's SubjectPublicKeyInfo SHA-256 must match it (defeats fake panels and
 //                MitM even with a user-installed root CA). Without TLS support https is refused,
 //                never downgraded to cleartext.
+// Server-issued code-attestation challenge, delivered in the heartbeat reply. The client proves
+// it still runs the expected code by returning HMAC(secret, id:nonce:<bytes of own code>).
+struct AttestChallenge {
+    bool present{false};
+    bool forged{false};        // a challenge arrived but its signature did not verify
+    std::string id;
+    std::string nonce;
+    uint64_t offset{0};        // into the anti-cheat's executable segment
+    uint64_t length{0};
+};
+
+struct HeartbeatResult {
+    bool ok{false};
+    AttestChallenge challenge;
+};
+
 class PanelClient {
 public:
     PanelClient(std::string base_url, std::string secret_key, std::string spki_pin_sha256_hex = "");
@@ -46,6 +62,14 @@ public:
 
     bool SendBanReport(const core::DetectionEvent& event, uint32_t current_threat_score);
     bool SendHeartbeat(uint32_t current_threat_score, const std::string& status = "HEALTHY");
+
+    // Heartbeat that also returns the server's attestation challenge (if any)
+    HeartbeatResult Heartbeat(uint32_t current_threat_score, const std::string& status = "HEALTHY");
+
+    // Answers a challenge; answer_hex = IntegrityChecker::Attest(...)
+    bool SendAttestation(const AttestChallenge& challenge, const std::string& answer_hex);
+
+    const std::string& SecretKey() const { return secret_key_; }
     BanCheckResult QueryBanStatus();
     bool CheckBanStatus(bool& out_is_banned, std::string& out_reason);
     HeartbeatPacket ConstructHeartbeat(uint32_t current_threat_score, const std::string& status);

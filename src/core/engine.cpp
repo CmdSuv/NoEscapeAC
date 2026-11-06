@@ -570,8 +570,9 @@ void AntiCheatEngine::NetworkLoop() {
         try {
             if (config_.enableHeartbeat &&
                 std::chrono::duration_cast<std::chrono::seconds>(now - lastHeartbeat).count() >= 10) {
-                panel_client_.SendHeartbeat(threat_score_.load(), is_banned_.load() ? "BANNED" : "HEALTHY");
+                auto hb = panel_client_.Heartbeat(threat_score_.load(), is_banned_.load() ? "BANNED" : "HEALTHY");
                 lastHeartbeat = std::chrono::steady_clock::now();
+                HandleAttestation(hb);
             }
             if (config_.verifyPanelBan &&
                 std::chrono::duration_cast<std::chrono::seconds>(now - lastPanelCheck).count() >= 60) {
@@ -585,6 +586,30 @@ void AntiCheatEngine::NetworkLoop() {
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
         }
     }
+}
+
+void AntiCheatEngine::HandleAttestation(const network::HeartbeatResult& hb) {
+    if (!hb.ok || !hb.challenge.present) return;
+    if (hb.challenge.forged) {
+        // Only someone who does not know the shared secret can produce this
+        DetectionEvent ev;
+        ev.type = DetectionType::HEARTBEAT_TAMPERING;
+        ev.severity = Severity::HIGH;
+        ev.component = "PanelClient::Attestation";
+        ev.details = "Attestation challenge with an invalid signature (fake panel or MitM)";
+        ev.timestamp = static_cast<uint64_t>(time(nullptr));
+        ev.threat_score = 60;
+        ProcessDetection(ev);
+        return;
+    }
+    std::string answer;
+    if (security::IntegrityChecker::Instance().Attest(panel_client_.SecretKey(), hb.challenge.id,
+                                                       hb.challenge.nonce, hb.challenge.offset,
+                                                       hb.challenge.length, answer)) {
+        panel_client_.SendAttestation(hb.challenge, answer);
+    }
+    // An unanswerable challenge (bad range) is simply not answered: the server's /session verdict
+    // for this player expires, which is the enforcement point - not a local guess.
 }
 
 void AntiCheatEngine::BackgroundLoop() {

@@ -110,6 +110,7 @@ private:
     void BackgroundLoop();
     void WatchdogLoop();
     void NetworkLoop();
+    void HandleAttestation(const network::HeartbeatResult& hb);
     uint32_t panel_failures_{0};
 
     std::thread background_thread_;
