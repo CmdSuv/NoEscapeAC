@@ -1,6 +1,6 @@
 // ============================================================================
 // NoEscape Anti-Cheat Engine - Standalone Open Source Edition (v7.0)
-// GitHub: https://github.com/KULLANICI_ADIN/NoEscape-AntiCheat
+// GitHub: https://github.com/CmdSuv/NoEscapeAC (legacy, not built)
 // ============================================================================
 
 #include <windows.h>

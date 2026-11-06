@@ -7,13 +7,26 @@
 #include <mutex>
 #include <atomic>
 #include <string>
+#include <cmath>
 
 namespace {
 
 std::mutex g_lifecycle_mutex;
-std::unique_ptr<noescape::core::AntiCheatEngine> g_engine;
-std::atomic<noescape::core::AntiCheatEngine*> g_active_engine{nullptr};
-NoEscapeViolationCallback g_callback = nullptr;
+std::shared_ptr<noescape::core::AntiCheatEngine> g_engine;
+// Shared ownership: callers hold a reference for the duration of a call, so a concurrent
+// Shutdown()/Init() can never free the engine under them.
+std::mutex g_ptr_mutex;
+std::shared_ptr<noescape::core::AntiCheatEngine> g_active_engine;
+std::atomic<NoEscapeViolationCallback> g_callback{nullptr};
+
+std::shared_ptr<noescape::core::AntiCheatEngine> ActiveEngine() {
+    std::lock_guard<std::mutex> l(g_ptr_mutex);
+    return g_active_engine;
+}
+void SetActiveEngine(std::shared_ptr<noescape::core::AntiCheatEngine> e) {
+    std::lock_guard<std::mutex> l(g_ptr_mutex);
+    g_active_engine = std::move(e);
+}
 
 // Dedicated high-frequency input mutex to guarantee zero-stutter mouse processing
 std::mutex g_input_mutex;
@@ -52,7 +65,7 @@ int NoEscape_Init(const NoEscapeConfig* config) {
     std::lock_guard<std::mutex> lock(g_lifecycle_mutex);
 
     if (g_engine) {
-        g_active_engine.store(nullptr, std::memory_order_release);
+        SetActiveEngine(nullptr);
         g_engine->Stop();
         g_engine.reset();
     }
@@ -68,7 +81,8 @@ int NoEscape_Init(const NoEscapeConfig* config) {
         if (config->panel_url) engineCfg.panelUrl = config->panel_url;
         if (config->secret_key) engineCfg.secretKey = config->secret_key;
         if (config->blackbox_dump_dir) engineCfg.blackboxDumpDirectory = config->blackbox_dump_dir;
-        engineCfg.banScoreThreshold = config->ban_threshold;
+        // A zero threshold (zero-initialised struct) would ban on the very first event
+        if (config->ban_threshold > 0) engineCfg.banScoreThreshold = config->ban_threshold;
         engineCfg.enforceBanOnViolation = config->enforce_ban;
         engineCfg.enableAntiDebug = config->enable_anti_debug;
         engineCfg.enableIntegrityScan = config->enable_integrity_scan;
@@ -88,12 +102,12 @@ int NoEscape_Init(const NoEscapeConfig* config) {
         engineCfg.enableHeartbeat = false;
     }
 
-    g_engine = std::make_unique<noescape::core::AntiCheatEngine>(engineCfg);
+    g_engine = std::make_shared<noescape::core::AntiCheatEngine>(engineCfg);
 
     // Wire violation callback to notify the registered C callback for every detection event
     g_engine->SetViolationCallback([](const noescape::core::DetectionEvent& ev) {
-        if (g_callback) {
-            g_callback(static_cast<int>(ev.type), 
+        if (auto cb = g_callback.load()) {
+            cb(static_cast<int>(ev.type), 
                        static_cast<int>(ev.threat_score), 
                        ev.details.c_str());
         }
@@ -101,17 +115,17 @@ int NoEscape_Init(const NoEscapeConfig* config) {
 
     if (!g_engine->Initialize()) {
         g_engine.reset();
-        g_active_engine.store(nullptr, std::memory_order_release);
+        SetActiveEngine(nullptr);
         return -1;
     }
 
-    g_active_engine.store(g_engine.get(), std::memory_order_release);
+    SetActiveEngine(g_engine);
     return 0;
 }
 
 void NoEscape_Shutdown(void) {
     std::lock_guard<std::mutex> lock(g_lifecycle_mutex);
-    g_active_engine.store(nullptr, std::memory_order_release);
+    SetActiveEngine(nullptr);
 
     if (g_engine) {
         g_engine->Stop();
@@ -138,7 +152,7 @@ void NoEscape_Stop(void) {
 }
 
 void NoEscape_Tick(void) {
-    auto* engine = g_active_engine.load(std::memory_order_acquire);
+    auto engine = ActiveEngine();
     if (!engine) return;
 
     // AuditCycle() runs synchronous module checks and dispatches any detected events
@@ -147,8 +161,15 @@ void NoEscape_Tick(void) {
 }
 
 void NoEscape_PushMouseEvent(float delta_yaw, float delta_pitch, uint64_t timestamp_ms) {
-    auto* engine = g_active_engine.load(std::memory_order_acquire);
+    auto engine = ActiveEngine();
     if (!engine) return;
+
+    // Reject non-finite / absurd deltas at the ABI boundary (NaN poisons the accumulators,
+    // +/-inf or 1e30 would spin the wrap-around loops below forever)
+    if (!std::isfinite(delta_yaw) || !std::isfinite(delta_pitch) ||
+        std::fabs(delta_yaw) > 3600.0f || std::fabs(delta_pitch) > 3600.0f) {
+        return;
+    }
 
     float p = 0.0f, y = 0.0f;
     {
@@ -169,46 +190,45 @@ void NoEscape_PushMouseEvent(float delta_yaw, float delta_pitch, uint64_t timest
 }
 
 void NoEscape_ResetInput(void) {
-    auto* engine = g_active_engine.load(std::memory_order_acquire);
+    auto engine = ActiveEngine();
     {
         std::lock_guard<std::mutex> lock(g_input_mutex);
         g_accum_pitch = 0.0f;
         g_accum_yaw = 0.0f;
     }
     if (engine) {
-        engine->GetAimAnalyzer().Reset();
+        engine->ResetInput();
     }
 }
 
 uint32_t NoEscape_GetThreatScore(void) {
-    auto* engine = g_active_engine.load(std::memory_order_acquire);
+    auto engine = ActiveEngine();
     if (!engine) return 0;
     return engine->GetThreatScore();
 }
 
 bool NoEscape_IsBanned(void) {
-    auto* engine = g_active_engine.load(std::memory_order_acquire);
+    auto engine = ActiveEngine();
     if (!engine) return false;
     return engine->IsBanned();
 }
 
 void NoEscape_SetViolationCallback(NoEscapeViolationCallback callback) {
-    std::lock_guard<std::mutex> lock(g_lifecycle_mutex);
-    g_callback = callback;
+    g_callback.store(callback);
 }
 
 void NoEscape_AddPhantom(uint32_t id, float x, float y, float z) {
-    auto* engine = g_active_engine.load(std::memory_order_acquire);
+    auto engine = ActiveEngine();
     if (engine) engine->GetPhantomMonitor().AddPhantom(id, x, y, z);
 }
 
 void NoEscape_UpdatePhantom(uint32_t id, float x, float y, float z) {
-    auto* engine = g_active_engine.load(std::memory_order_acquire);
+    auto engine = ActiveEngine();
     if (engine) engine->GetPhantomMonitor().UpdatePhantom(id, x, y, z);
 }
 
 void NoEscape_PushView(float x, float y, float z, float pitch, float yaw, uint64_t timestamp_ms) {
-    auto* engine = g_active_engine.load(std::memory_order_acquire);
+    auto engine = ActiveEngine();
     if (engine) engine->PushViewSample(x, y, z, pitch, yaw, timestamp_ms);
 }
 

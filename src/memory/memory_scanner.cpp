@@ -1,5 +1,6 @@
 #include "noescape/memory/memory_scanner.hpp"
 #include "noescape/core/obfuscation.hpp"
+#include "noescape/core/envutil.hpp"
 #include <fstream>
 #include <sstream>
 #include <iostream>
@@ -74,13 +75,19 @@ namespace {
         bool busInstalled{false};
 
         SafeScanGuard() : lock(g_scanGuardMutex) {
+            // Keep SA_ONSTACK if the host (JVM, Go, Mono, crash reporters) uses an alternate signal
+            // stack, otherwise stack-overflow faults could no longer be handled.
+            struct sigaction cur{};
             struct sigaction sa{};
             sa.sa_sigaction = ScanSigHandler;
-            sa.sa_flags = SA_SIGINFO;
             sigemptyset(&sa.sa_mask);
+            sa.sa_flags = SA_SIGINFO;
+            if (sigaction(SIGSEGV, nullptr, &cur) == 0) sa.sa_flags |= (cur.sa_flags & SA_ONSTACK);
             if (sigaction(SIGSEGV, &sa, &g_oldSegv) == 0) {
                 segvInstalled = true;
             }
+            sa.sa_flags = SA_SIGINFO;
+            if (sigaction(SIGBUS, nullptr, &cur) == 0) sa.sa_flags |= (cur.sa_flags & SA_ONSTACK);
             if (sigaction(SIGBUS, &sa, &g_oldBus) == 0) {
                 busInstalled = true;
             }
@@ -163,12 +170,17 @@ void MemoryScanner::RefreshCache() {
     std::lock_guard<std::mutex> lock(cache_mutex_);
     cached_regions_ = std::move(regions);
     cache_valid_ = true;
+    ++cache_users_;
 }
 
 void MemoryScanner::ClearCache() {
     std::lock_guard<std::mutex> lock(cache_mutex_);
-    cached_regions_.clear();
-    cache_valid_ = false;
+    // Reference counted: only the last concurrent audit actually drops the snapshot
+    if (cache_users_ > 0) --cache_users_;
+    if (cache_users_ == 0) {
+        cached_regions_.clear();
+        cache_valid_ = false;
+    }
 }
 
 bool MemoryScanner::IsCacheValid() const {
@@ -301,35 +313,39 @@ std::vector<core::DetectionEvent> MemoryScanner::DetectUnbackedExecutableRegions
     if (exeLen > 0) {
         exePathBuf[exeLen] = '\0';
         std::string exeStr(exePathBuf);
-        std::transform(exeStr.begin(), exeStr.end(), exeStr.begin(), ::tolower);
-        if (exeStr.find("java") != std::string::npos ||
-            exeStr.find("mono") != std::string::npos ||
-            exeStr.find("node") != std::string::npos ||
-            exeStr.find("dotnet") != std::string::npos) {
-            isJitRuntime = true;
+        size_t sl = exeStr.find_last_of('/');
+        std::string base = (sl == std::string::npos) ? exeStr : exeStr.substr(sl + 1);
+        std::transform(base.begin(), base.end(), base.begin(), ::tolower);
+        for (const char* rt : {"java", "mono", "node", "dotnet"}) {
+            if (base.rfind(rt, 0) == 0) { isJitRuntime = true; break; }
         }
     }
 #endif
+    auto isTransientPath = [](const std::string& p) {
+        return p.rfind("/tmp", 0) == 0 || p.rfind("/dev/shm", 0) == 0 || p.rfind("/var/tmp", 0) == 0 ||
+               p.rfind("memfd:", 0) == 0 || p.find("(deleted)") != std::string::npos;
+    };
     for (const auto& r : regions) {
-        if (r.pathname.find("libjvm") != std::string::npos ||
-            r.pathname.find("libmono") != std::string::npos ||
-            r.pathname.find("libv8") != std::string::npos ||
-            r.pathname.find("libcoreclr") != std::string::npos) {
+        if (!r.is_backed_by_file || r.pathname.empty() || r.pathname[0] != '/' || isTransientPath(r.pathname)) continue;
+        size_t sl = r.pathname.find_last_of('/');
+        std::string base = r.pathname.substr(sl + 1);
+        if (base.rfind("libjvm.so", 0) == 0 || base.rfind("libmono", 0) == 0 ||
+            base.rfind("libv8", 0) == 0 || base.rfind("libcoreclr", 0) == 0) {
             isJitRuntime = true;
             break;
         }
     }
 #if defined(NOESCAPE_SECURE_BUILD) || defined(NDEBUG)
     const char* testEnv = std::getenv("NOESCAPE_TEST_MODE");
-    if (testEnv && (std::strcmp(testEnv, "1") == 0 || strcasecmp(testEnv, "true") == 0)) {
+    if (testEnv && core::EnvFlagTrue(testEnv)) {
         const char* allowJitEnv = std::getenv("NOESCAPE_ALLOW_JIT");
-        if (allowJitEnv && (std::strcmp(allowJitEnv, "1") == 0 || strcasecmp(allowJitEnv, "true") == 0)) {
+        if (allowJitEnv && core::EnvFlagTrue(allowJitEnv)) {
             isJitRuntime = true;
         }
     }
 #else
     const char* allowJitEnv = std::getenv("NOESCAPE_ALLOW_JIT");
-    if (allowJitEnv && (std::strcmp(allowJitEnv, "1") == 0 || strcasecmp(allowJitEnv, "true") == 0)) {
+    if (allowJitEnv && core::EnvFlagTrue(allowJitEnv)) {
         isJitRuntime = true;
     }
 #endif
@@ -339,6 +355,7 @@ std::vector<core::DetectionEvent> MemoryScanner::DetectUnbackedExecutableRegions
         if (r.pathname == "[vsyscall]" || r.pathname == "[vdso]") continue;
 
         bool suspicious = false;
+        bool transientOnly = false; // /tmp-hosted file: weaker signal (devs and installers run from there)
         std::string reason;
 
         // Condition 1: Executable region not backed by any valid file
@@ -365,10 +382,12 @@ std::vector<core::DetectionEvent> MemoryScanner::DetectUnbackedExecutableRegions
                 r.pathname.find("tinyfd") != std::string::npos ||
                 r.pathname.find("stb") != std::string::npos ||
                 r.pathname.find("netty") != std::string::npos ||
-                r.pathname.find("tracy") != std::string::npos ||
-                r.pathname.find(".so") != std::string::npos
+                r.pathname.find("tracy") != std::string::npos
             ));
-            if (!isLegitRuntimeTemp) {
+            bool benignDeleted = r.pathname.find("memfd:libffi") != std::string::npos ||
+                                 r.pathname.find("memfd:doublemapper") != std::string::npos ||
+                                 r.pathname.find("/dev/zero") != std::string::npos;
+            if (!isLegitRuntimeTemp && !benignDeleted) {
                 suspicious = true;
                 reason = "Executable mapped from unlinked/deleted binary: " + r.pathname;
             }
@@ -389,11 +408,18 @@ std::vector<core::DetectionEvent> MemoryScanner::DetectUnbackedExecutableRegions
                 r.pathname.find("tinyfd") != std::string::npos ||
                 r.pathname.find("stb") != std::string::npos ||
                 r.pathname.find("netty") != std::string::npos ||
-                r.pathname.find("tracy") != std::string::npos ||
-                r.pathname.find(".so") != std::string::npos
+                r.pathname.find("tracy") != std::string::npos
             ));
-            if (!isLegitRuntimeTemp) {
+            // libffi closures, JVM code-cache double mapping and Mesa/Wine JIT legitimately use memfd
+            bool benignMemfd = r.pathname.rfind("memfd:", 0) == 0 &&
+                (r.pathname.find("libffi") != std::string::npos ||
+                 r.pathname.find("doublemapper") != std::string::npos ||
+                 r.pathname.find("mesa") != std::string::npos ||
+                 r.pathname.find("wine") != std::string::npos ||
+                 r.pathname.find("jit") != std::string::npos);
+            if (!isLegitRuntimeTemp && !benignMemfd) {
                 suspicious = true;
+                transientOnly = (r.pathname.rfind("/tmp", 0) == 0 || r.pathname.rfind("/var/tmp", 0) == 0);
                 reason = "Executable payload residing in transient/volatile memory mount: " + r.pathname;
             }
         }
@@ -414,7 +440,8 @@ std::vector<core::DetectionEvent> MemoryScanner::DetectUnbackedExecutableRegions
 
             core::DetectionEvent ev;
             ev.type = core::DetectionType::UNBACKED_EXECUTABLE_MEMORY;
-            ev.severity = isRwx ? core::Severity::FATAL_BAN : core::Severity::HIGH;
+            ev.severity = isRwx ? core::Severity::FATAL_BAN
+                                : (transientOnly ? core::Severity::MEDIUM : core::Severity::HIGH);
             ev.component = "MemoryScanner::UnbackedPages";
             ev.details = reason + " [0x" + [] (uintptr_t v) {
                 std::ostringstream ss;
@@ -426,7 +453,7 @@ std::vector<core::DetectionEvent> MemoryScanner::DetectUnbackedExecutableRegions
                 return ss.str();
             }(r.end) + "] " + (isRwx ? "(RWX-PROTECTION)" : "(RX-PROTECTION)");
             ev.timestamp = static_cast<uint64_t>(std::time(nullptr));
-            ev.threat_score = isRwx ? 100 : 75;
+            ev.threat_score = isRwx ? 100 : (transientOnly ? 40 : 75);
 
             events.push_back(ev);
         }
@@ -523,6 +550,11 @@ std::vector<core::DetectionEvent> MemoryScanner::ScanSignatures(const std::vecto
             size_t currentChunkSize = std::min(kChunkSize, r.size - offset);
             uintptr_t chunkStart = r.start + offset;
 
+            {
+                std::function<void()> cb;
+                { std::lock_guard<std::mutex> l(cache_mutex_); cb = progress_cb_; }
+                if (cb) cb();
+            }
             std::vector<PatternScanner::SignatureMatchResult> matches;
             if (!ScanChunkSafe(chunkStart, currentChunkSize, applicable, matches)) {
                 if (currentChunkSize <= kOverlap || offset + currentChunkSize >= r.size) break;

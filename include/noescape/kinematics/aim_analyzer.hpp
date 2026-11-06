@@ -32,6 +32,7 @@ public:
 
     // Clears historical buffer (e.g. on teleport or round reset)
     void Reset();
+    size_t GetHistorySize() const { return history_.size(); }
 
     // Direct access to computed metrics of the current trajectory window
     KinematicMetrics ComputeCurrentMetrics() const;

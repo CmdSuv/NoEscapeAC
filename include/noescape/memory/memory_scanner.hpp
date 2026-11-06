@@ -1,4 +1,5 @@
 #pragma once
+#include <functional>
 
 #include <string>
 #include <vector>
@@ -68,7 +69,15 @@ public:
     static std::vector<CheatSignature> GetDefaultCheatSignatures();
     static std::vector<Pattern> GetDefaultCheatPatterns();
 
+    // Called after each scanned chunk so callers (watchdog) can see forward progress
+    void SetProgressCallback(std::function<void()> cb) {
+        std::lock_guard<std::mutex> l(cache_mutex_);
+        progress_cb_ = std::move(cb);
+    }
+
 private:
+    std::function<void()> progress_cb_;
+    int cache_users_{0};
     MemoryScanner() = default;
 
     std::vector<MemoryRegion> QueryMemoryRegionsInternal();

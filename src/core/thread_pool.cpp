@@ -19,7 +19,7 @@ ThreadPool::ThreadPool(size_t threads) {
                     task = std::move(this->tasks_.front());
                     this->tasks_.pop();
                 }
-                task();
+                try { task(); } catch (...) { /* a failing task must not terminate the host process */ }
             }
         });
     }

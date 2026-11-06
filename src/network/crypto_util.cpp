@@ -213,6 +213,15 @@ std::string CryptoUtil::HmacSha256(const std::string& key, const std::string& da
     return ToHex(finalDigest, 32);
 }
 
+bool CryptoUtil::ConstantTimeEquals(const std::string& a, const std::string& b) {
+    unsigned char diff = (a.size() != b.size()) ? 1 : 0;
+    const size_t n = a.size() < b.size() ? a.size() : b.size();
+    for (size_t i = 0; i < n; ++i) {
+        diff |= static_cast<unsigned char>(a[i] ^ b[i]);
+    }
+    return diff == 0;
+}
+
 std::string CryptoUtil::GetMachineHWID() {
 #if defined(_WIN32)
     HKEY hKey = nullptr;
@@ -225,7 +234,12 @@ std::string CryptoUtil::GetMachineHWID() {
     if (strlen(szHwid) > 0) {
         return Sha256(szHwid);
     }
-    return Sha256("WIN32-FALLBACK-HWID-DEVICE");
+    char compName[MAX_COMPUTERNAME_LENGTH + 1]{};
+    DWORD compLen = sizeof(compName);
+    GetComputerNameA(compName, &compLen);
+    DWORD volSerial = 0;
+    GetVolumeInformationA("C:\\", nullptr, 0, &volSerial, nullptr, nullptr, nullptr, 0);
+    return Sha256(std::string("WIN32-FALLBACK-") + compName + ":" + std::to_string(volSerial));
 #else
     // Linux HWID: Read /etc/machine-id or fallback to /var/lib/dbus/machine-id
     std::ifstream mid(NOESCAPE_XOR("/etc/machine-id"));

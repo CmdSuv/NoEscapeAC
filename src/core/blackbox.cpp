@@ -9,6 +9,7 @@
 #include <ctime>
 #include <chrono>
 #include <set>
+#include <atomic>
 
 #if defined(_WIN32)
 #include <windows.h>
@@ -16,6 +17,7 @@
 #else
 #include <execinfo.h>
 #include <unistd.h>
+#include <sys/stat.h>
 #endif
 
 namespace noescape::core {
@@ -330,7 +332,8 @@ bool BlackboxDumper::DecryptAndDeserialize(
     uint32_t cipherLen = 0;
     if (!GetU32(ptr, remain, cipherLen)) return false;
 
-    if (remain < cipherLen + 64) return false;
+    // widen before adding: a uint32 sum wraps for cipherLen close to 4 GiB
+    if (remain < static_cast<size_t>(cipherLen) + 64) return false;
     std::vector<uint8_t> ciphertext(ptr, ptr + cipherLen);
     ptr += cipherLen; remain -= cipherLen;
 
@@ -342,7 +345,7 @@ bool BlackboxDumper::DecryptAndDeserialize(
     signPayload.append(reinterpret_cast<const char*>(ciphertext.data()), ciphertext.size());
     std::string expectedTag = network::CryptoUtil::HmacSha256(secret_key, signPayload);
 
-    if (providedTag != expectedTag) {
+    if (!network::CryptoUtil::ConstantTimeEquals(providedTag, expectedTag)) {
         Logger::Instance().Error("Blackbox decryption failed: HMAC signature mismatch (Tampered or Wrong Key)");
         return false;
     }
@@ -411,8 +414,11 @@ bool BlackboxDumper::DecryptAndDeserialize(
 }
 
 bool BlackboxDumper::SaveDumpToFile(const std::string& file_path, const std::vector<uint8_t>& encrypted_data) {
-    std::ofstream ofs(file_path, std::ios::binary);
+    std::ofstream ofs(file_path, std::ios::binary | std::ios::trunc);
     if (!ofs.is_open()) return false;
+#if !defined(_WIN32)
+    ::chmod(file_path.c_str(), 0600);
+#endif
     ofs.write(reinterpret_cast<const char*>(encrypted_data.data()), encrypted_data.size());
     return ofs.good();
 }
@@ -430,7 +436,8 @@ std::string BlackboxDumper::GetDumpDirectory() const {
 std::string BlackboxDumper::GenerateDumpFilename() const {
     uint64_t now = static_cast<uint64_t>(std::time(nullptr));
     std::lock_guard<std::mutex> lock(mutex_);
-    std::string base = "noescape_blackbox_" + std::to_string(now) + ".dmp";
+    static std::atomic<uint32_t> seq{0};
+    std::string base = "noescape_blackbox_" + std::to_string(now) + "_" + std::to_string(seq.fetch_add(1)) + ".dmp";
     if (dump_dir_.empty()) {
         return base;
     }

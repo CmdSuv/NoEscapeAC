@@ -3,6 +3,9 @@
 #include <sstream>
 #include <ctime>
 #include <cstring>
+#include <chrono>
+#include <cctype>
+#include <cstdlib>
 
 #if defined(_WIN32)
 #include <winsock2.h>
@@ -130,6 +133,10 @@ PanelClient::ParsedUrl PanelClient::ParseUrl(const std::string& url) {
     std::string s = url;
     size_t protoPos = s.find("://");
     if (protoPos != std::string::npos) {
+        std::string scheme = s.substr(0, protoPos);
+        for (auto& c : scheme) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        if (scheme == "https") { res.secure = true; res.port = 443; }
+        else if (scheme != "http") res.valid = false;
         s = s.substr(protoPos + 3);
     }
 
@@ -145,16 +152,22 @@ PanelClient::ParsedUrl PanelClient::ParseUrl(const std::string& url) {
     size_t colonPos = hostPort.find(':');
     if (colonPos != std::string::npos) {
         res.host = hostPort.substr(0, colonPos);
-        res.port = static_cast<uint16_t>(std::atoi(hostPort.substr(colonPos + 1).c_str()));
+        long port = std::strtol(hostPort.substr(colonPos + 1).c_str(), nullptr, 10);
+        if (port <= 0 || port > 65535) res.valid = false;
+        else res.port = static_cast<uint16_t>(port);
     } else {
         res.host = hostPort;
     }
+    if (res.host.empty()) res.valid = false;
 
     return res;
 }
 
 std::string PanelClient::HttpPost(const ParsedUrl& target, const std::string& body, uint32_t timeout_ms) {
     EnsureNetworkInit();
+    // Never silently downgrade https:// to cleartext HTTP; TLS is not implemented.
+    if (!target.valid || target.secure) return "";
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms * 2);
 
     struct addrinfo hints{}, *servinfo = nullptr;
     hints.ai_family = AF_INET;
@@ -192,7 +205,7 @@ std::string PanelClient::HttpPost(const ParsedUrl& target, const std::string& bo
 
     std::ostringstream req;
     req << "POST " << target.path << " HTTP/1.1\r\n"
-        << "Host: " << target.host << "\r\n"
+        << "Host: " << target.host << ((target.port == 80) ? std::string() : ":" + std::to_string(target.port)) << "\r\n"
         << "Content-Type: application/json\r\n"
         << "Content-Length: " << body.length() << "\r\n"
         << "Connection: close\r\n\r\n"
@@ -207,8 +220,10 @@ std::string PanelClient::HttpPost(const ParsedUrl& target, const std::string& bo
     std::string response;
     char buf[1024];
     int bytes = 0;
-    while ((bytes = recv(sock, buf, sizeof(buf) - 1, 0)) > 0) {
-        buf[bytes] = '\0';
+    // Bounded in total time and size: a slow-drip or endless response must not stall the caller
+    constexpr size_t kMaxResponse = 64 * 1024;
+    while (response.size() < kMaxResponse && std::chrono::steady_clock::now() < deadline &&
+           (bytes = recv(sock, buf, sizeof(buf) - 1, 0)) > 0) {
         response.append(buf, bytes);
     }
 
@@ -218,6 +233,9 @@ std::string PanelClient::HttpPost(const ParsedUrl& target, const std::string& bo
 
 std::string PanelClient::HttpGet(const ParsedUrl& target, uint32_t timeout_ms) {
     EnsureNetworkInit();
+    // Never silently downgrade https:// to cleartext HTTP; TLS is not implemented.
+    if (!target.valid || target.secure) return "";
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms * 2);
 
     struct addrinfo hints{}, *servinfo = nullptr;
     hints.ai_family = AF_INET;
@@ -255,7 +273,7 @@ std::string PanelClient::HttpGet(const ParsedUrl& target, uint32_t timeout_ms) {
 
     std::ostringstream req;
     req << "GET " << target.path << " HTTP/1.1\r\n"
-        << "Host: " << target.host << "\r\n"
+        << "Host: " << target.host << ((target.port == 80) ? std::string() : ":" + std::to_string(target.port)) << "\r\n"
         << "Connection: close\r\n\r\n";
 
     std::string reqStr = req.str();
@@ -267,8 +285,10 @@ std::string PanelClient::HttpGet(const ParsedUrl& target, uint32_t timeout_ms) {
     std::string response;
     char buf[1024];
     int bytes = 0;
-    while ((bytes = recv(sock, buf, sizeof(buf) - 1, 0)) > 0) {
-        buf[bytes] = '\0';
+    // Bounded in total time and size: a slow-drip or endless response must not stall the caller
+    constexpr size_t kMaxResponse = 64 * 1024;
+    while (response.size() < kMaxResponse && std::chrono::steady_clock::now() < deadline &&
+           (bytes = recv(sock, buf, sizeof(buf) - 1, 0)) > 0) {
         response.append(buf, bytes);
     }
 
@@ -345,6 +365,12 @@ BanCheckResult PanelClient::QueryBanStatus() {
         return result;
     }
 
+    if (resp.rfind("HTTP/1.1 2", 0) != 0 && resp.rfind("HTTP/1.0 2", 0) != 0) {
+        result.status = BanCheckStatus::NETWORK_ERROR;
+        result.reason = "Backend returned a non-2xx status";
+        return result;
+    }
+
     // Signature is mandatory and bound to hwid + status + our nonce (anti-replay, anti-strip)
     bool isBanned = (resp.find("\"banned\":true") != std::string::npos);
     bool isClean = (resp.find("\"banned\":false") != std::string::npos);
@@ -358,7 +384,7 @@ BanCheckResult PanelClient::QueryBanStatus() {
     std::string serverSig = resp.substr(sigPos + 13, sigEnd - (sigPos + 13));
     std::string expectedSig = CryptoUtil::HmacSha256(
         secret_key_, hwid_ + ":" + (isBanned ? "1" : "0") + ":" + std::to_string(now));
-    if (serverSig != expectedSig) {
+    if (!CryptoUtil::ConstantTimeEquals(serverSig, expectedSig)) {
         result.status = BanCheckStatus::SIGNATURE_INVALID;
         result.reason = "Panel response HMAC signature validation failed (Tampered or MitM)";
         return result;

@@ -95,6 +95,87 @@ const uint8_t* PatternScanner::ScanScalar(
     return nullptr;
 }
 
+#if defined(NOESCAPE_X86) && (defined(__GNUC__) || defined(__clang__)) && !defined(_MSC_VER)
+#define NOESCAPE_RUNTIME_DISPATCH 1
+#endif
+
+namespace {
+
+inline bool MatchAtFree(const uint8_t* ptr, const Pattern& pattern) {
+    const auto& bytes = pattern.GetBytes();
+    for (size_t i = 0; i < bytes.size(); ++i) {
+        if (!bytes[i].is_wildcard && ptr[i] != bytes[i].value) return false;
+    }
+    return true;
+}
+
+const uint8_t* ScanScalarFree(const uint8_t* data, size_t size, const Pattern& pattern) {
+    if (size < pattern.Length()) return nullptr;
+    if (!pattern.HasNonWildcard()) return data;
+    const size_t max_scan = size - pattern.Length();
+    const uint8_t first = pattern.FirstByte();
+    const size_t off = pattern.FirstByteOffset();
+    for (size_t i = 0; i <= max_scan; ++i) {
+        if (data[i + off] == first && MatchAtFree(data + i, pattern)) return data + i;
+    }
+    return nullptr;
+}
+
+#if defined(NOESCAPE_X86)
+// Shared SIMD driver parametrised on block width; each wrapper below is compiled for its ISA.
+#define NOESCAPE_SIMD_BODY(WIDTH, SET1, LOADU, CMPEQ, MOVEMASK, VEC)                                  \
+    const size_t pattern_len = pattern.Length();                                                      \
+    const size_t max_scan = size - pattern_len;                                                       \
+    const uint8_t first = pattern.FirstByte();                                                        \
+    const size_t first_offset = pattern.FirstByteOffset();                                            \
+    const VEC match_vec = SET1(static_cast<char>(first));                                             \
+    size_t i = 0;                                                                                     \
+    while (i + first_offset + WIDTH <= size && i <= max_scan) {                                       \
+        VEC block = LOADU(reinterpret_cast<const VEC*>(data + i + first_offset));                     \
+        uint32_t mask = static_cast<uint32_t>(MOVEMASK(CMPEQ(block, match_vec)));                     \
+        while (mask != 0) {                                                                           \
+            size_t cand = i + static_cast<size_t>(std::countr_zero(mask));                            \
+            if (cand <= max_scan && MatchAtFree(data + cand, pattern)) {            \
+                return data + cand;                                                                   \
+            }                                                                                         \
+            mask &= mask - 1;                                                                         \
+        }                                                                                             \
+        i += WIDTH;                                                                                   \
+    }                                                                                                 \
+    if (i <= max_scan) {                                                                              \
+        return ScanScalarFree(data + i, size - i, pattern);                         \
+    }                                                                                                 \
+    return nullptr;
+
+#if defined(NOESCAPE_RUNTIME_DISPATCH)
+__attribute__((target("avx2")))
+#endif
+const uint8_t* ScanAvx2Impl(const uint8_t* data, size_t size, const Pattern& pattern) {
+#if defined(__AVX2__) || defined(NOESCAPE_RUNTIME_DISPATCH)
+    NOESCAPE_SIMD_BODY(32, _mm256_set1_epi8, _mm256_loadu_si256, _mm256_cmpeq_epi8, _mm256_movemask_epi8, __m256i)
+#else
+    return ScanScalarFree(data, size, pattern);
+#endif
+}
+
+const uint8_t* ScanSse2Impl(const uint8_t* data, size_t size, const Pattern& pattern) {
+    NOESCAPE_SIMD_BODY(16, _mm_set1_epi8, _mm_loadu_si128, _mm_cmpeq_epi8, _mm_movemask_epi8, __m128i)
+}
+
+bool CpuHasAvx2() {
+#if defined(NOESCAPE_RUNTIME_DISPATCH)
+    static const bool has = __builtin_cpu_supports("avx2");
+    return has;
+#elif defined(__AVX2__)
+    return true; // MSVC /arch:AVX2 builds are AVX2-only by construction
+#else
+    return false;
+#endif
+}
+#endif
+
+} // namespace
+
 const uint8_t* PatternScanner::ScanSimd(
     const uint8_t* data, 
     size_t size, 
@@ -104,72 +185,10 @@ const uint8_t* PatternScanner::ScanSimd(
     if (!pattern.HasNonWildcard()) {
         return data;
     }
-
 #if defined(NOESCAPE_X86)
-    const size_t pattern_len = pattern.Length();
-    const size_t max_scan = size - pattern_len;
-    const uint8_t first = pattern.FirstByte();
-    const size_t first_offset = pattern.FirstByteOffset();
-
-#if defined(__AVX2__)
-    const __m256i match_vec256 = _mm256_set1_epi8(static_cast<char>(first));
-    size_t i = 0;
-
-    // Fast-path AVX2 32-byte chunks
-    while (i + first_offset + 32 <= size && i <= max_scan) {
-        __m256i block = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(data + i + first_offset));
-        __m256i cmp = _mm256_cmpeq_epi8(block, match_vec256);
-        uint32_t mask = static_cast<uint32_t>(_mm256_movemask_epi8(cmp));
-
-        while (mask != 0) {
-            int bit = std::countr_zero(mask);
-            size_t match_cand = i + bit;
-            if (match_cand <= max_scan && MatchAt(data + match_cand, pattern)) {
-                return data + match_cand;
-            }
-            mask &= mask - 1; // Clear lowest set bit
-        }
-        i += 32;
-    }
-
-    // Process leftover with SSE2 or scalar
-    if (i <= max_scan) {
-        auto res = ScanScalar(data + i, size - i, pattern);
-        if (res) return res;
-    }
-    return nullptr;
-
-#elif defined(__SSE2__)
-    const __m128i match_vec128 = _mm_set1_epi8(static_cast<char>(first));
-    size_t i = 0;
-
-    // Fast-path SSE2 16-byte chunks
-    while (i + first_offset + 16 <= size && i <= max_scan) {
-        __m128i block = _mm_loadu_si128(reinterpret_cast<const __m128i*>(data + i + first_offset));
-        __m128i cmp = _mm_cmpeq_epi8(block, match_vec128);
-        uint32_t mask = static_cast<uint32_t>(_mm_movemask_epi8(cmp));
-
-        while (mask != 0) {
-            int bit = std::countr_zero(mask);
-            size_t match_cand = i + bit;
-            if (match_cand <= max_scan && MatchAt(data + match_cand, pattern)) {
-                return data + match_cand;
-            }
-            mask &= mask - 1;
-        }
-        i += 16;
-    }
-
-    if (i <= max_scan) {
-        auto res = ScanScalar(data + i, size - i, pattern);
-        if (res) return res;
-    }
-    return nullptr;
-
-#else
-    return ScanScalar(data, size, pattern);
-#endif
-
+    // Runtime dispatch: the library must load and run on CPUs without AVX2
+    if (CpuHasAvx2()) return ScanAvx2Impl(data, size, pattern);
+    return ScanSse2Impl(data, size, pattern);
 #else
     return ScanScalar(data, size, pattern);
 #endif

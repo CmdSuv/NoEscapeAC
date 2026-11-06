@@ -1,4 +1,5 @@
 #pragma once
+#include <mutex>
 
 #include <string>
 #include <vector>
@@ -19,12 +20,13 @@ public:
     std::optional<core::DetectionEvent> VerifyIntegrity();
 
     // Direct access to hashes
-    std::string GetBaselineHash() const { return baseline_hash_; }
+    std::string GetBaselineHash() const { std::lock_guard<std::recursive_mutex> l(mutex_); return baseline_hash_; }
     std::string ComputeCurrentTextHash() const;
 
 private:
     IntegrityChecker() = default;
 
+    mutable std::recursive_mutex mutex_;
     std::string baseline_hash_;
     uintptr_t text_start_{0};
     size_t text_size_{0};

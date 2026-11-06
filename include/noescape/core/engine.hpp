@@ -6,6 +6,8 @@
 #include <vector>
 #include <mutex>
 #include <thread>
+#include <set>
+#include <string>
 #include "noescape/core/types.hpp"
 #include "noescape/core/thread_pool.hpp"
 #include "noescape/core/logger.hpp"
@@ -53,7 +55,10 @@ public:
 
     // Callbacks and configuration
     void SetBanCallback(BanCallback cb) { ban_callback_ = std::move(cb); }
-    void SetViolationCallback(ViolationCallback cb) { violation_callback_ = std::move(cb); }
+    void SetViolationCallback(ViolationCallback cb) { std::lock_guard<std::mutex> l(history_mutex_); violation_callback_ = std::move(cb); }
+
+    // Thread-safe reset of the aim analyzer history (respawn / teleport)
+    void ResetInput();
     const EngineConfig& GetConfig() const { return config_; }
 
     kinematics::AimAnalyzer& GetAimAnalyzer() { return aim_analyzer_; }
@@ -74,6 +79,10 @@ private:
     std::atomic<uint32_t> threat_score_{0};
     std::atomic<bool> is_banned_{false};
     std::atomic<bool> running_{false};
+    std::atomic<bool> stop_requested_{false};
+    std::atomic<uint32_t> audit_cycle_counter_{0};
+    std::atomic<uint64_t> last_dma_audit_ms_{0};
+    std::set<std::string> scored_keys_;
     std::atomic<bool> freeze_background_loop_for_testing_{false};
 
     ThreadPool thread_pool_;
@@ -98,9 +107,11 @@ private:
                         DetectionType type);
     void BackgroundLoop();
     void WatchdogLoop();
+    void NetworkLoop();
     uint32_t panel_failures_{0};
 
     std::thread watchdog_thread_;
+    std::thread network_thread_;
     std::atomic<uint64_t> last_audit_heartbeat_ms_{0};
 };
 

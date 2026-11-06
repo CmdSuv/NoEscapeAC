@@ -22,7 +22,7 @@
    - Compile-time XOR string obfuscation (`NOESCAPE_XOR`) and FNV-1a hashing (`NOESCAPE_HASH`).
 
 2. **SIMD Pattern Scanner (AVX2 / SSE2 / Scalar)**:
-   - High-throughput byte signature search utilizing AVX2 256-bit vector registers with scalar fallback (up to 35+ GB/s throughput).
+   - High-throughput byte signature search utilizing AVX2 256-bit vector registers with automatic runtime CPU dispatch (AVX2 → SSE2 → scalar; the library loads on CPUs without AVX2).
    - Supports IDA-style wildcard patterns (`48 B8 ? ? ? ? ? ? ? ? FF E0`) and batch scanning in a single pass.
 
 3. **Memory & Injection Analysis**:
@@ -76,7 +76,7 @@
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j$(nproc)
 
-# Run Comprehensive Unit Test Suite (48 test cases across all subsystems)
+# Run Comprehensive Unit Test Suite (105 test cases across all subsystems)
 ./build/noescape_tests
 
 # Run Interactive Subsystem Demo
@@ -85,6 +85,18 @@ cmake --build build -j$(nproc)
 # Run Standalone Anti-Cheat Engine (Single Audit)
 ./build/noescape_app --once
 ```
+
+---
+
+### 🔐 Integration Notes
+
+- **Always set a unique `secret_key` and `panel_url`.** The built-in default key is public; a warning is logged when it is used.
+- `https://` panel URLs are refused (TLS is not implemented yet) instead of silently falling back to cleartext. Terminate TLS at a reverse proxy on a trusted network or add a TLS client.
+- Detections are scored **once per distinct finding**; persistent conditions no longer snowball into a ban. Network I/O runs on its own thread so slow/hostile panels cannot trip the watchdog.
+- `NoEscape_Tick()` works without `NoEscape_Start()`; it runs a full synchronous audit on the calling thread (do not call it every frame).
+- Weakening environment overrides (`NOESCAPE_ENFORCE_BAN=0`, `NOESCAPE_BAN_THRESHOLD`, …) are honoured only when `NOESCAPE_TEST_MODE=1`.
+- `bool` fields in `NoEscapeConfig` are 1 byte: use `[MarshalAs(UnmanagedType.U1)]` in C# P/Invoke.
+- Build with `-DNOESCAPE_WERROR=ON` in CI to treat warnings as errors.
 
 ---
 
@@ -115,7 +127,7 @@ NoEscapeAC/
 │   ├── network/
 │   └── sdk/
 ├── demo/                     # Interactive demonstration program
-├── tests/                    # 48 Comprehensive unit tests
+├── tests/                    # 105 unit & regression tests
 └── CMakeLists.txt            # Exports libnoescape.a, libnoescape.so, and executables
 ```
 

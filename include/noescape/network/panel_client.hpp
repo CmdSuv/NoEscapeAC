@@ -60,6 +60,8 @@ private:
     std::string hwid_;
 
     struct ParsedUrl {
+        bool secure{false};   // https:// requested (TLS is not implemented: requests are refused)
+        bool valid{true};
         std::string host;
         uint16_t port{80};
         std::string path;
