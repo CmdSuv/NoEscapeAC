@@ -294,3 +294,18 @@ TEST(Regression, SignatureTextNeverContainsAnotherSignature) {
         }
     }
 }
+
+TEST(Regression, EngineCanBeRestartedAfterStop) {
+    core::EngineConfig cfg;
+    cfg.enableHeartbeat = false;
+    cfg.enableDmaDetection = false;
+    cfg.enforceBanOnViolation = false;
+    core::AntiCheatEngine engine(cfg);
+    ASSERT_TRUE(engine.Initialize());
+    for (int i = 0; i < 3; ++i) {
+        engine.Start();
+        std::this_thread::sleep_for(std::chrono::milliseconds(150));
+        ASSERT_GT(engine.GetLastAuditHeartbeatMs(), 0u);
+        engine.Stop();
+    }
+}

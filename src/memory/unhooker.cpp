@@ -461,11 +461,9 @@ std::vector<core::DetectionEvent> Unhooker::AuditSystemHooks() {
         ev.type = core::DetectionType::INLINE_HOOK_DETECTED;
         ev.component = "Unhooker::InlineInterceptor";
         ev.timestamp = static_cast<uint64_t>(std::time(nullptr));
-        if (!disk.valid) {
-            ev.severity = core::Severity::MEDIUM;   // unconfirmed: no on-disk reference
-            ev.threat_score = 30;
-        } else if (intoModule) {
-            ev.severity = core::Severity::MEDIUM;   // third-party module detour
+        if (!disk.valid || intoModule) {
+            // unconfirmed (no on-disk reference) or a detour into another installed module
+            ev.severity = core::Severity::MEDIUM;
             ev.threat_score = 30;
         } else if (breakpoint) {
             ev.severity = core::Severity::HIGH;     // debugger software breakpoint
