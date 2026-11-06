@@ -14,6 +14,8 @@
 #include <windows.h>
 #else
 #include <dlfcn.h>
+#include <fcntl.h>
+#include <unistd.h>
 #endif
 
 #include <chrono>
@@ -210,7 +212,8 @@ TEST(Remediation, UnhookerAutoRestoreAPI) {
 #if defined(_WIN32)
     void* pfn = reinterpret_cast<void*>(GetProcAddress(GetModuleHandleA("ntdll.dll"), "NtClose"));
 #else
-    void* pfn = dlsym(RTLD_DEFAULT, "puts");
+    void* libcHandle = dlopen("libc.so.6", RTLD_NOW | RTLD_NOLOAD);
+    void* pfn = libcHandle ? dlsym(libcHandle, "puts") : dlsym(RTLD_DEFAULT, "puts");
 #endif
     if (pfn) {
         auto hook = unhooker.InspectFunction("puts", pfn);
@@ -259,26 +262,36 @@ TEST(Phase1, SleepingPayloadDetected) {
 TEST(Phase1, ModuleStompingDetected) {
     auto& sc = memory::MemoryScanner::Instance();
     // Patch one byte inside a real file-backed executable mapping (private copy-on-write)
-    void* fn = dlsym(RTLD_DEFAULT, "strlen");
+    // libc's own definition (RTLD_DEFAULT may resolve to a sanitizer interceptor)
+    void* libcHandle = dlopen("libc.so.6", RTLD_NOW | RTLD_NOLOAD);
+    // A cold routine nothing calls during the test (patching e.g. strlen would crash any caller)
+    void* fn = libcHandle ? dlsym(libcHandle, "fmtmsg") : dlsym(RTLD_DEFAULT, "fmtmsg");
     ASSERT_TRUE(fn != nullptr);
     auto* b = static_cast<uint8_t*>(fn);
-    long ps = sysconf(_SC_PAGESIZE);
-    void* page = reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(fn) & ~(static_cast<uintptr_t>(ps) - 1));
-    ASSERT_EQ(mprotect(page, static_cast<size_t>(ps), PROT_READ | PROT_WRITE | PROT_EXEC), 0);
+    // Patch through /proc/self/mem (private copy-on-write, page protections untouched); a plain
+    // store into libc text would also crash ThreadSanitizer, which keeps no shadow for it.
+    auto poke = [](void* at, uint8_t v) {
+        int fd = open("/proc/self/mem", O_RDWR | O_CLOEXEC);
+        if (fd < 0) return false;
+        bool ok = pwrite(fd, &v, 1, static_cast<off_t>(reinterpret_cast<uintptr_t>(at))) == 1;
+        close(fd);
+        return ok;
+    };
     uint8_t orig = b[8];
-    b[8] = static_cast<uint8_t>(orig ^ 0xFF);
+    ASSERT_TRUE(poke(b + 8, static_cast<uint8_t>(orig ^ 0xFF)));
     bool found = false;
     size_t n = sc.QueryMemoryRegions().size();
     for (size_t i = 0; i < n + 2 && !found; ++i)
         for (const auto& e : sc.DetectModifiedModules()) if (e.component == "MemoryScanner::ModuleIntegrity") found = true;
-    b[8] = orig;
-    mprotect(page, static_cast<size_t>(ps), PROT_READ | PROT_EXEC);
+    ASSERT_TRUE(poke(b + 8, orig));
     ASSERT_TRUE(found);
 }
 #endif
 
 #if !defined(_WIN32)
 #include <sys/uio.h>
+#include <fcntl.h>
+#include <unistd.h>
 #include "noescape/memory/canary_monitor.hpp"
 TEST(Phase2, CanaryCleanAndNoFalsePositiveUnderChurn) {
     auto& c = memory::CanaryMonitor::Instance();
