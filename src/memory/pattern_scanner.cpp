@@ -11,10 +11,11 @@
 #endif
 
 // The scanner deliberately reads arbitrary process memory (including allocator redzones), so it
-// must not be instrumented by AddressSanitizer / HWASan, or every audit would report a false
+// (and memory other threads are concurrently writing) must not be instrumented by
+// AddressSanitizer / HWASan / ThreadSanitizer, or every audit would report a false
 // "overflow". Production builds are unaffected.
 #if defined(__clang__) || defined(__GNUC__)
-#define NOESCAPE_NO_SANITIZE __attribute__((no_sanitize("address", "hwaddress")))
+#define NOESCAPE_NO_SANITIZE __attribute__((no_sanitize("address", "hwaddress", "thread")))
 #else
 #define NOESCAPE_NO_SANITIZE
 #endif

@@ -83,6 +83,9 @@ private:
     std::atomic<uint32_t> audit_cycle_counter_{0};
     std::atomic<uint64_t> last_dma_audit_ms_{0};
     std::set<std::string> scored_keys_;
+    std::mutex audit_mutex_;
+    std::atomic<std::thread::id> background_thread_id_{};
+    std::atomic<uint64_t> last_heavy_scan_ms_{0};
     std::atomic<bool> freeze_background_loop_for_testing_{false};
 
     ThreadPool thread_pool_;

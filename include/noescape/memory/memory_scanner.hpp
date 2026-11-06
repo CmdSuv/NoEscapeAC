@@ -86,6 +86,7 @@ public:
     }
 
 private:
+    bool IsJitRuntime(const std::vector<MemoryRegion>& regions) const;
     std::function<void()> progress_cb_;
     std::atomic<bool> host_uses_jit_{false};
     int cache_users_{0};

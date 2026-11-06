@@ -31,6 +31,8 @@ private:
     uintptr_t text_start_{0};
     size_t text_size_{0};
     bool initialized_{false};
+    bool pre_baseline_mismatch_{false};
+    bool TextMatchesDisk() const;
 
     bool LocateTextSection(uintptr_t& outStart, size_t& outSize);
 };

@@ -315,12 +315,7 @@ std::vector<MemoryRegion> MemoryScanner::QueryMemoryRegionsInternal() {
     return regions;
 }
 
-std::vector<core::DetectionEvent> MemoryScanner::DetectUnbackedExecutableRegions() {
-    std::vector<core::DetectionEvent> events;
-    auto regions = QueryMemoryRegions();
-
-    // Check if host process is a JIT runtime (such as Java JVM / HotSpot or explicitly enabled JIT).
-    // In Java/Minecraft, HotSpot allocates anonymous executable memory for its JIT CodeCache.
+bool MemoryScanner::IsJitRuntime(const std::vector<MemoryRegion>& regions) const {
     bool isJitRuntime = HostUsesJit();
 #if !defined(_WIN32)
     char exePathBuf[PATH_MAX]{};
@@ -364,6 +359,17 @@ std::vector<core::DetectionEvent> MemoryScanner::DetectUnbackedExecutableRegions
         isJitRuntime = true;
     }
 #endif
+
+    return isJitRuntime;
+}
+
+std::vector<core::DetectionEvent> MemoryScanner::DetectUnbackedExecutableRegions() {
+    std::vector<core::DetectionEvent> events;
+    auto regions = QueryMemoryRegions();
+
+    // Check if host process is a JIT runtime (such as Java JVM / HotSpot or explicitly enabled JIT).
+    // In Java/Minecraft, HotSpot allocates anonymous executable memory for its JIT CodeCache.
+    const bool isJitRuntime = IsJitRuntime(regions);
 
     for (const auto& r : regions) {
         if (!r.executable) continue;
@@ -526,6 +532,8 @@ std::vector<core::DetectionEvent> MemoryScanner::ScanSignatures(const std::vecto
 #endif
 
     auto regions = QueryMemoryRegions();
+    // JIT engines legitimately emit "mov rax, imm64; jmp rax"-style stubs into anonymous code
+    const bool jitHost = IsJitRuntime(regions);
 
 #if !defined(_WIN32)
     SafeScanGuard safeGuard;
@@ -626,6 +634,12 @@ std::vector<core::DetectionEvent> MemoryScanner::ScanSignatures(const std::vecto
                 ev.type = core::DetectionType::MEMORY_SIGNATURE_MATCH;
                 ev.severity = sig.GetSeverity();
                 ev.threat_score = sig.GetThreatScore();
+                if (jitHost && !genuineFile && r.executable &&
+                    (sig.GetCategory() == SignatureCategory::HOOK_FRAMEWORK ||
+                     sig.GetCategory() == SignatureCategory::SHELLCODE_PROLOGUE)) {
+                    ev.severity = core::Severity::MEDIUM;
+                    ev.threat_score = std::min<uint32_t>(ev.threat_score, 25);
+                }
                 ev.component = std::string("MemoryScanner::") + CheatSignature::CategoryToString(sig.GetCategory());
 
                 std::ostringstream ss;
@@ -681,7 +695,7 @@ std::vector<core::DetectionEvent> MemoryScanner::ScanSignatures(const std::vecto
 }
 
 #if defined(__clang__) || defined(__GNUC__)
-__attribute__((no_sanitize("address", "hwaddress")))
+__attribute__((no_sanitize("address", "hwaddress", "thread")))
 #endif
 std::vector<core::DetectionEvent> MemoryScanner::DetectModifiedModules() {
     std::vector<core::DetectionEvent> events;

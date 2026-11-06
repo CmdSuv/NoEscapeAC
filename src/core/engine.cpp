@@ -151,6 +151,20 @@ std::vector<DetectionEvent> AntiCheatEngine::AuditCycle() {
     std::vector<DetectionEvent> cycleEvents;
     if (stop_requested_.load(std::memory_order_acquire)) return cycleEvents;
 
+    // One audit at a time: the background loop and a host calling Tick() share module state.
+    // A Tick() that finds an audit already running returns immediately instead of stalling the
+    // game thread for the remainder of that audit.
+    std::unique_lock<std::mutex> auditLock(audit_mutex_, std::defer_lock);
+    if (std::this_thread::get_id() == background_thread_id_.load()) {
+        auditLock.lock();
+    } else if (!auditLock.try_lock()) {
+        return cycleEvents;
+    }
+    const uint64_t cycleStartMs = GetSteadyNowMs();
+    // Process-table / window-tree scans read every /proc entry: run them every 5 s, not per cycle
+    const bool heavyScansDue = (cycleStartMs - last_heavy_scan_ms_.load() >= 5000);
+    if (heavyScansDue) last_heavy_scan_ms_.store(cycleStartMs);
+
     // Cache memory maps snapshot for the entire audit cycle to eliminate 25+ redundant file reads
     memory::MemoryScanner::Instance().RefreshCache();
     struct AuditCycleCacheGuard {
@@ -215,7 +229,7 @@ std::vector<DetectionEvent> AntiCheatEngine::AuditCycle() {
     UpdateAuditHeartbeat();
 
     // 6. Forensics Process & Environment Audit
-    if (config_.enableForensics) {
+    if (config_.enableForensics && heavyScansDue) {
         std::vector<std::string> cmdlineBlacklist = {"--inject", "gdb -p", "frida", "inject.so", "ld_preload="};
         auto procEvents = forensics::ProcessAnalyzer::Instance().AuditProcesses(
             config_.blacklistedProcesses,
@@ -246,7 +260,7 @@ std::vector<DetectionEvent> AntiCheatEngine::AuditCycle() {
     UpdateAuditHeartbeat();
 
     // 8. Overlay & ESP/Wallhack Detector (Rendering hooks & fake window scanner)
-    if (config_.enableOverlayDetection) {
+    if (config_.enableOverlayDetection && heavyScansDue) {
         auto overlayEvents = overlay::OverlayDetector::Instance().PerformAudit();
         cycleEvents.insert(cycleEvents.end(), overlayEvents.begin(), overlayEvents.end());
     }
@@ -574,6 +588,7 @@ void AntiCheatEngine::NetworkLoop() {
 }
 
 void AntiCheatEngine::BackgroundLoop() {
+    background_thread_id_.store(std::this_thread::get_id());
     while (running_.load(std::memory_order_acquire)) {
         while (freeze_background_loop_for_testing_.load(std::memory_order_acquire) &&
                running_.load(std::memory_order_acquire)) {

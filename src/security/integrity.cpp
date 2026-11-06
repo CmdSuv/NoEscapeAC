@@ -12,6 +12,9 @@
 #include <unistd.h>
 #include <fstream>
 #include <sstream>
+#include <vector>
+#include <algorithm>
+#include <elf.h>
 #endif
 
 namespace noescape::security {
@@ -135,9 +138,45 @@ bool IntegrityChecker::Initialize() {
     if (baseline_hash_.empty()) {
         return false;
     }
+    // The runtime baseline only catches changes *after* initialisation. Also compare the loaded
+    // code against the file on disk so a patch applied before we started (e.g. by an injector
+    // that loaded first) does not become part of the "trusted" baseline.
+    pre_baseline_mismatch_ = !TextMatchesDisk();
 
     initialized_ = true;
     return true;
+}
+
+bool IntegrityChecker::TextMatchesDisk() const {
+#if defined(_WIN32)
+    return true; // PE images are rebased in place; relocation-aware comparison is done by the Unhooker
+#else
+    Dl_info info{};
+    if (!dladdr(reinterpret_cast<void*>(text_start_), &info) || !info.dli_fname || info.dli_fname[0] != '/' ||
+        !info.dli_fbase) {
+        return true; // no file to compare against (e.g. memfd): nothing to prove either way
+    }
+    std::ifstream f(info.dli_fname, std::ios::binary);
+    if (!f.is_open()) return true;
+    ElfW(Ehdr) eh{};
+    f.read(reinterpret_cast<char*>(&eh), sizeof(eh));
+    if (f.gcount() != static_cast<std::streamsize>(sizeof(eh)) || std::memcmp(eh.e_ident, ELFMAG, SELFMAG) != 0) return true;
+    const uintptr_t vaddr = text_start_ - reinterpret_cast<uintptr_t>(info.dli_fbase);
+    for (uint16_t i = 0; i < eh.e_phnum && i < 512; ++i) {
+        ElfW(Phdr) ph{};
+        f.seekg(static_cast<std::streamoff>(eh.e_phoff + static_cast<uint64_t>(i) * eh.e_phentsize));
+        f.read(reinterpret_cast<char*>(&ph), sizeof(ph));
+        if (f.gcount() != static_cast<std::streamsize>(sizeof(ph))) return true;
+        if (ph.p_type != PT_LOAD || !(ph.p_flags & PF_X) || ph.p_vaddr != vaddr) continue;
+        size_t n = std::min<size_t>(static_cast<size_t>(ph.p_filesz), text_size_);
+        std::vector<char> disk(n);
+        f.seekg(static_cast<std::streamoff>(ph.p_offset));
+        f.read(disk.data(), static_cast<std::streamsize>(n));
+        if (static_cast<size_t>(f.gcount()) != n) return true;
+        return std::memcmp(disk.data(), reinterpret_cast<const void*>(text_start_), n) == 0;
+    }
+    return true;
+#endif
 }
 
 std::string IntegrityChecker::ComputeCurrentTextHash() const {
@@ -149,6 +188,18 @@ std::optional<core::DetectionEvent> IntegrityChecker::VerifyIntegrity() {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (!initialized_) {
         if (!Initialize()) return std::nullopt;
+    }
+
+    if (pre_baseline_mismatch_) {
+        pre_baseline_mismatch_ = false; // report once; the runtime baseline covers later changes
+        core::DetectionEvent ev;
+        ev.type = core::DetectionType::SELF_INTEGRITY_VIOLATION;
+        ev.severity = core::Severity::CRITICAL;
+        ev.component = "IntegrityChecker::DiskImage";
+        ev.details = "Anti-cheat code in memory differs from its on-disk image (patched before initialisation)";
+        ev.timestamp = static_cast<uint64_t>(time(nullptr));
+        ev.threat_score = 90;
+        return ev;
     }
 
     std::string currentHash = ComputeCurrentTextHash();
