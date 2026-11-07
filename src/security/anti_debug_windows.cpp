@@ -188,11 +188,11 @@ std::vector<core::DetectionEvent> AntiDebug::PerformAudit(const std::vector<std:
     if (IsDebuggerAttached()) {
         core::DetectionEvent ev;
         ev.type = core::DetectionType::ANTI_DEBUG_TRACER;
-        ev.severity = core::Severity::FATAL_BAN;
+        ev.severity = core::Severity::CRITICAL;
         ev.component = "AntiDebug::WindowsDebugger";
         ev.details = "Active debugger detected via PEB / RemoteDebugger / ProcessDebugPort";
         ev.timestamp = static_cast<uint64_t>(std::time(nullptr));
-        ev.threat_score = 100;
+        ev.threat_score = 60;
         events.push_back(ev);
     }
 

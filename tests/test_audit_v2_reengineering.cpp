@@ -14,6 +14,7 @@ using namespace noescape;
 using namespace noescape::core;
 using namespace noescape::server;
 using namespace noescape::kinematics;
+using namespace noescape::overlay;
 
 // ============================================================================
 // 1. EvidenceCorrelator Temporal & Session Verification
@@ -250,3 +251,99 @@ TEST(SdkV2, ProfileConfigurationsAndExtendedFields) {
 
     NoEscape_Shutdown();
 }
+
+// ============================================================================
+// 5. Hardening & Anti-False-Positive Verifications
+// ============================================================================
+
+TEST(CorrelatorV2, StrictCorroborationPreventsSingleSignalPermanentBan) {
+    EvidenceCorrelator correlator;
+    correlator.SetTimeWindowMs(60000);
+
+    // Single high-severity event without independent corroborating signal
+    DetectionEvent singleEv;
+    singleEv.type = DetectionType::UNBACKED_EXECUTABLE_MEMORY;
+    singleEv.severity = Severity::FATAL_BAN;
+    singleEv.component = "MemoryScanner";
+    singleEv.details = "Executable anonymous region 0x7fff0000";
+    singleEv.threat_score = 100;
+
+    // Under strict corroboration mode (Production), permanent ban MUST be refused
+    auto decisionStrict = correlator.Evaluate(singleEv, 0, 100, true);
+    ASSERT_FALSE(decisionStrict.eligible_for_permanent_ban);
+    ASSERT_LT(decisionStrict.effective_score_delta, 100u);
+
+    // Under testing mode (strict=false), permanent ban is allowed
+    EvidenceCorrelator correlatorTest;
+    auto decisionTest = correlatorTest.Evaluate(singleEv, 0, 100, false);
+    ASSERT_TRUE(decisionTest.eligible_for_permanent_ban);
+}
+
+TEST(CorrelatorV2, MultiSignalCorroborationEnablesPermanentBan) {
+    EvidenceCorrelator correlator;
+    correlator.SetTimeWindowMs(60000);
+
+    // Event 1: Memory category
+    DetectionEvent ev1;
+    ev1.type = DetectionType::UNBACKED_EXECUTABLE_MEMORY;
+    ev1.severity = Severity::HIGH;
+    ev1.component = "MemoryScanner";
+    ev1.details = "Executable anonymous region 0x7fff0000";
+    ev1.threat_score = 60;
+    correlator.Evaluate(ev1, 0, 100, true);
+
+    // Event 2: Independent Process category with distinct root cause
+    DetectionEvent ev2;
+    ev2.type = DetectionType::SUSPICIOUS_PROCESS_DETECTED;
+    ev2.severity = Severity::HIGH;
+    ev2.component = "ProcessAnalyzer";
+    ev2.details = "Blacklisted injector tool: PID 9999";
+    ev2.threat_score = 50;
+
+    auto decision = correlator.Evaluate(ev2, 60, 100, true);
+    // Two independent categories present: corroboration satisfied
+    ASSERT_GE(decision.independent_category_count, 2u);
+    ASSERT_TRUE(decision.eligible_for_permanent_ban);
+}
+
+TEST(OverlayV2, UnverifiedPidDoesNotTriggerImmediateHijack) {
+    auto& detector = OverlayDetector::Instance();
+    detector.ClearMockWindows();
+
+    // A legitimate window titled "Steam Overlay", but PID is inaccessible / unverified (PID 0)
+    OverlayWindowInfo win{};
+    win.title = "Steam Overlay";
+    win.class_name = "ValveSteamOverlay";
+    win.pid = 0;
+    win.is_layered = false;
+    win.is_transparent = false;
+    win.is_topmost = false;
+    detector.AddMockWindow(win);
+
+    // Must not be flagged as a suspicious cheating overlay hijack
+    auto alerts = detector.DetectSuspiciousWindows();
+    ASSERT_EQ(alerts.size(), 0u);
+}
+
+TEST(WatchdogV2, WatchdogDelayDoesNotCausePermanentBanInProduction) {
+    EngineConfig prodCfg = EngineConfig::ProductionProfile();
+    prodCfg.enableHeartbeat = false; // avoid spinning background threads in unit test
+
+    AntiCheatEngine engine(prodCfg);
+    ASSERT_TRUE(engine.Initialize());
+
+    // Inject a watchdog heartbeat timeout anomaly into production engine
+    DetectionEvent watchdogEv;
+    watchdogEv.type = DetectionType::HEARTBEAT_TAMPERING;
+    watchdogEv.severity = Severity::CRITICAL;
+    watchdogEv.component = "AntiCheatEngine::Watchdog";
+    watchdogEv.details = "Watchdog heartbeat timeout: background audit loop delayed (> 3000ms)";
+    watchdogEv.threat_score = 100;
+
+    engine.ProcessDetection(watchdogEv);
+
+    // Production profile MUST NOT issue a permanent ban on scheduling delay
+    ASSERT_FALSE(engine.IsBanned());
+    ASSERT_LT(engine.GetThreatScore(), 100u);
+}
+

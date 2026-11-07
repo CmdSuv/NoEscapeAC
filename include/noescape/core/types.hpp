@@ -299,9 +299,9 @@ struct DetectionEvent {
 };
 
 struct EngineConfig {
-    ConfigurationProfile profile{ConfigurationProfile::DEVELOPMENT};
-    std::string panelUrl{"http://127.0.0.1:8080/api/ac"};
-    std::string secretKey{"NoEscape_Secret_Key_v2.0"};
+    ConfigurationProfile profile{ConfigurationProfile::PRODUCTION};
+    std::string panelUrl{""};
+    std::string secretKey{""};
     // Optional SHA-256 (hex) of the panel's TLS SubjectPublicKeyInfo. When set, https:// panel
     // connections succeed only if the server presents exactly this key.
     std::string panelPinSha256{""};
@@ -312,9 +312,9 @@ struct EngineConfig {
     // Host embeds a JIT (LuaJIT, V8/CEF, Mono, ...): anonymous executable memory is expected.
     bool hostUsesJit{false};
     std::string blackboxDumpDirectory{""};
-    bool enforceBanOnViolation{true};
-    EnforcementMode enforcementMode{EnforcementMode::ENFORCE};
-    bool requireMultiSignalCorroboration{false};
+    bool enforceBanOnViolation{false};
+    EnforcementMode enforcementMode{EnforcementMode::SERVER_SESSION_REJECT};
+    bool requireMultiSignalCorroboration{true};
     uint32_t banScoreThreshold{100};
     uint64_t memoryScanBudgetMs{25};
     bool enableAdaptiveScanning{true};
@@ -356,7 +356,7 @@ struct EngineConfig {
         cfg.enforceBanOnViolation = false;
         cfg.terminateProcessOnBan = false;
         cfg.showBanUi = false;
-        cfg.requireMultiSignalCorroboration = false;
+        cfg.requireMultiSignalCorroboration = true;
         cfg.enableAntiDebug = false;
         cfg.enableHeartbeat = false;
         cfg.verifyPanelBan = false;

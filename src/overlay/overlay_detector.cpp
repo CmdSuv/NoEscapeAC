@@ -431,8 +431,13 @@ bool OverlayDetector::IsSuspiciousOverlayWindow(const OverlayWindowInfo& win) co
             if (trust == ProcessTrustState::TRUSTED) {
                 return false;
             }
-            // Title matched a whitelisted overlay, but the owning PID binary is forged, unverified, or hijacked!
-            return true;
+            if (trust == ProcessTrustState::SUSPICIOUS || trust == ProcessTrustState::UNTRUSTED) {
+                // Title matched a whitelisted overlay, but the owning PID binary is verified forged or hijacked
+                return true;
+            }
+            // For UNVERIFIED or UNKNOWN: unknown must not mean trusted (so do not immediately whitelist),
+            // but unknown must not automatically mean cheating either. Fall through to structural checks.
+            break;
         }
     }
 
@@ -448,7 +453,10 @@ bool OverlayDetector::IsSuspiciousOverlayWindow(const OverlayWindowInfo& win) co
             if (trust == ProcessTrustState::TRUSTED) {
                 return false;
             }
-            return true;
+            if (trust == ProcessTrustState::SUSPICIOUS || trust == ProcessTrustState::UNTRUSTED) {
+                return true;
+            }
+            break;
         }
     }
 

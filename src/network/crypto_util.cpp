@@ -1,5 +1,6 @@
 #include "noescape/network/crypto_util.hpp"
 #include "noescape/network/ed25519.hpp"
+#include "noescape/network/chacha20poly1305.hpp"
 #include "noescape/core/obfuscation.hpp"
 #include <cstring>
 #include <sstream>
@@ -453,60 +454,37 @@ bool CryptoUtil::AeadChaCha20Poly1305Encrypt(
 ) {
 #if defined(NOESCAPE_HAS_OPENSSL)
     EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
-    if (!ctx) return false;
-    int len = 0;
-    if (EVP_EncryptInit_ex(ctx, EVP_chacha20_poly1305(), nullptr, nullptr, nullptr) != 1 ||
-        EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_AEAD_SET_IVLEN, 12, nullptr) != 1 ||
-        EVP_EncryptInit_ex(ctx, nullptr, nullptr, key, nonce) != 1) {
+    if (ctx) {
+        int len = 0;
+        if (EVP_EncryptInit_ex(ctx, EVP_chacha20_poly1305(), nullptr, nullptr, nullptr) == 1 &&
+            EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_AEAD_SET_IVLEN, 12, nullptr) == 1 &&
+            EVP_EncryptInit_ex(ctx, nullptr, nullptr, key, nonce) == 1) {
+            bool ok = true;
+            if (!aad.empty()) {
+                if (EVP_EncryptUpdate(ctx, nullptr, &len, aad.data(), static_cast<int>(aad.size())) != 1) {
+                    ok = false;
+                }
+            }
+            out_ciphertext.resize(plaintext.size());
+            if (ok && !plaintext.empty()) {
+                if (EVP_EncryptUpdate(ctx, out_ciphertext.data(), &len, plaintext.data(), static_cast<int>(plaintext.size())) != 1) {
+                    ok = false;
+                }
+            }
+            int finalLen = 0;
+            if (ok && EVP_EncryptFinal_ex(ctx, out_ciphertext.data() + len, &finalLen) == 1 &&
+                EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_AEAD_GET_TAG, 16, out_tag) == 1) {
+                EVP_CIPHER_CTX_free(ctx);
+                return true;
+            }
+        }
         EVP_CIPHER_CTX_free(ctx);
-        return false;
     }
-    if (!aad.empty()) {
-        if (EVP_EncryptUpdate(ctx, nullptr, &len, aad.data(), static_cast<int>(aad.size())) != 1) {
-            EVP_CIPHER_CTX_free(ctx);
-            return false;
-        }
-    }
-    out_ciphertext.resize(plaintext.size());
-    if (!plaintext.empty()) {
-        if (EVP_EncryptUpdate(ctx, out_ciphertext.data(), &len, plaintext.data(), static_cast<int>(plaintext.size())) != 1) {
-            EVP_CIPHER_CTX_free(ctx);
-            return false;
-        }
-    }
-    int finalLen = 0;
-    if (EVP_EncryptFinal_ex(ctx, out_ciphertext.data() + len, &finalLen) != 1 ||
-        EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_AEAD_GET_TAG, 16, out_tag) != 1) {
-        EVP_CIPHER_CTX_free(ctx);
-        return false;
-    }
-    EVP_CIPHER_CTX_free(ctx);
-    return true;
-#else
-    std::string encKey = DeriveKeyHkdf(std::string(reinterpret_cast<const char*>(key), 32),
-                                       std::string(reinterpret_cast<const char*>(nonce), 12),
-                                       "ChaCha20-Poly1305-Fallback-Enc");
-    std::string macKey = DeriveKeyHkdf(std::string(reinterpret_cast<const char*>(key), 32),
-                                       std::string(reinterpret_cast<const char*>(nonce), 12),
-                                       "ChaCha20-Poly1305-Fallback-Mac");
-    out_ciphertext = plaintext;
-    size_t offset = 0;
-    uint32_t counter = 0;
-    while (offset < out_ciphertext.size()) {
-        std::string block = Sha256(encKey + ":" + std::to_string(counter++));
-        auto blockBytes = FromHex(block);
-        for (size_t i = 0; i < blockBytes.size() && offset < out_ciphertext.size(); ++i, ++offset) {
-            out_ciphertext[offset] ^= blockBytes[i];
-        }
-    }
-    std::string macPayload(reinterpret_cast<const char*>(aad.data()), aad.size());
-    macPayload.append(reinterpret_cast<const char*>(nonce), 12);
-    macPayload.append(reinterpret_cast<const char*>(out_ciphertext.data()), out_ciphertext.size());
-    std::string fullTagHex = HmacSha256(macKey, macPayload);
-    auto tagBytes = FromHex(fullTagHex);
-    std::memcpy(out_tag, tagBytes.data(), 16);
-    return true;
 #endif
+    // Genuine RFC 8439 pure ChaCha20-Poly1305 provider (portable fallback / non-OpenSSL builds / Windows)
+    return chacha20poly1305::AeadEncrypt(key, nonce, aad.data(), aad.size(),
+                                         plaintext.data(), plaintext.size(),
+                                         out_ciphertext, out_tag);
 }
 
 bool CryptoUtil::AeadChaCha20Poly1305Decrypt(
@@ -519,62 +497,37 @@ bool CryptoUtil::AeadChaCha20Poly1305Decrypt(
 ) {
 #if defined(NOESCAPE_HAS_OPENSSL)
     EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
-    if (!ctx) return false;
-    int len = 0;
-    if (EVP_DecryptInit_ex(ctx, EVP_chacha20_poly1305(), nullptr, nullptr, nullptr) != 1 ||
-        EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_AEAD_SET_IVLEN, 12, nullptr) != 1 ||
-        EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_AEAD_SET_TAG, 16, const_cast<uint8_t*>(tag)) != 1 ||
-        EVP_DecryptInit_ex(ctx, nullptr, nullptr, key, nonce) != 1) {
+    if (ctx) {
+        int len = 0;
+        if (EVP_DecryptInit_ex(ctx, EVP_chacha20_poly1305(), nullptr, nullptr, nullptr) == 1 &&
+            EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_AEAD_SET_IVLEN, 12, nullptr) == 1 &&
+            EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_AEAD_SET_TAG, 16, const_cast<uint8_t*>(tag)) == 1 &&
+            EVP_DecryptInit_ex(ctx, nullptr, nullptr, key, nonce) == 1) {
+            bool ok = true;
+            if (!aad.empty()) {
+                if (EVP_DecryptUpdate(ctx, nullptr, &len, aad.data(), static_cast<int>(aad.size())) != 1) {
+                    ok = false;
+                }
+            }
+            out_plaintext.resize(ciphertext.size());
+            if (ok && !ciphertext.empty()) {
+                if (EVP_DecryptUpdate(ctx, out_plaintext.data(), &len, ciphertext.data(), static_cast<int>(ciphertext.size())) != 1) {
+                    ok = false;
+                }
+            }
+            int finalLen = 0;
+            if (ok && EVP_DecryptFinal_ex(ctx, out_plaintext.data() + len, &finalLen) == 1) {
+                EVP_CIPHER_CTX_free(ctx);
+                return true;
+            }
+        }
         EVP_CIPHER_CTX_free(ctx);
-        return false;
     }
-    if (!aad.empty()) {
-        if (EVP_DecryptUpdate(ctx, nullptr, &len, aad.data(), static_cast<int>(aad.size())) != 1) {
-            EVP_CIPHER_CTX_free(ctx);
-            return false;
-        }
-    }
-    out_plaintext.resize(ciphertext.size());
-    if (!ciphertext.empty()) {
-        if (EVP_DecryptUpdate(ctx, out_plaintext.data(), &len, ciphertext.data(), static_cast<int>(ciphertext.size())) != 1) {
-            EVP_CIPHER_CTX_free(ctx);
-            return false;
-        }
-    }
-    int finalLen = 0;
-    if (EVP_DecryptFinal_ex(ctx, out_plaintext.data() + len, &finalLen) != 1) {
-        EVP_CIPHER_CTX_free(ctx);
-        return false;
-    }
-    EVP_CIPHER_CTX_free(ctx);
-    return true;
-#else
-    std::string encKey = DeriveKeyHkdf(std::string(reinterpret_cast<const char*>(key), 32),
-                                       std::string(reinterpret_cast<const char*>(nonce), 12),
-                                       "ChaCha20-Poly1305-Fallback-Enc");
-    std::string macKey = DeriveKeyHkdf(std::string(reinterpret_cast<const char*>(key), 32),
-                                       std::string(reinterpret_cast<const char*>(nonce), 12),
-                                       "ChaCha20-Poly1305-Fallback-Mac");
-    std::string macPayload(reinterpret_cast<const char*>(aad.data()), aad.size());
-    macPayload.append(reinterpret_cast<const char*>(nonce), 12);
-    macPayload.append(reinterpret_cast<const char*>(ciphertext.data()), ciphertext.size());
-    std::string expectedTagHex = HmacSha256(macKey, macPayload);
-    auto expectedTagBytes = FromHex(expectedTagHex);
-    if (!ConstantTimeEquals(ToHex(tag, 16), ToHex(expectedTagBytes.data(), 16))) {
-        return false;
-    }
-    out_plaintext = ciphertext;
-    size_t offset = 0;
-    uint32_t counter = 0;
-    while (offset < out_plaintext.size()) {
-        std::string block = Sha256(encKey + ":" + std::to_string(counter++));
-        auto blockBytes = FromHex(block);
-        for (size_t i = 0; i < blockBytes.size() && offset < out_plaintext.size(); ++i, ++offset) {
-            out_plaintext[offset] ^= blockBytes[i];
-        }
-    }
-    return true;
 #endif
+    // Genuine RFC 8439 pure ChaCha20-Poly1305 provider (portable fallback / non-OpenSSL builds / Windows)
+    return chacha20poly1305::AeadDecrypt(key, nonce, aad.data(), aad.size(),
+                                         ciphertext.data(), ciphertext.size(),
+                                         tag, out_plaintext);
 }
 
 bool CryptoUtil::IsVersionAtLeast(const std::string& actual_version, const std::string& minimum_required) {

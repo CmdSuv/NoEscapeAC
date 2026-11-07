@@ -65,6 +65,7 @@ set(CORE_SOURCES
     src/core/blackbox.cpp
     src/network/crypto_util.cpp
     src/network/ed25519.cpp
+    src/network/chacha20poly1305.cpp
     src/network/panel_client.cpp
     src/security/anti_debug_linux.cpp
     src/security/anti_debug_windows.cpp

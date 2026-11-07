@@ -91,36 +91,7 @@ NoEscapeConfig NoEscape_GetProfileConfig(NoEscapeProfile profile) {
 }
 
 NoEscapeConfig NoEscape_GetDefaultConfig(void) {
-    NoEscapeConfig cfg{};
-    cfg.struct_size = sizeof(NoEscapeConfig);
-    cfg.config_version = 2;
-    cfg.panel_url = "http://127.0.0.1:8080/api/ac";
-    cfg.secret_key = "NoEscape_Secret_Key_v2.0";
-    cfg.blackbox_dump_dir = nullptr;
-    cfg.ban_threshold = 100;
-    cfg.enforce_ban = true;
-    cfg.enable_anti_debug = true;
-    cfg.enable_integrity_scan = true;
-    cfg.enable_speedhack_detection = true;
-    cfg.enable_memory_scan = true;
-    cfg.enable_unhooker = true;
-    cfg.enable_forensics = true;
-    cfg.enable_dma_detection = true;
-    cfg.enable_kinematics = true;
-    cfg.enable_overlay_detection = true;
-    cfg.enable_blackbox_dump = true;
-    cfg.enable_heartbeat = false;
-    cfg.terminate_on_ban = false;
-    cfg.show_ban_ui = true;
-    cfg.ban_ui_path = nullptr;
-
-    cfg.server_public_key = nullptr;
-    cfg.key_id = "default-v1";
-    cfg.client_build_version = "7.0.13";
-    cfg.enforcement_mode = static_cast<int>(noescape::core::EnforcementMode::ENFORCE);
-    cfg.require_multi_signal_corroboration = false;
-    cfg.memory_scan_budget_ms = 25;
-    return cfg;
+    return NoEscape_GetProfileConfig(NOESCAPE_PROFILE_PRODUCTION);
 }
 
 int NoEscape_Init(const NoEscapeConfig* config) {
@@ -170,7 +141,7 @@ int NoEscape_Init(const NoEscapeConfig* config) {
             if (config->memory_scan_budget_ms > 0) engineCfg.memoryScanBudgetMs = config->memory_scan_budget_ms;
         }
     } else {
-        engineCfg.enableHeartbeat = false;
+        engineCfg = noescape::core::EngineConfig::ProductionProfile();
     }
 
     {

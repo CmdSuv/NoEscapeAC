@@ -133,6 +133,6 @@ In the v2.0 Reengineering cycle, all 20 critical and major security findings wer
 
 ### 5.2 Verification Metrics
 - **Compilation:** `-DNOESCAPE_WERROR=ON` with zero compiler warnings under GCC 16 C++20.
-- **Unit & Integration Test Suite:** **145 / 145 Tests Passed (100% Green)**.
+- **Unit & Integration Test Suite:** **153 / 153 Tests Passed (100% Green)**.
 - **Preload Verification:** `tools/verify_preload.sh` **6 / 6 Passed (100% Green)**.
 - **System Integrity:** Verified zero AI attribution artifacts; strictly Omar Yiğitcan Mengü (`@CmdSuv`) and OnlyCosmos (`@OnlyCosmos`).

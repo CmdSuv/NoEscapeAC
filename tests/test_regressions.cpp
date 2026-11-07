@@ -403,7 +403,7 @@ TEST(Regression, AttestationRangeIsBoundsChecked) {
 #endif
 
 TEST(Regression, AuditLoopDetectsDeadWatchdog) {
-    core::EngineConfig cfg;
+    core::EngineConfig cfg = core::EngineConfig::TestingProfile();
     cfg.enableHeartbeat = false;
     cfg.enableDmaDetection = false;
     cfg.enableMemoryScan = false;

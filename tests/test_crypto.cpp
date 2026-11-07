@@ -1,5 +1,7 @@
 #include "tests/test_framework.hpp"
 #include "noescape/network/crypto_util.hpp"
+#include "noescape/network/ed25519.hpp"
+#include "noescape/core/blackbox.hpp"
 
 using namespace noescape::network;
 
@@ -131,3 +133,138 @@ TEST(Crypto, Ed25519KeyRotationScenario) {
     ASSERT_TRUE(CryptoUtil::VerifyAsymmetric(keyV2.public_key_hex, payload, sigV2));
     ASSERT_FALSE(CryptoUtil::VerifyAsymmetric(keyV1.public_key_hex, payload, sigV2));
 }
+
+TEST(Crypto, Rfc8439ChaCha20Poly1305OfficialTestVector) {
+    // Official test vector from RFC 8439 Section 2.8.2
+    std::string keyHex = "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f";
+    std::string nonceHex = "070000004041424344454647";
+    std::string aadHex = "50515253c0c1c2c3c4c5c6c7";
+    std::string plaintextStr = "Ladies and Gentlemen of the class of '99: If I could offer you only one tip for the future, sunscreen would be it.";
+    std::string expectedCipherHex = "d31a8d34648e60db7b86afbc53ef7ec2a4aded51296e08fea9e2b5a736ee62d63dbea45e8ca9671282fafb69da92728b1a71de0a9e060b2905d6a5b67ecd3b3692ddbd7f2d778b8c9803aee328091b58fab324e4fad675945585808b4831d7bc3ff4def08e4b7a9de576d26586cec64b6116";
+    std::string expectedTagHex = "1ae10b594f09e26a7e902ecbd0600691";
+
+    auto key = CryptoUtil::FromHex(keyHex);
+    auto nonce = CryptoUtil::FromHex(nonceHex);
+    auto aad = CryptoUtil::FromHex(aadHex);
+    std::vector<uint8_t> pt(plaintextStr.begin(), plaintextStr.end());
+    std::vector<uint8_t> ct;
+    uint8_t tag[16]{};
+
+    bool encOk = CryptoUtil::AeadChaCha20Poly1305Encrypt(pt, aad, key.data(), nonce.data(), ct, tag);
+    ASSERT_TRUE(encOk);
+    ASSERT_EQ(CryptoUtil::ToHex(ct.data(), ct.size()), expectedCipherHex);
+    ASSERT_EQ(CryptoUtil::ToHex(tag, 16), expectedTagHex);
+
+    std::vector<uint8_t> decrypted;
+    bool decOk = CryptoUtil::AeadChaCha20Poly1305Decrypt(ct, aad, tag, key.data(), nonce.data(), decrypted);
+    ASSERT_TRUE(decOk);
+    ASSERT_EQ(std::string(decrypted.begin(), decrypted.end()), plaintextStr);
+}
+
+TEST(Crypto, Rfc8439ChaCha20Poly1305NegativeAndTamperTests) {
+    std::string keyHex = "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f";
+    std::string nonceHex = "070000004041424344454647";
+    std::string aadHex = "50515253c0c1c2c3c4c5c6c7";
+    std::string plaintextStr = "Authentic Payload For AntiCheat Verification";
+
+    auto key = CryptoUtil::FromHex(keyHex);
+    auto nonce = CryptoUtil::FromHex(nonceHex);
+    auto aad = CryptoUtil::FromHex(aadHex);
+    std::vector<uint8_t> pt(plaintextStr.begin(), plaintextStr.end());
+    std::vector<uint8_t> ct;
+    uint8_t tag[16]{};
+
+    ASSERT_TRUE(CryptoUtil::AeadChaCha20Poly1305Encrypt(pt, aad, key.data(), nonce.data(), ct, tag));
+
+    std::vector<uint8_t> decrypted;
+
+    // 1. Mutated ciphertext bit must fail tag authentication
+    ct[0] ^= 0x01;
+    ASSERT_FALSE(CryptoUtil::AeadChaCha20Poly1305Decrypt(ct, aad, tag, key.data(), nonce.data(), decrypted));
+    ct[0] ^= 0x01;
+
+    // 2. Mutated tag must fail
+    tag[0] ^= 0x01;
+    ASSERT_FALSE(CryptoUtil::AeadChaCha20Poly1305Decrypt(ct, aad, tag, key.data(), nonce.data(), decrypted));
+    tag[0] ^= 0x01;
+
+    // 3. Mutated AAD must fail
+    aad[0] ^= 0x01;
+    ASSERT_FALSE(CryptoUtil::AeadChaCha20Poly1305Decrypt(ct, aad, tag, key.data(), nonce.data(), decrypted));
+    aad[0] ^= 0x01;
+
+    // 4. Wrong key must fail
+    key[0] ^= 0x01;
+    ASSERT_FALSE(CryptoUtil::AeadChaCha20Poly1305Decrypt(ct, aad, tag, key.data(), nonce.data(), decrypted));
+    key[0] ^= 0x01;
+
+    // 5. Wrong nonce must fail
+    nonce[0] ^= 0x01;
+    ASSERT_FALSE(CryptoUtil::AeadChaCha20Poly1305Decrypt(ct, aad, tag, key.data(), nonce.data(), decrypted));
+    nonce[0] ^= 0x01;
+
+    // Original recovers cleanly
+    ASSERT_TRUE(CryptoUtil::AeadChaCha20Poly1305Decrypt(ct, aad, tag, key.data(), nonce.data(), decrypted));
+    ASSERT_EQ(std::string(decrypted.begin(), decrypted.end()), plaintextStr);
+}
+
+TEST(Crypto, PureEd25519DirectSoftwareVerification) {
+    // Calling ed25519 namespace directly to guarantee software curve path passes
+    std::string priv1Hex = "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60";
+    auto priv1 = CryptoUtil::FromHex(priv1Hex);
+    uint8_t pubKey[32]{};
+    uint8_t privKey[64]{};
+    ASSERT_TRUE(noescape::network::ed25519::CreateKeyPair(priv1.data(), pubKey, privKey));
+
+    std::string msg = "";
+    uint8_t sig[64]{};
+    ASSERT_TRUE(noescape::network::ed25519::Sign(priv1.data(), 32,
+        reinterpret_cast<const uint8_t*>(msg.data()), msg.size(), sig));
+
+    ASSERT_TRUE(noescape::network::ed25519::Verify(pubKey,
+        reinterpret_cast<const uint8_t*>(msg.data()), msg.size(), sig));
+
+    // Direct negative test: altered message fails
+    std::string altered = "tampered";
+    ASSERT_FALSE(noescape::network::ed25519::Verify(pubKey,
+        reinterpret_cast<const uint8_t*>(altered.data()), altered.size(), sig));
+}
+
+TEST(Blackbox, AeadV2FlightRecorderRoundtrip) {
+    using namespace noescape::core;
+    BlackboxRecord recIn;
+    recIn.timestamp = 1730000000;
+    recIn.threat_score = 95;
+    recIn.violation_type = 4;
+    recIn.hwid = "test-hwid-abc123xyz";
+    recIn.violating_component = "MemoryScanner";
+    recIn.violation_reason = "Unbacked executable memory at 0x7fff12340000";
+    recIn.backtrace_addrs = {0x401000, 0x402500, 0x7fff0000};
+    recIn.recent_input_trail = {{1.5f, 2.5f, 1000}, {1.6f, 2.6f, 1016}};
+    recIn.loaded_modules_sample = {"game.exe", "ntdll.dll"};
+
+    std::string secretKey = "ProductionDeploymentMasterSecretKey!";
+    auto encrypted = BlackboxDumper::Instance().SerializeAndEncrypt(recIn, secretKey);
+    ASSERT_GT(encrypted.size(), 60);
+
+    BlackboxRecord recOut;
+    ASSERT_TRUE(BlackboxDumper::Instance().DecryptAndDeserialize(encrypted, secretKey, recOut));
+    ASSERT_EQ(recOut.timestamp, recIn.timestamp);
+    ASSERT_EQ(recOut.threat_score, recIn.threat_score);
+    ASSERT_EQ(recOut.violation_type, recIn.violation_type);
+    ASSERT_EQ(recOut.hwid, recIn.hwid);
+    ASSERT_EQ(recOut.violating_component, recIn.violating_component);
+    ASSERT_EQ(recOut.violation_reason, recIn.violation_reason);
+    ASSERT_EQ(recOut.backtrace_addrs.size(), recIn.backtrace_addrs.size());
+    ASSERT_EQ(recOut.recent_input_trail.size(), recIn.recent_input_trail.size());
+
+    // Tampered payload must fail decryption
+    auto tampered = encrypted;
+    tampered[tampered.size() - 1] ^= 0xFF;
+    BlackboxRecord failRec;
+    ASSERT_FALSE(BlackboxDumper::Instance().DecryptAndDeserialize(tampered, secretKey, failRec));
+
+    // Wrong secret key must fail decryption
+    ASSERT_FALSE(BlackboxDumper::Instance().DecryptAndDeserialize(encrypted, "WrongKey", failRec));
+}
+

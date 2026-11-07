@@ -36,7 +36,7 @@ All notable technical changes to the NoEscape Anti-Cheat system are documented i
   - `Development`, `Testing`, `ShadowProduction`, `Production`, and `OfflineDiagnostics`.
   - Added `struct_size` and versioning guards ensuring backward compatibility for legacy struct layouts.
 - **Complete Test Suite Expansion:**
-  - Expanded test suite to **145 total unit & integration tests**, verified 100% green with zero warnings under `-DNOESCAPE_WERROR=ON`.
+  - Expanded test suite to **153 total unit & integration tests**, verified 100% green with zero warnings under `-DNOESCAPE_WERROR=ON`.
   - Scenario B Preload Verification verified **6/6 passed (100%)**.
 
 ---

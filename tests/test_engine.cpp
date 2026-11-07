@@ -4,8 +4,7 @@
 using namespace noescape::core;
 
 TEST(Engine, InitializationAndThreatScoring) {
-    EngineConfig cfg;
-    cfg.enableHeartbeat = false;
+    EngineConfig cfg = EngineConfig::TestingProfile();
     cfg.banScoreThreshold = 100;
     cfg.blackboxDumpDirectory = "/tmp";
 
@@ -49,8 +48,7 @@ TEST(Engine, InitializationAndThreatScoring) {
 }
 
 TEST(Engine, FatalBanEnforcement) {
-    EngineConfig cfg;
-    cfg.enableHeartbeat = false;
+    EngineConfig cfg = EngineConfig::TestingProfile();
     cfg.banScoreThreshold = 500;
     cfg.blackboxDumpDirectory = "/tmp";
 
@@ -75,8 +73,7 @@ TEST(Engine, FatalBanEnforcement) {
 }
 
 TEST(Engine, BanScreenConfigAndInvocation) {
-    EngineConfig cfg;
-    cfg.enableHeartbeat = false;
+    EngineConfig cfg = EngineConfig::TestingProfile();
     cfg.banScoreThreshold = 100;
     cfg.showBanUi = true;
     cfg.terminateProcessOnBan = false;

@@ -219,11 +219,11 @@ std::vector<core::DetectionEvent> AntiDebug::PerformAudit(const std::vector<std:
     if (CheckTracerPid(tracerPid) && tracerPid > 0) {
         core::DetectionEvent ev;
         ev.type = core::DetectionType::ANTI_DEBUG_TRACER;
-        ev.severity = core::Severity::FATAL_BAN;
+        ev.severity = core::Severity::CRITICAL;
         ev.component = "AntiDebug::LinuxTracer";
         ev.details = "Active TracerPid detected attached to process: PID " + std::to_string(tracerPid);
         ev.timestamp = static_cast<uint64_t>(time(nullptr));
-        ev.threat_score = 100;
+        ev.threat_score = 60;
         events.push_back(ev);
     }
 

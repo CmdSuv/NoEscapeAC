@@ -17,11 +17,13 @@ static void SdkViolationCallback(int type, int score, const char* details) {
 TEST(SDK, DefaultConfiguration) {
     NoEscapeConfig cfg = NoEscape_GetDefaultConfig();
     ASSERT_EQ(cfg.ban_threshold, 100);
-    ASSERT_TRUE(cfg.enforce_ban);
+    ASSERT_FALSE(cfg.enforce_ban);
     ASSERT_TRUE(cfg.enable_anti_debug);
     ASSERT_TRUE(cfg.enable_overlay_detection);
     ASSERT_TRUE(cfg.enable_blackbox_dump);
-    ASSERT_FALSE(cfg.enable_heartbeat);
+    ASSERT_TRUE(cfg.enable_heartbeat);
+    ASSERT_TRUE(cfg.require_multi_signal_corroboration);
+    ASSERT_EQ(cfg.enforcement_mode, static_cast<int>(noescape::core::EnforcementMode::SERVER_SESSION_REJECT));
 }
 
 TEST(SDK, LifecycleAndIdempotency) {

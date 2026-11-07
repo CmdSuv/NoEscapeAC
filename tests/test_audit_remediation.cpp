@@ -531,7 +531,7 @@ TEST(Hardening, WatchdogThreadLifecycleClean) {
 }
 
 TEST(Hardening, WatchdogDetectsThreadFreezeTampering) {
-    core::EngineConfig cfg;
+    core::EngineConfig cfg = core::EngineConfig::TestingProfile();
     cfg.enableHeartbeat = false;
     cfg.terminateProcessOnBan = false;
     cfg.showBanUi = false;

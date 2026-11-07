@@ -839,21 +839,16 @@ void AntiCheatEngine::WatchdogLoop() {
         uint64_t now = GetSteadyNowMs();
         uint64_t last = last_audit_heartbeat_ms_.load(std::memory_order_acquire);
         if (last > 0 && now > last && (now - last) > 3000) {
-            Logger::Instance().Error("Watchdog detected thread freeze or suspension (> 3000ms heartbeat deadline missed). Flagging tampering.");
+            Logger::Instance().Warn("Watchdog detected thread delay (> 3000ms heartbeat deadline missed). Flagging anomaly.");
             DetectionEvent ev;
             ev.type = DetectionType::HEARTBEAT_TAMPERING;
-            ev.severity = Severity::FATAL_BAN;
+            ev.severity = Severity::CRITICAL;
             ev.component = "AntiCheatEngine::Watchdog";
-            ev.details = "Watchdog heartbeat timeout: background audit loop frozen or suspended (> 3000ms)";
+            ev.details = "Watchdog heartbeat timeout: background audit loop delayed or suspended (> 3000ms)";
             ev.timestamp = static_cast<uint64_t>(std::time(nullptr));
             ev.threat_score = 100;
             ProcessDetection(ev);
-            if (!is_banned_.load(std::memory_order_acquire) &&
-                config_.enforcementMode == EnforcementMode::ENFORCE &&
-                config_.enforceBanOnViolation) {
-                TriggerBan(ev.details, ev.type, ev.component);
-            }
-            break;
+            last_audit_heartbeat_ms_.store(now, std::memory_order_release);
         }
     }
     // Reaching here with the engine still running and nobody banned means the loop ended on its
@@ -870,7 +865,7 @@ void AntiCheatEngine::CheckWatchdogHealth() {
         watchdog_reported_.store(true, std::memory_order_release);
         DetectionEvent ev;
         ev.type = DetectionType::HEARTBEAT_TAMPERING;
-        ev.severity = Severity::FATAL_BAN;
+        ev.severity = Severity::CRITICAL;
         ev.component = "AntiCheatEngine::WatchdogSupervisor";
         ev.details = "Watchdog thread stopped responding (killed, suspended or hooked): audit loop supervision lost";
         ev.timestamp = static_cast<uint64_t>(std::time(nullptr));

@@ -132,7 +132,7 @@ TEST(Blackbox, FileDumpSaving) {
 }
 
 TEST(Blackbox, TriggerBanDiagnosticCaptureIntegrity) {
-    EngineConfig cfg;
+    EngineConfig cfg = EngineConfig::TestingProfile();
     cfg.enableHeartbeat = false;
     cfg.banScoreThreshold = 50;
     cfg.enforceBanOnViolation = true;

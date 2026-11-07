@@ -354,12 +354,23 @@ CorrelationDecision EvidenceCorrelator::Evaluate(
     bool scoreReached = (ban_threshold > 0 && projectedScore >= ban_threshold);
     bool fatalSeverity = (ev.severity == Severity::FATAL_BAN);
 
-    if (strict_corroboration_mode && weakSingle && independentCategories < 2 && !ev.server_verified) {
-        decision.eligible_for_permanent_ban = false;
-        if (ban_threshold > 0 && projectedScore >= ban_threshold) {
-            decision.effective_score_delta = (current_total_score + 1 < ban_threshold)
-                ? (ban_threshold - 1 - current_total_score)
-                : 0;
+    if (strict_corroboration_mode) {
+        // Under strict multi-signal corroboration mode (Production / Shadow Production):
+        // 1. Permanent bans REQUIRE multi-signal corroboration: at least 2 independent detection
+        //    categories with distinct root causes, OR authoritative server verification.
+        // 2. An event's severity alone (even FATAL_BAN or CRITICAL) does NOT establish evidence independence.
+        // 3. A single client-side heuristic or condition cannot trigger a permanent ban without corroboration.
+        bool hasMultiSignalCorroboration = (independentCategories >= 2 && distinctRootCauses.size() >= 2);
+        if (ev.server_verified || hasMultiSignalCorroboration) {
+            decision.eligible_for_permanent_ban = scoreReached || fatalSeverity;
+        } else {
+            decision.eligible_for_permanent_ban = false;
+            // Cap score just below threshold so uncorroborated single signals cannot accumulate to an irreversible ban
+            if (ban_threshold > 0 && projectedScore >= ban_threshold) {
+                decision.effective_score_delta = (current_total_score + 1 < ban_threshold)
+                    ? (ban_threshold - 1 - current_total_score)
+                    : 0;
+            }
         }
     } else {
         decision.eligible_for_permanent_ban = scoreReached || fatalSeverity;
