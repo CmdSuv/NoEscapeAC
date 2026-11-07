@@ -16,6 +16,7 @@
 #include <psapi.h>
 #else
 #include <execinfo.h>
+#include <fcntl.h>
 #include <unistd.h>
 #include <sys/stat.h>
 #endif
@@ -414,13 +415,27 @@ bool BlackboxDumper::DecryptAndDeserialize(
 }
 
 bool BlackboxDumper::SaveDumpToFile(const std::string& file_path, const std::vector<uint8_t>& encrypted_data) {
+#if !defined(_WIN32)
+    int fd = ::open(file_path.c_str(), O_CREAT | O_WRONLY | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0600);
+    if (fd < 0) return false;
+    (void)::fchmod(fd, 0600);
+    size_t total = 0;
+    while (total < encrypted_data.size()) {
+        ssize_t n = ::write(fd, encrypted_data.data() + total, encrypted_data.size() - total);
+        if (n <= 0) {
+            ::close(fd);
+            return false;
+        }
+        total += static_cast<size_t>(n);
+    }
+    ::close(fd);
+    return true;
+#else
     std::ofstream ofs(file_path, std::ios::binary | std::ios::trunc);
     if (!ofs.is_open()) return false;
-#if !defined(_WIN32)
-    ::chmod(file_path.c_str(), 0600);
-#endif
     ofs.write(reinterpret_cast<const char*>(encrypted_data.data()), encrypted_data.size());
     return ofs.good();
+#endif
 }
 
 void BlackboxDumper::SetDumpDirectory(const std::string& dir) {

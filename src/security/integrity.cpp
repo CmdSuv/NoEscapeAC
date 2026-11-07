@@ -3,6 +3,8 @@
 #include "noescape/core/obfuscation.hpp"
 
 #include <cstring>
+#include <vector>
+#include <algorithm>
 
 #if defined(_WIN32)
 #include <windows.h>
@@ -12,8 +14,6 @@
 #include <unistd.h>
 #include <fstream>
 #include <sstream>
-#include <vector>
-#include <algorithm>
 #include <elf.h>
 #endif
 
@@ -149,7 +149,91 @@ bool IntegrityChecker::Initialize() {
 
 bool IntegrityChecker::TextMatchesDisk() const {
 #if defined(_WIN32)
-    return true; // PE images are rebased in place; relocation-aware comparison is done by the Unhooker
+    if (text_start_ == 0 || text_size_ == 0) return true;
+    HMODULE mod = nullptr;
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                            reinterpret_cast<LPCWSTR>(text_start_), &mod) || !mod) {
+        return true;
+    }
+    wchar_t path[MAX_PATH * 2]{};
+    if (!GetModuleFileNameW(mod, path, MAX_PATH * 2)) return true;
+    HANDLE f = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE, nullptr,
+                           OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (f == INVALID_HANDLE_VALUE) return true;
+    LARGE_INTEGER sz{};
+    if (!GetFileSizeEx(f, &sz) || sz.QuadPart <= 0 || sz.QuadPart > (512ll << 20)) { CloseHandle(f); return true; }
+    std::vector<uint8_t> file(static_cast<size_t>(sz.QuadPart));
+    DWORD got = 0;
+    bool ok = ReadFile(f, file.data(), static_cast<DWORD>(file.size()), &got, nullptr) && got == file.size();
+    CloseHandle(f);
+    if (!ok || file.size() < sizeof(IMAGE_DOS_HEADER)) return true;
+
+    auto rd = [&](size_t off, size_t len) { return off + len <= file.size(); };
+    auto dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(file.data());
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE || !rd(static_cast<size_t>(dos->e_lfanew), sizeof(IMAGE_NT_HEADERS64))) return true;
+    auto nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(file.data() + dos->e_lfanew);
+    if (nt->Signature != IMAGE_NT_SIGNATURE || nt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC) return true;
+
+    const size_t secOff = static_cast<size_t>(dos->e_lfanew) + offsetof(IMAGE_NT_HEADERS64, OptionalHeader) +
+                          nt->FileHeader.SizeOfOptionalHeader;
+    const WORD nsec = nt->FileHeader.NumberOfSections;
+    if (!rd(secOff, static_cast<size_t>(nsec) * sizeof(IMAGE_SECTION_HEADER))) return true;
+    auto sections = reinterpret_cast<const IMAGE_SECTION_HEADER*>(file.data() + secOff);
+
+    const uint32_t textRva = static_cast<uint32_t>(text_start_ - reinterpret_cast<uintptr_t>(mod));
+    size_t codeOff = 0;
+    size_t compareLen = 0;
+    for (WORD i = 0; i < nsec; ++i) {
+        const auto& s = sections[i];
+        if (s.VirtualAddress == textRva && s.SizeOfRawData > 0) {
+            codeOff = s.PointerToRawData;
+            compareLen = std::min<size_t>(text_size_, s.SizeOfRawData);
+            break;
+        }
+    }
+    if (compareLen == 0 || !rd(codeOff, compareLen)) return true;
+
+    std::vector<bool> mask(compareLen, true);
+    auto rvaToOff = [&](uint32_t r, size_t len, size_t& offOut) {
+        for (WORD i = 0; i < nsec; ++i) {
+            const auto& s = sections[i];
+            if (r >= s.VirtualAddress && r + len <= s.VirtualAddress + s.SizeOfRawData) {
+                offOut = static_cast<size_t>(s.PointerToRawData) + (r - s.VirtualAddress);
+                return rd(offOut, len);
+            }
+        }
+        return false;
+    };
+    const auto& relDir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC];
+    size_t relOff = 0;
+    if (relDir.VirtualAddress && relDir.Size && rvaToOff(relDir.VirtualAddress, relDir.Size, relOff)) {
+        size_t p = relOff, end = relOff + relDir.Size;
+        while (p + sizeof(IMAGE_BASE_RELOCATION) <= end) {
+            auto blk = reinterpret_cast<const IMAGE_BASE_RELOCATION*>(file.data() + p);
+            if (blk->SizeOfBlock < sizeof(IMAGE_BASE_RELOCATION) || p + blk->SizeOfBlock > end) break;
+            size_t n = (blk->SizeOfBlock - sizeof(IMAGE_BASE_RELOCATION)) / sizeof(WORD);
+            auto ent = reinterpret_cast<const WORD*>(file.data() + p + sizeof(IMAGE_BASE_RELOCATION));
+            for (size_t i = 0; i < n; ++i) {
+                int type = ent[i] >> 12;
+                uint32_t at = blk->VirtualAddress + (ent[i] & 0x0FFF);
+                size_t width = (type == IMAGE_REL_BASED_DIR64) ? 8 : (type == IMAGE_REL_BASED_HIGHLOW ? 4 : 0);
+                for (size_t b = 0; b < width; ++b) {
+                    uint32_t byteRva = at + static_cast<uint32_t>(b);
+                    if (byteRva >= textRva && byteRva < textRva + compareLen) {
+                        mask[byteRva - textRva] = false;
+                    }
+                }
+            }
+            p += blk->SizeOfBlock;
+        }
+    }
+
+    const auto* mem = reinterpret_cast<const uint8_t*>(text_start_);
+    const auto* disk = file.data() + codeOff;
+    for (size_t i = 0; i < compareLen; ++i) {
+        if (mask[i] && mem[i] != disk[i]) return false;
+    }
+    return true;
 #else
     Dl_info info{};
     if (!dladdr(reinterpret_cast<void*>(text_start_), &info) || !info.dli_fname || info.dli_fname[0] != '/' ||
@@ -161,7 +245,9 @@ bool IntegrityChecker::TextMatchesDisk() const {
     ElfW(Ehdr) eh{};
     f.read(reinterpret_cast<char*>(&eh), sizeof(eh));
     if (f.gcount() != static_cast<std::streamsize>(sizeof(eh)) || std::memcmp(eh.e_ident, ELFMAG, SELFMAG) != 0) return true;
-    const uintptr_t vaddr = text_start_ - reinterpret_cast<uintptr_t>(info.dli_fbase);
+    const uintptr_t vaddr = (eh.e_type == ET_EXEC)
+        ? text_start_
+        : (text_start_ - reinterpret_cast<uintptr_t>(info.dli_fbase));
     for (uint16_t i = 0; i < eh.e_phnum && i < 512; ++i) {
         ElfW(Phdr) ph{};
         f.seekg(static_cast<std::streamoff>(eh.e_phoff + static_cast<uint64_t>(i) * eh.e_phentsize));

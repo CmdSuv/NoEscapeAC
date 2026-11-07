@@ -512,7 +512,14 @@ PanelClient::HttpResult PanelClient::Request(const ParsedUrl& target, const char
         if (pin_.empty()) {
             // No pin: full WebPKI validation including hostname
             SSL_set_verify(ssl, SSL_VERIFY_PEER, nullptr);
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+#endif
             SSL_set1_host(ssl, target.host.c_str());
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
         } else {
             SSL_set_verify(ssl, SSL_VERIFY_NONE, nullptr); // trust is established by the pin below
         }

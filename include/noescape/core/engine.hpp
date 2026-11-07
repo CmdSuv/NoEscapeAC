@@ -54,7 +54,7 @@ public:
     std::vector<DetectionEvent> GetDetectionHistory() const;
 
     // Callbacks and configuration
-    void SetBanCallback(BanCallback cb) { ban_callback_ = std::move(cb); }
+    void SetBanCallback(BanCallback cb) { std::lock_guard<std::mutex> l(history_mutex_); ban_callback_ = std::move(cb); }
     void SetViolationCallback(ViolationCallback cb) { std::lock_guard<std::mutex> l(history_mutex_); violation_callback_ = std::move(cb); }
 
     // Thread-safe reset of the aim analyzer history (respawn / teleport)
@@ -115,7 +115,8 @@ private:
     void WatchdogLoop();
     void NetworkLoop();
     void HandleAttestation(const network::HeartbeatResult& hb);
-    uint32_t panel_failures_{0};
+    std::atomic<uint32_t> panel_failures_{0};
+    bool dumpable_modified_{false};
 
     std::thread background_thread_;
     std::thread watchdog_thread_;

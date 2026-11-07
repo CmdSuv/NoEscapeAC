@@ -1,5 +1,6 @@
 #include "noescape/memory/unhooker.hpp"
 #include "noescape/memory/memory_scanner.hpp"
+#include "noescape/core/envutil.hpp"
 #include <algorithm>
 #include <cstring>
 #include <ctime>
@@ -16,6 +17,7 @@
 #include <elf.h>
 #include <fcntl.h>
 #include <sys/mman.h>
+#include <sys/prctl.h>
 #include <unistd.h>
 #endif
 
@@ -213,7 +215,9 @@ DiskPrologue ReadDiskPrologue(uintptr_t addr) {
         eh.e_phentsize < sizeof(Elf64_Phdr) || eh.e_phnum > 512) {
         return out;
     }
-    const uint64_t vaddr = addr - reinterpret_cast<uintptr_t>(dlinfo.dli_fbase);
+    const uint64_t vaddr = (eh.e_type == ET_EXEC)
+        ? static_cast<uint64_t>(addr)
+        : static_cast<uint64_t>(addr - reinterpret_cast<uintptr_t>(dlinfo.dli_fbase));
     for (uint16_t i = 0; i < eh.e_phnum; ++i) {
         Elf64_Phdr ph{};
         diskFile.seekg(static_cast<std::streamoff>(eh.e_phoff + static_cast<uint64_t>(i) * eh.e_phentsize));
@@ -234,8 +238,10 @@ DiskPrologue ReadDiskPrologue(uintptr_t addr) {
 // text can be patched without ever making the page writable+executable (no RWX window that
 // another thread or a cheat could abuse).
 bool WriteViaProcMem(uintptr_t addr, const uint8_t* data, size_t len) {
-    int fd = open("/proc/self/mem", O_RDWR | O_CLOEXEC);
-    if (fd < 0) return false;
+    int fd = core::OpenProcSelfWithDumpableFallback("/proc/self/mem", O_RDWR | O_CLOEXEC);
+    if (fd < 0) {
+        return false;
+    }
     ssize_t w = pwrite(fd, data, len, static_cast<off_t>(addr));
     close(fd);
     if (w != static_cast<ssize_t>(len)) return false;
@@ -262,7 +268,7 @@ bool IsWhitelistedInterposer(const std::string& module) {
     std::string b = BaseNameOf(module);
     for (const char* ok : {"libasan", "libtsan", "libubsan", "liblsan", "libhwasan", "libnoescape",
                            "libmangohud", "libgamemode", "gameoverlayrenderer", "libvkbasalt",
-                           "libc.so", "libpthread", "ld-linux", "libdl.so"}) {
+                           "libc.so", "libpthread", "ld-linux", "libdl.so", "linux-vdso", "[vdso]"}) {
         if (b.rfind(ok, 0) == 0) return true;
     }
     return false;
@@ -283,79 +289,109 @@ std::optional<HookInfo> Unhooker::InspectFunction(const char* name, void* functi
     info.function_name = name ? name : "Unknown";
     info.function_address = addr;
 
-    // Pattern 1: E9 xx xx xx xx -> JMP rel32
-    if (code[0] == 0xE9) {
-        int32_t relOffset = 0;
-        std::memcpy(&relOffset, code + 1, sizeof(relOffset));
-        info.hook_type = "JMP_REL32 (0xE9)";
-        info.target_destination = addr + 5 + static_cast<intptr_t>(relOffset);
-        info.patched_bytes.assign(code, code + 5);
-        return info;
-    }
-    // Pattern 2: EB xx -> JMP rel8
-    if (code[0] == 0xEB) {
-        int8_t rel = static_cast<int8_t>(code[1]);
-        info.hook_type = "JMP_REL8 (0xEB)";
-        info.target_destination = addr + 2 + rel;
-        info.patched_bytes.assign(code, code + 2);
-        return info;
-    }
-    // Pattern 3: FF 25 disp32 -> JMP [RIP + disp32]
-    if (code[0] == 0xFF && code[1] == 0x25) {
-        int32_t disp = 0;
-        std::memcpy(&disp, code + 2, sizeof(disp));
-        uintptr_t targetPtr = addr + 6 + static_cast<intptr_t>(disp);
-        uintptr_t dest = 0;
-        if (IsReadableAddress(targetPtr, sizeof(dest))) {
-            std::memcpy(&dest, reinterpret_cast<const void*>(targetPtr), sizeof(dest));
+    auto matchAt = [&](size_t off) -> bool {
+        const uint8_t* p = code + off;
+        const uintptr_t insnAddr = addr + off;
+        const size_t avail = (off == 0) ? 16 : (IsReadableAddress(addr + off, 16) ? 16 : (16 - off));
+
+        // Pattern 1: E9 xx xx xx xx -> JMP rel32
+        if (avail >= 5 && p[0] == 0xE9) {
+            int32_t relOffset = 0;
+            std::memcpy(&relOffset, p + 1, sizeof(relOffset));
+            info.hook_type = "JMP_REL32 (0xE9)";
+            info.target_destination = insnAddr + 5 + static_cast<intptr_t>(relOffset);
+            info.patched_bytes.assign(code, code + off + 5);
+            return true;
         }
-        info.hook_type = "JMP_RIP_DISP32 (0xFF 0x25)";
-        info.target_destination = dest;
-        info.patched_bytes.assign(code, code + 6);
+        // Pattern 2: EB xx -> JMP rel8
+        if (avail >= 2 && p[0] == 0xEB) {
+            int8_t rel = static_cast<int8_t>(p[1]);
+            info.hook_type = "JMP_REL8 (0xEB)";
+            info.target_destination = insnAddr + 2 + rel;
+            info.patched_bytes.assign(code, code + off + 2);
+            return true;
+        }
+        // Pattern 3: FF 25 disp32 -> JMP [RIP + disp32] (and REX.W 48 FF 25 disp32)
+        if (avail >= 6 && p[0] == 0xFF && p[1] == 0x25) {
+            int32_t disp = 0;
+            std::memcpy(&disp, p + 2, sizeof(disp));
+            uintptr_t targetPtr = insnAddr + 6 + static_cast<intptr_t>(disp);
+            uintptr_t dest = 0;
+            if (IsReadableAddress(targetPtr, sizeof(dest))) {
+                std::memcpy(&dest, reinterpret_cast<const void*>(targetPtr), sizeof(dest));
+            }
+            info.hook_type = "JMP_RIP_DISP32 (0xFF 0x25)";
+            info.target_destination = dest;
+            info.patched_bytes.assign(code, code + off + 6);
+            return true;
+        }
+        if (avail >= 7 && p[0] == 0x48 && p[1] == 0xFF && p[2] == 0x25) {
+            int32_t disp = 0;
+            std::memcpy(&disp, p + 3, sizeof(disp));
+            uintptr_t targetPtr = insnAddr + 7 + static_cast<intptr_t>(disp);
+            uintptr_t dest = 0;
+            if (IsReadableAddress(targetPtr, sizeof(dest))) {
+                std::memcpy(&dest, reinterpret_cast<const void*>(targetPtr), sizeof(dest));
+            }
+            info.hook_type = "JMP_RIP_DISP32 (0xFF 0x25)";
+            info.target_destination = dest;
+            info.patched_bytes.assign(code, code + off + 7);
+            return true;
+        }
+        // Pattern 4: 48 B8 imm64 FF E0 -> MOV RAX, imm64; JMP RAX
+        if (avail >= 12 && p[0] == 0x48 && p[1] == 0xB8 && p[10] == 0xFF && p[11] == 0xE0) {
+            uint64_t dest = 0;
+            std::memcpy(&dest, p + 2, sizeof(dest));
+            info.hook_type = "MOV_RAX_JMP_RAX (0x48 0xB8 ... 0xFF 0xE0)";
+            info.target_destination = static_cast<uintptr_t>(dest);
+            info.patched_bytes.assign(code, code + off + 12);
+            return true;
+        }
+        // Pattern 5: 49 BA imm64 41 FF E2 -> MOV R10, imm64; JMP R10
+        if (avail >= 13 && p[0] == 0x49 && p[1] == 0xBA && p[10] == 0x41 && p[11] == 0xFF && p[12] == 0xE2) {
+            uint64_t dest = 0;
+            std::memcpy(&dest, p + 2, sizeof(dest));
+            info.hook_type = "MOV_R10_JMP_R10 (0x49 0xBA ... 0x41 0xFF 0xE2)";
+            info.target_destination = static_cast<uintptr_t>(dest);
+            info.patched_bytes.assign(code, code + off + 13);
+            return true;
+        }
+        // Pattern 6: 49 BB imm64 41 FF E3 -> MOV R11, imm64; JMP R11
+        if (avail >= 13 && p[0] == 0x49 && p[1] == 0xBB && p[10] == 0x41 && p[11] == 0xFF && p[12] == 0xE3) {
+            uint64_t dest = 0;
+            std::memcpy(&dest, p + 2, sizeof(dest));
+            info.hook_type = "MOV_R11_JMP_R11 (0x49 0xBB ... 0x41 0xFF 0xE3)";
+            info.target_destination = static_cast<uintptr_t>(dest);
+            info.patched_bytes.assign(code, code + off + 13);
+            return true;
+        }
+        // Pattern 7: 68 imm32 C7 44 24 04 imm32 C3 -> push/ret 64-bit jump
+        if (avail >= 14 && p[0] == 0x68 && p[5] == 0xC7 && p[6] == 0x44 && p[7] == 0x24 && p[8] == 0x04 && p[13] == 0xC3) {
+            uint32_t low = 0, high = 0;
+            std::memcpy(&low, p + 1, sizeof(low));
+            std::memcpy(&high, p + 9, sizeof(high));
+            info.hook_type = "PUSH_RET_X64 (0x68 ... 0xC3)";
+            info.target_destination = static_cast<uintptr_t>((static_cast<uint64_t>(high) << 32) | low);
+            info.patched_bytes.assign(code, code + off + 14);
+            return true;
+        }
+        // Pattern 8: CC -> software breakpoint
+        if (avail >= 1 && p[0] == 0xCC) {
+            info.hook_type = "SOFTWARE_BREAKPOINT (0xCC)";
+            info.target_destination = 0;
+            info.patched_bytes.assign(code, code + off + 1);
+            return true;
+        }
+        return false;
+    };
+
+    if (matchAt(0)) {
         return info;
     }
-    // Pattern 4: 48 B8 imm64 FF E0 -> MOV RAX, imm64; JMP RAX
-    if (code[0] == 0x48 && code[1] == 0xB8 && code[10] == 0xFF && code[11] == 0xE0) {
-        uint64_t dest = 0;
-        std::memcpy(&dest, code + 2, sizeof(dest));
-        info.hook_type = "MOV_RAX_JMP_RAX (0x48 0xB8 ... 0xFF 0xE0)";
-        info.target_destination = static_cast<uintptr_t>(dest);
-        info.patched_bytes.assign(code, code + 12);
-        return info;
-    }
-    // Pattern 5: 49 BA imm64 41 FF E2 -> MOV R10, imm64; JMP R10
-    if (code[0] == 0x49 && code[1] == 0xBA && code[10] == 0x41 && code[11] == 0xFF && code[12] == 0xE2) {
-        uint64_t dest = 0;
-        std::memcpy(&dest, code + 2, sizeof(dest));
-        info.hook_type = "MOV_R10_JMP_R10 (0x49 0xBA ... 0x41 0xFF 0xE2)";
-        info.target_destination = static_cast<uintptr_t>(dest);
-        info.patched_bytes.assign(code, code + 13);
-        return info;
-    }
-    // Pattern 6: 49 BB imm64 41 FF E3 -> MOV R11, imm64; JMP R11
-    if (code[0] == 0x49 && code[1] == 0xBB && code[10] == 0x41 && code[11] == 0xFF && code[12] == 0xE3) {
-        uint64_t dest = 0;
-        std::memcpy(&dest, code + 2, sizeof(dest));
-        info.hook_type = "MOV_R11_JMP_R11 (0x49 0xBB ... 0x41 0xFF 0xE3)";
-        info.target_destination = static_cast<uintptr_t>(dest);
-        info.patched_bytes.assign(code, code + 13);
-        return info;
-    }
-    // Pattern 7: 68 imm32 C7 44 24 04 imm32 C3 -> push/ret 64-bit jump
-    if (code[0] == 0x68 && code[5] == 0xC7 && code[6] == 0x44 && code[7] == 0x24 && code[8] == 0x04 && code[13] == 0xC3) {
-        uint32_t low = 0, high = 0;
-        std::memcpy(&low, code + 1, sizeof(low));
-        std::memcpy(&high, code + 9, sizeof(high));
-        info.hook_type = "PUSH_RET_X64 (0x68 ... 0xC3)";
-        info.target_destination = static_cast<uintptr_t>((static_cast<uint64_t>(high) << 32) | low);
-        info.patched_bytes.assign(code, code + 14);
-        return info;
-    }
-    // Pattern 8: CC -> software breakpoint
-    if (code[0] == 0xCC) {
-        info.hook_type = "SOFTWARE_BREAKPOINT (0xCC)";
-        info.target_destination = 0;
-        info.patched_bytes.assign(code, code + 1);
+    // Intel CET (endbr64: F3 0F 1E FA, endbr32: F3 0F 1E FB): CET-aware hook frameworks
+    // place their detour at +4 so indirect branch tracking does not fault with #CP.
+    if (code[0] == 0xF3 && code[1] == 0x0F && code[2] == 0x1E &&
+        (code[3] == 0xFA || code[3] == 0xFB) && matchAt(4)) {
         return info;
     }
     return std::nullopt;
@@ -450,18 +486,27 @@ std::vector<core::DetectionEvent> Unhooker::AuditSystemHooks() {
         // Classify where the detour leads. A detour into another signed/installed module is
         // typically an overlay, AV/EDR or accessibility hook; a detour into anonymous memory is
         // the hallmark of injected code.
+        std::string selfModule = ModuleOfAddress(addr);
         std::string targetModule;
         if (info.target_destination) {
             targetModule = ModuleOfAddress(info.target_destination);
         }
+        // When no on-disk reference exists (e.g. kernel vDSO functions resolved via STT_GNU_IFUNC
+        // such as gettimeofday/clock_gettime) and the jump stays inside the same module or a
+        // whitelisted system module, it is normal kernel/runtime code rather than a hook.
+        if (!disk.valid && !targetModule.empty() &&
+            (targetModule == selfModule || IsWhitelistedInterposer(targetModule))) {
+            continue;
+        }
         const bool intoModule = !targetModule.empty();
+        const bool intoExternalModule = intoModule && targetModule != selfModule;
         const bool breakpoint = info.hook_type.rfind("SOFTWARE_BREAKPOINT", 0) == 0;
 
         core::DetectionEvent ev;
         ev.type = core::DetectionType::INLINE_HOOK_DETECTED;
         ev.component = "Unhooker::InlineInterceptor";
         ev.timestamp = static_cast<uint64_t>(std::time(nullptr));
-        if (!disk.valid || intoModule) {
+        if (!disk.valid || intoExternalModule) {
             // unconfirmed (no on-disk reference) or a detour into another installed module
             ev.severity = core::Severity::MEDIUM;
             ev.threat_score = 30;
@@ -476,7 +521,7 @@ std::vector<core::DetectionEvent> Unhooker::AuditSystemHooks() {
         bool restored = false;
         // Only neutralise patches we are confident about; never "unhook" another installed module
         // (that would break AV/EDR or overlays and is not evidence of cheating on its own).
-        if (disk.valid && api.restorable && !intoModule) {
+        if (disk.valid && api.restorable && !intoExternalModule) {
             restored = AutoRestoreHook(info);
         }
 

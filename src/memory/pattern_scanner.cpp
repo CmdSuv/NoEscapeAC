@@ -184,6 +184,205 @@ bool CpuHasAvx2() {
 }
 #endif
 
+struct BucketHit {
+    size_t pattern_index;
+    uintptr_t address;
+};
+
+[[maybe_unused]] NOESCAPE_NO_SANITIZE void ScanBucketScalarFree(
+    const uint8_t* data,
+    size_t size,
+    uint8_t first,
+    size_t first_offset,
+    size_t min_len,
+    const Pattern* const* patterns,
+    const size_t* indices,
+    size_t count,
+    uintptr_t base_address,
+    size_t max_results,
+    std::vector<BucketHit>& out_hits
+) {
+    if (size < min_len) return;
+    const size_t max_scan = size - min_len;
+    for (size_t i = 0; i <= max_scan && out_hits.size() < max_results; ++i) {
+        if (data[i + first_offset] == first) {
+            for (size_t b = 0; b < count && out_hits.size() < max_results; ++b) {
+                const Pattern* pat = patterns[b];
+                if (i + pat->Length() <= size && MatchAtFree(data + i, *pat)) {
+                    out_hits.push_back({indices[b], base_address + i});
+                }
+            }
+        }
+    }
+}
+
+#if defined(NOESCAPE_X86)
+#define NOESCAPE_SIMD_BUCKET_BODY(WIDTH, SET1, LOADU, CMPEQ, MOVEMASK, VEC)                           \
+    if (size < min_len) return;                                                                       \
+    const size_t max_scan = size - min_len;                                                           \
+    const VEC match_vec = SET1(static_cast<char>(first));                                             \
+    size_t i = 0;                                                                                     \
+    while (i + first_offset + WIDTH <= size && i <= max_scan && out_hits.size() < max_results) {      \
+        VEC block = LOADU(reinterpret_cast<const VEC*>(data + i + first_offset));                     \
+        uint32_t mask = static_cast<uint32_t>(MOVEMASK(CMPEQ(block, match_vec)));                     \
+        while (mask != 0 && out_hits.size() < max_results) {                                          \
+            size_t cand = i + static_cast<size_t>(std::countr_zero(mask));                            \
+            if (cand <= max_scan) {                                                                   \
+                for (size_t b = 0; b < count && out_hits.size() < max_results; ++b) {                 \
+                    const Pattern* pat = patterns[b];                                                 \
+                    if (cand + pat->Length() <= size && MatchAtFree(data + cand, *pat)) {             \
+                        out_hits.push_back({indices[b], base_address + cand});                        \
+                    }                                                                                 \
+                }                                                                                     \
+            }                                                                                         \
+            mask &= mask - 1;                                                                         \
+        }                                                                                             \
+        i += WIDTH;                                                                                   \
+    }                                                                                                 \
+    while (i <= max_scan && out_hits.size() < max_results) {                                          \
+        if (data[i + first_offset] == first) {                                                        \
+            for (size_t b = 0; b < count && out_hits.size() < max_results; ++b) {                     \
+                const Pattern* pat = patterns[b];                                                     \
+                if (i + pat->Length() <= size && MatchAtFree(data + i, *pat)) {                       \
+                    out_hits.push_back({indices[b], base_address + i});                               \
+                }                                                                                     \
+            }                                                                                         \
+        }                                                                                             \
+        ++i;                                                                                          \
+    }
+
+#if defined(NOESCAPE_RUNTIME_DISPATCH)
+__attribute__((target("avx2")))
+#endif
+NOESCAPE_NO_SANITIZE void ScanBucketAvx2Impl(
+    const uint8_t* data,
+    size_t size,
+    uint8_t first,
+    size_t first_offset,
+    size_t min_len,
+    const Pattern* const* patterns,
+    const size_t* indices,
+    size_t count,
+    uintptr_t base_address,
+    size_t max_results,
+    std::vector<BucketHit>& out_hits
+) {
+#if defined(__AVX2__) || defined(NOESCAPE_RUNTIME_DISPATCH)
+    NOESCAPE_SIMD_BUCKET_BODY(32, _mm256_set1_epi8, _mm256_loadu_si256, _mm256_cmpeq_epi8, _mm256_movemask_epi8, __m256i)
+#else
+    ScanBucketScalarFree(data, size, first, first_offset, min_len, patterns, indices, count, base_address, max_results, out_hits);
+#endif
+}
+
+NOESCAPE_NO_SANITIZE void ScanBucketSse2Impl(
+    const uint8_t* data,
+    size_t size,
+    uint8_t first,
+    size_t first_offset,
+    size_t min_len,
+    const Pattern* const* patterns,
+    const size_t* indices,
+    size_t count,
+    uintptr_t base_address,
+    size_t max_results,
+    std::vector<BucketHit>& out_hits
+) {
+    NOESCAPE_SIMD_BUCKET_BODY(16, _mm_set1_epi8, _mm_loadu_si128, _mm_cmpeq_epi8, _mm_movemask_epi8, __m128i)
+}
+#endif
+
+void ScanPatternGroup(
+    const uint8_t* data,
+    size_t size,
+    const std::vector<const Pattern*>& pats,
+    uintptr_t base_address,
+    size_t max_results,
+    std::vector<BucketHit>& out_hits
+) {
+    struct Bucket {
+        uint8_t first_byte{0};
+        size_t first_offset{0};
+        size_t min_len{SIZE_MAX};
+        std::vector<const Pattern*> patterns;
+        std::vector<size_t> indices;
+    };
+
+    std::vector<Bucket> buckets;
+    buckets.reserve(pats.size());
+
+    for (size_t idx = 0; idx < pats.size(); ++idx) {
+        const Pattern* p = pats[idx];
+        if (!p || p->Empty() || p->Length() > size) continue;
+        if (!p->HasNonWildcard()) {
+            // Pure wildcard pattern
+            const size_t max_scan = size - p->Length();
+            for (size_t i = 0; i <= max_scan && out_hits.size() < max_results; ++i) {
+                out_hits.push_back({idx, base_address + i});
+            }
+            continue;
+        }
+        const uint8_t fb = p->FirstByte();
+        const size_t fo = p->FirstByteOffset();
+        Bucket* found = nullptr;
+        for (auto& b : buckets) {
+            if (b.first_byte == fb && b.first_offset == fo) {
+                found = &b;
+                break;
+            }
+        }
+        if (!found) {
+            buckets.push_back({fb, fo, p->Length(), {p}, {idx}});
+        } else {
+            found->min_len = std::min(found->min_len, p->Length());
+            found->patterns.push_back(p);
+            found->indices.push_back(idx);
+        }
+    }
+
+#if defined(NOESCAPE_X86)
+    const bool useAvx2 = CpuHasAvx2();
+#endif
+    for (const auto& b : buckets) {
+        if (out_hits.size() >= max_results) break;
+        if (b.patterns.size() == 1) {
+            const Pattern* pat = b.patterns[0];
+            const size_t idx = b.indices[0];
+            const uint8_t* current = data;
+            size_t remaining = size;
+            while (remaining >= pat->Length() && out_hits.size() < max_results) {
+#if defined(NOESCAPE_X86)
+                const uint8_t* match = useAvx2
+                    ? ScanAvx2Impl(current, remaining, *pat)
+                    : ScanSse2Impl(current, remaining, *pat);
+#else
+                const uint8_t* match = ScanScalarFree(current, remaining, *pat);
+#endif
+                if (!match) break;
+                out_hits.push_back({idx, base_address + static_cast<uintptr_t>(match - data)});
+                size_t consumed = static_cast<size_t>(match - current) + 1;
+                current += consumed;
+                remaining -= consumed;
+            }
+        } else {
+#if defined(NOESCAPE_X86)
+            if (useAvx2) {
+                ScanBucketAvx2Impl(data, size, b.first_byte, b.first_offset, b.min_len,
+                                   b.patterns.data(), b.indices.data(), b.patterns.size(),
+                                   base_address, max_results, out_hits);
+            } else {
+                ScanBucketSse2Impl(data, size, b.first_byte, b.first_offset, b.min_len,
+                                   b.patterns.data(), b.indices.data(), b.patterns.size(),
+                                   base_address, max_results, out_hits);
+            }
+#else
+            ScanBucketScalarFree(data, size, b.first_byte, b.first_offset, b.min_len,
+                                 b.patterns.data(), b.indices.data(), b.patterns.size(),
+                                 base_address, max_results, out_hits);
+#endif
+        }
+    }
+}
+
 } // namespace
 
 const uint8_t* PatternScanner::ScanSimd(
@@ -253,14 +452,17 @@ std::vector<PatternScanner::MatchResult> PatternScanner::ScanBatch(
     size_t max_results
 ) {
     std::vector<MatchResult> batch_results;
-    if (!data || size == 0 || patterns.empty()) return batch_results;
+    if (!data || size == 0 || patterns.empty() || max_results == 0) return batch_results;
 
-    for (const auto& pat : patterns) {
-        if (batch_results.size() >= max_results) break;
-        auto matches = ScanAll(data, size, pat, base_address, max_results - batch_results.size());
-        for (auto addr : matches) {
-            batch_results.push_back({pat.GetName(), addr});
-        }
+    std::vector<const Pattern*> ptrs;
+    ptrs.reserve(patterns.size());
+    for (const auto& pat : patterns) ptrs.push_back(&pat);
+
+    std::vector<BucketHit> hits;
+    ScanPatternGroup(data, size, ptrs, base_address, max_results, hits);
+    batch_results.reserve(hits.size());
+    for (const auto& h : hits) {
+        batch_results.push_back({patterns[h.pattern_index].GetName(), h.address});
     }
 
     return batch_results;
@@ -274,14 +476,17 @@ std::vector<PatternScanner::MatchResult> PatternScanner::ScanBatch(
     size_t max_results
 ) {
     std::vector<MatchResult> batch_results;
-    if (!data || size == 0 || signatures.empty()) return batch_results;
+    if (!data || size == 0 || signatures.empty() || max_results == 0) return batch_results;
 
-    for (const auto& sig : signatures) {
-        if (batch_results.size() >= max_results) break;
-        auto matches = ScanAll(data, size, sig, base_address, max_results - batch_results.size());
-        for (auto addr : matches) {
-            batch_results.push_back({sig.GetName(), addr});
-        }
+    std::vector<const Pattern*> ptrs;
+    ptrs.reserve(signatures.size());
+    for (const auto& sig : signatures) ptrs.push_back(&sig);
+
+    std::vector<BucketHit> hits;
+    ScanPatternGroup(data, size, ptrs, base_address, max_results, hits);
+    batch_results.reserve(hits.size());
+    for (const auto& h : hits) {
+        batch_results.push_back({signatures[h.pattern_index].GetName(), h.address});
     }
 
     return batch_results;
@@ -295,14 +500,18 @@ std::vector<PatternScanner::SignatureMatchResult> PatternScanner::ScanSignatures
     size_t max_results
 ) {
     std::vector<SignatureMatchResult> results;
-    if (!data || size == 0 || signatures.empty()) return results;
+    if (!data || size == 0 || signatures.empty() || max_results == 0) return results;
 
-    for (const auto& sig : signatures) {
-        if (results.size() >= max_results) break;
-        auto matches = ScanAll(data, size, sig, base_address, max_results - results.size());
-        for (auto addr : matches) {
-            results.push_back({&sig, sig.GetName(), addr});
-        }
+    std::vector<const Pattern*> ptrs;
+    ptrs.reserve(signatures.size());
+    for (const auto& sig : signatures) ptrs.push_back(&sig);
+
+    std::vector<BucketHit> hits;
+    ScanPatternGroup(data, size, ptrs, base_address, max_results, hits);
+    results.reserve(hits.size());
+    for (const auto& h : hits) {
+        const auto& sig = signatures[h.pattern_index];
+        results.push_back({&sig, sig.GetName(), h.address});
     }
 
     return results;
@@ -316,15 +525,18 @@ std::vector<PatternScanner::SignatureMatchResult> PatternScanner::ScanSignatures
     size_t max_results
 ) {
     std::vector<SignatureMatchResult> results;
-    if (!data || size == 0 || signatures.empty()) return results;
+    if (!data || size == 0 || signatures.empty() || max_results == 0) return results;
 
-    for (const auto* sig : signatures) {
-        if (!sig) continue;
-        if (results.size() >= max_results) break;
-        auto matches = ScanAll(data, size, *sig, base_address, max_results - results.size());
-        for (auto addr : matches) {
-            results.push_back({sig, sig->GetName(), addr});
-        }
+    std::vector<const Pattern*> ptrs;
+    ptrs.reserve(signatures.size());
+    for (const auto* sig : signatures) ptrs.push_back(sig);
+
+    std::vector<BucketHit> hits;
+    ScanPatternGroup(data, size, ptrs, base_address, max_results, hits);
+    results.reserve(hits.size());
+    for (const auto& h : hits) {
+        const CheatSignature* sig = signatures[h.pattern_index];
+        results.push_back({sig, sig->GetName(), h.address});
     }
 
     return results;

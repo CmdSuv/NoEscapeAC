@@ -1,4 +1,5 @@
 #include "noescape/memory/canary_monitor.hpp"
+#include "noescape/core/envutil.hpp"
 
 #include <cstring>
 #include <ctime>
@@ -48,9 +49,10 @@ bool CanaryMonitor::Initialize(size_t page_count) {
     size_ = page_count * ps;
     alloc_size_ = size_ + 2 * ps;
 #if !defined(_WIN32)
-    pagemap_fd_ = open("/proc/self/pagemap", O_RDONLY | O_CLOEXEC);
-    clear_refs_fd_ = open("/proc/self/clear_refs", O_WRONLY | O_CLOEXEC);
+    pagemap_fd_ = core::OpenProcSelfWithDumpableFallback("/proc/self/pagemap", O_RDONLY | O_CLOEXEC);
+    clear_refs_fd_ = core::OpenProcSelfWithDumpableFallback("/proc/self/clear_refs", O_WRONLY | O_CLOEXEC);
 #endif
+
 
 #if defined(_WIN32)
     // Windows: MEM_WRITE_WATCH records writes from any process, including WriteProcessMemory.
@@ -60,12 +62,22 @@ bool CanaryMonitor::Initialize(size_t page_count) {
     // Guard pages are only meaningful on Linux (VMA-merge false positives); Windows tracks per page.
 #else
     alloc_base_ = mmap(nullptr, alloc_size_, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    if (alloc_base_ == MAP_FAILED) { alloc_base_ = nullptr; size_ = 0; return false; }
+    if (alloc_base_ == MAP_FAILED) {
+        if (pagemap_fd_ >= 0) close(pagemap_fd_);
+        if (clear_refs_fd_ >= 0) close(clear_refs_fd_);
+        pagemap_fd_ = clear_refs_fd_ = -1;
+        alloc_base_ = nullptr;
+        size_ = 0;
+        return false;
+    }
     base_ = static_cast<uint8_t*>(alloc_base_) + ps;
     // Canary pages sit between PROT_NONE guards so neighbouring mappings can never merge
     // into this VMA (a merge would set VM_SOFTDIRTY and cause false positives).
     if (mprotect(base_, size_, PROT_READ | PROT_WRITE) != 0) {
         munmap(alloc_base_, alloc_size_);
+        if (pagemap_fd_ >= 0) close(pagemap_fd_);
+        if (clear_refs_fd_ >= 0) close(clear_refs_fd_);
+        pagemap_fd_ = clear_refs_fd_ = -1;
         alloc_base_ = nullptr; base_ = nullptr; size_ = 0;
         return false;
     }

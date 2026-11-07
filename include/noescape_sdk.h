@@ -150,6 +150,26 @@ public:
     static void SetViewport(int x, int y, int width, int height) {
         NoEscape_SetViewport(x, y, width, height);
     }
+
+    static void SetPanelPin(const char* spki_sha256_hex) {
+        NoEscape_SetPanelPin(spki_sha256_hex);
+    }
+
+    static void SetHostUsesJit(bool uses_jit) {
+        NoEscape_SetHostUsesJit(uses_jit);
+    }
+
+    static void AddPhantom(uint32_t id, float x, float y, float z) {
+        NoEscape_AddPhantom(id, x, y, z);
+    }
+
+    static void UpdatePhantom(uint32_t id, float x, float y, float z) {
+        NoEscape_UpdatePhantom(id, x, y, z);
+    }
+
+    static void PushView(float x, float y, float z, float pitch, float yaw, uint64_t timestamp_ms) {
+        NoEscape_PushView(x, y, z, pitch, yaw, timestamp_ms);
+    }
 };
 
 } // namespace noescape::sdk
