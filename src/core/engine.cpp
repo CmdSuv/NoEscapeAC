@@ -21,6 +21,7 @@
 #if defined(_WIN32)
 #include <windows.h>
 #else
+#include <sys/prctl.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -52,6 +53,13 @@ AntiCheatEngine::AntiCheatEngine(EngineConfig config)
 
 AntiCheatEngine::~AntiCheatEngine() {
     Stop();
+#if !defined(_WIN32)
+    if (dumpable_modified_) {
+        std::lock_guard<std::mutex> lock(ProcSelfDumpableMutex());
+        prctl(PR_SET_DUMPABLE, 1, 0, 0, 0);
+        dumpable_modified_ = false;
+    }
+#endif
 }
 
 bool AntiCheatEngine::Initialize() {
@@ -73,7 +81,17 @@ bool AntiCheatEngine::Initialize() {
     }
 
     if (config_.enableAntiDebug) {
+#if !defined(_WIN32)
+        {
+            std::lock_guard<std::mutex> lock(ProcSelfDumpableMutex());
+            if (prctl(PR_GET_DUMPABLE, 0, 0, 0, 0) == 1) {
+                dumpable_modified_ = true;
+            }
+            security::AntiDebug::HideCurrentThread();
+        }
+#else
         security::AntiDebug::HideCurrentThread();
+#endif
     }
 
     if (config_.enableIntegrityScan) {
@@ -122,23 +140,23 @@ std::vector<DetectionEvent> AntiCheatEngine::VerifyPanelStatus() {
         ev.timestamp = static_cast<uint64_t>(time(nullptr));
         ev.threat_score = 100;
         events.push_back(ev);
-        panel_failures_ = 0;
+        panel_failures_.store(0, std::memory_order_relaxed);
     } else if (res.status == BanCheckStatus::CLEAN) {
-        panel_failures_ = 0;
+        panel_failures_.store(0, std::memory_order_relaxed);
     } else {
         // Unreachable backend or bad signature: a forged reply is far more suspicious than silence
-        ++panel_failures_;
+        const uint32_t failures = panel_failures_.fetch_add(1, std::memory_order_relaxed) + 1;
         bool forged = (res.status == BanCheckStatus::SIGNATURE_INVALID);
-        if (forged || panel_failures_ >= 5) {
+        if (forged || failures >= 5) {
             DetectionEvent ev;
             ev.type = DetectionType::HEARTBEAT_TAMPERING;
             ev.severity = forged ? Severity::HIGH : Severity::MEDIUM;
             ev.component = "PanelClient::Verification";
-            ev.details = res.reason + " (consecutive failures: " + std::to_string(panel_failures_) + ")";
+            ev.details = res.reason + " (consecutive failures: " + std::to_string(failures) + ")";
             ev.timestamp = static_cast<uint64_t>(time(nullptr));
             ev.threat_score = forged ? 60 : 20;
             events.push_back(ev);
-            if (!forged) panel_failures_ = 0; // re-arm: at most one scored event per 5 failed checks
+            if (!forged) panel_failures_.store(0, std::memory_order_relaxed); // re-arm: at most one scored event per 5 failed checks
         }
     }
 
@@ -161,8 +179,9 @@ std::vector<DetectionEvent> AntiCheatEngine::AuditCycle() {
     }
     const uint64_t cycleStartMs = GetSteadyNowMs();
     // Process-table / window-tree scans read every /proc entry: run them every 5 s, not per cycle
-    const bool heavyScansDue = (cycleStartMs - last_heavy_scan_ms_.load() >= 5000);
-    if (heavyScansDue) last_heavy_scan_ms_.store(cycleStartMs);
+    const uint64_t lastHeavy = last_heavy_scan_ms_.load(std::memory_order_acquire);
+    const bool heavyScansDue = (lastHeavy == 0 || cycleStartMs - lastHeavy >= 5000);
+    if (heavyScansDue) last_heavy_scan_ms_.store(cycleStartMs, std::memory_order_release);
 
     // Cache memory maps snapshot for the entire audit cycle to eliminate 25+ redundant file reads
     memory::MemoryScanner::Instance().RefreshCache();
@@ -249,9 +268,10 @@ std::vector<DetectionEvent> AntiCheatEngine::AuditCycle() {
 
     // 7. DMA Hardware & Bus Latency Check
     // The bus-latency probe flushes caches and is comparatively heavy: at most once per 10 s
-    if (config_.enableDmaDetection &&
-        (GetSteadyNowMs() - last_dma_audit_ms_.load(std::memory_order_acquire) >= 10000)) {
-        last_dma_audit_ms_.store(GetSteadyNowMs(), std::memory_order_release);
+    const uint64_t nowDmaMs = GetSteadyNowMs();
+    const uint64_t lastDma = last_dma_audit_ms_.load(std::memory_order_acquire);
+    if (config_.enableDmaDetection && (lastDma == 0 || nowDmaMs - lastDma >= 10000)) {
+        last_dma_audit_ms_.store(nowDmaMs, std::memory_order_release);
         auto dmaEvents = dma::DmaDetector::Instance().PerformAudit();
         cycleEvents.insert(cycleEvents.end(), dmaEvents.begin(), dmaEvents.end());
     }
@@ -374,8 +394,13 @@ void AntiCheatEngine::TriggerBan(const std::string& reason, DetectionType type, 
         finalScore
     );
 
-    if (ban_callback_) {
-        ban_callback_(reason, finalScore);
+    BanCallback banCb;
+    {
+        std::lock_guard<std::mutex> lock(history_mutex_);
+        banCb = ban_callback_;
+    }
+    if (banCb) {
+        banCb(reason, finalScore);
     }
 
     // In test harness, bypass UI and process termination
@@ -552,6 +577,7 @@ void AntiCheatEngine::Stop() {
     if (!running_.exchange(false)) return;
     stop_requested_.store(true, std::memory_order_release);
     freeze_background_loop_for_testing_.store(false, std::memory_order_release);
+    freeze_watchdog_for_testing_.store(false, std::memory_order_release);
     if (watchdog_thread_.joinable()) {
         watchdog_thread_.join();
     }
@@ -561,6 +587,8 @@ void AntiCheatEngine::Stop() {
     if (background_thread_.joinable()) {
         background_thread_.join();
     }
+    background_thread_id_.store(std::thread::id{});
+    stop_requested_.store(false, std::memory_order_release);
     memory::MemoryScanner::Instance().SetProgressCallback(nullptr);
     memory::MemoryScanner::Instance().SetScanBudget(0);
 }

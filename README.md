@@ -76,7 +76,7 @@
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j$(nproc)
 
-# Run Comprehensive Unit Test Suite (115 test cases across all subsystems)
+# Run Comprehensive Unit Test Suite (123 test cases across all subsystems)
 ./build/noescape_tests
 
 # Run Interactive Subsystem Demo
@@ -109,7 +109,7 @@ Enable heartbeats (`enable_heartbeat = true` / `NOESCAPE_ENABLE_HEARTBEAT=1`). E
 ### 🔐 Integration Notes
 
 - **Always set a unique `secret_key` and `panel_url`.** The built-in default key is public; a warning is logged when it is used.
-- `https://` panel URLs are refused (TLS is not implemented yet) instead of silently falling back to cleartext. Terminate TLS at a reverse proxy on a trusted network or add a TLS client.
+- `https://` panel URLs are supported via OpenSSL on Linux and WinHTTP on Windows, with optional SPKI SHA-256 public-key pinning (`NoEscape_SetPanelPin` / `NOESCAPE_PANEL_PIN_SHA256`). If built without TLS (`-DNOESCAPE_WITH_TLS=OFF`), `https://` URLs are refused rather than silently downgraded to cleartext.
 - Detections are scored **once per distinct finding**; persistent conditions no longer snowball into a ban. Network I/O runs on its own thread so slow/hostile panels cannot trip the watchdog.
 - `NoEscape_Tick()` works without `NoEscape_Start()`; it runs a full synchronous audit on the calling thread (do not call it every frame).
 - Weakening environment overrides (`NOESCAPE_ENFORCE_BAN=0`, `NOESCAPE_BAN_THRESHOLD`, …) are honoured only when `NOESCAPE_TEST_MODE=1`.
@@ -145,7 +145,7 @@ NoEscapeAC/
 │   ├── network/
 │   └── sdk/
 ├── demo/                     # Interactive demonstration program
-├── tests/                    # 115 unit & regression tests
+├── tests/                    # 123 unit & regression tests
 └── CMakeLists.txt            # Exports libnoescape.a, libnoescape.so, and executables
 ```
 

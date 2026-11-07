@@ -6,6 +6,7 @@
 #include "noescape/core/envutil.hpp"
 #include "noescape/kinematics/aim_analyzer.hpp"
 #include "noescape/memory/memory_scanner.hpp"
+#include "noescape/overlay/overlay_detector.hpp"
 #include "noescape/network/crypto_util.hpp"
 #include <cmath>
 #include <cstdlib>
@@ -440,3 +441,283 @@ TEST(Regression, HealthyEngineNeverSelfReportsWatchdogFailure) {
     for (const auto& ev : engine.GetDetectionHistory())
         ASSERT_TRUE(ev.component.find("Watchdog") == std::string::npos);
 }
+
+#if !defined(_WIN32)
+#include <sys/prctl.h>
+#include "noescape/memory/canary_monitor.hpp"
+
+TEST(Regression, UnhookerCleanProcessZeroEventsAndWorksWhenNonDumpable) {
+    // 1. Clean process must emit zero inline hook events (including vDSO IFUNC routines)
+    auto cleanEvents = memory::Unhooker::Instance().AuditSystemHooks();
+    ASSERT_EQ(cleanEvents.size(), 0u);
+
+    // 2. Even while PR_SET_DUMPABLE == 0, Unhooker::RestoreHook must succeed via WriteViaProcMem
+    void* libc = dlopen("libc.so.6", RTLD_NOW | RTLD_NOLOAD);
+    if (!libc) return;
+    auto target = reinterpret_cast<uintptr_t>(dlsym(libc, "process_vm_writev"));
+    if (!target) return;
+
+    uint8_t original[16];
+    std::memcpy(original, reinterpret_cast<const void*>(target), sizeof(original));
+
+    void* stub = mmap(reinterpret_cast<void*>((target & ~0xFFFull) - (64ull << 20)), 4096,
+                      PROT_READ | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    ASSERT_TRUE(stub != MAP_FAILED);
+    int64_t rel = static_cast<int64_t>(reinterpret_cast<uintptr_t>(stub)) - static_cast<int64_t>(target + 5);
+    if (rel > INT32_MAX || rel < INT32_MIN) { munmap(stub, 4096); return; }
+    uint8_t jmp[5] = {0xE9};
+    int32_t r32 = static_cast<int32_t>(rel);
+    std::memcpy(jmp + 1, &r32, 4);
+    ASSERT_TRUE(PokeText(target, jmp, sizeof(jmp)));
+
+    // Simulate active anti-debug state (PR_SET_DUMPABLE = 0)
+    prctl(PR_SET_DUMPABLE, 0, 0, 0, 0);
+    ASSERT_EQ(prctl(PR_GET_DUMPABLE, 0, 0, 0, 0), 0);
+
+    bool found = false;
+    for (const auto& ev : memory::Unhooker::Instance().AuditSystemHooks()) {
+        if (ev.details.find("'process_vm_writev'") != std::string::npos) {
+            found = true;
+            ASSERT_TRUE(ev.details.find("RESTORED") != std::string::npos);
+        }
+    }
+    // Dumpable flag must remain 0 after WriteViaProcMem
+    ASSERT_EQ(prctl(PR_GET_DUMPABLE, 0, 0, 0, 0), 0);
+    prctl(PR_SET_DUMPABLE, 1, 0, 0, 0);
+
+    bool restored = std::memcmp(reinterpret_cast<const void*>(target), original, sizeof(original)) == 0;
+    if (!restored) PokeText(target, original, sizeof(original));
+    munmap(stub, 4096);
+    ASSERT_TRUE(found);
+    ASSERT_TRUE(restored);
+}
+
+TEST(Regression, CanaryInitializesWhileProcessNonDumpable) {
+    auto& c = memory::CanaryMonitor::Instance();
+    c.Shutdown();
+    prctl(PR_SET_DUMPABLE, 0, 0, 0, 0);
+    bool ok = c.Initialize(2);
+    ASSERT_EQ(prctl(PR_GET_DUMPABLE, 0, 0, 0, 0), 0);
+    prctl(PR_SET_DUMPABLE, 1, 0, 0, 0);
+    ASSERT_TRUE(ok);
+    ASSERT_EQ(c.Check().size(), 0u);
+}
+#endif
+
+TEST(Regression, GroupedSimdBucketScannerMatchesSharedPrefixPatterns) {
+    std::vector<uint8_t> buf(4096, 0x90);
+    // Three distinct patterns sharing the same first byte (0x48) at offset 0
+    memory::Pattern p1("48 8B 05 ? ? ? ? 48 85 C0", "Shared48_A");
+    memory::Pattern p2("48 89 5C 24 ? 57 48 83 EC 20", "Shared48_B");
+    memory::Pattern p3("48 B8 ? ? ? ? ? ? ? ? FF E0", "Shared48_C");
+    // And one pattern with a leading wildcard (first non-wildcard at offset 1)
+    memory::Pattern p4("? 48 8D 0D ? ? ? ? E8", "Offset1_48");
+
+    const uint8_t s1[] = {0x48, 0x8B, 0x05, 0x11, 0x22, 0x33, 0x44, 0x48, 0x85, 0xC0};
+    const uint8_t s2[] = {0x48, 0x89, 0x5C, 0x24, 0x08, 0x57, 0x48, 0x83, 0xEC, 0x20};
+    const uint8_t s3[] = {0x48, 0xB8, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0xFF, 0xE0};
+    const uint8_t s4[] = {0xCC, 0x48, 0x8D, 0x0D, 0xAA, 0xBB, 0xCC, 0xDD, 0xE8};
+
+    std::memcpy(buf.data() + 31, s1, sizeof(s1));   // crosses 32-byte AVX2 boundary
+    std::memcpy(buf.data() + 512, s2, sizeof(s2));
+    std::memcpy(buf.data() + 4080, s3, sizeof(s3)); // in scalar tail of buffer
+    std::memcpy(buf.data() + 2048, s4, sizeof(s4));
+
+    std::vector<memory::Pattern> batch = {p1, p2, p3, p4};
+    auto hits = memory::PatternScanner::ScanBatch(buf.data(), buf.size(), batch, 0x10000);
+    ASSERT_EQ(hits.size(), 4u);
+
+    bool gotA = false, gotB = false, gotC = false, gotD = false;
+    for (const auto& h : hits) {
+        if (h.pattern_name == "Shared48_A" && h.address == 0x10000 + 31) gotA = true;
+        if (h.pattern_name == "Shared48_B" && h.address == 0x10000 + 512) gotB = true;
+        if (h.pattern_name == "Shared48_C" && h.address == 0x10000 + 4080) gotC = true;
+        if (h.pattern_name == "Offset1_48" && h.address == 0x10000 + 2048) gotD = true;
+    }
+    ASSERT_TRUE(gotA && gotB && gotC && gotD);
+}
+
+TEST(Regression, SdkCppClientWrappersPhantomAndSettings) {
+    noescape::sdk::Client::SetHostUsesJit(true);
+    noescape::sdk::Client::SetPanelPin("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
+
+    NoEscapeConfig cfg = NoEscape_GetDefaultConfig();
+    cfg.enable_heartbeat = false;
+    cfg.enable_anti_debug = false;
+    cfg.enable_integrity_scan = false;
+    cfg.enable_speedhack_detection = false;
+    cfg.enable_memory_scan = false;
+    cfg.enable_unhooker = false;
+    cfg.enable_forensics = false;
+    cfg.enable_dma_detection = false;
+    cfg.enable_overlay_detection = false;
+    cfg.enable_kinematics = true;
+    cfg.enforce_ban = false;
+
+    ASSERT_TRUE(noescape::sdk::Client::Init(&cfg));
+    noescape::sdk::Client::AddPhantom(42, 10.0f, 0.0f, 0.0f);
+    noescape::sdk::Client::UpdatePhantom(42, 20.0f, 0.0f, 0.0f);
+    for (int i = 0; i < 12; ++i) {
+        noescape::sdk::Client::PushView(0.0f, 0.0f, 0.0f, 0.0f, 0.1f, static_cast<uint64_t>(100 + i));
+    }
+    ASSERT_GT(noescape::sdk::Client::GetThreatScore(), 0u);
+    noescape::sdk::Client::Shutdown();
+    noescape::sdk::Client::SetHostUsesJit(false);
+    noescape::sdk::Client::SetPanelPin("");
+}
+
+TEST(Regression, EngineAuditCycleWorksAfterStartAndStop) {
+    core::EngineConfig cfg;
+    cfg.enableHeartbeat = false;
+    cfg.verifyPanelBan = false;
+    cfg.enableAntiDebug = false;
+    cfg.enableIntegrityScan = true;
+    cfg.enableSpeedhackDetection = false;
+    cfg.enableMemoryScan = true;
+    cfg.enableUnhooker = false;
+    cfg.enableForensics = false;
+    cfg.enableDmaDetection = false;
+    cfg.enableOverlayDetection = false;
+    cfg.enforceBanOnViolation = false;
+
+    core::AntiCheatEngine engine(cfg);
+    ASSERT_TRUE(engine.Initialize());
+    engine.Start();
+    std::this_thread::sleep_for(std::chrono::milliseconds(40));
+    engine.Stop();
+
+    // After Stop(), a synchronous AuditCycle() must still execute rather than aborting
+    // on a stale stop_requested_ == true flag.
+#if defined(_WIN32)
+    void* rwx = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    ASSERT_TRUE(rwx != nullptr);
+#else
+    void* rwx = mmap(nullptr, 4096, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    ASSERT_TRUE(rwx != MAP_FAILED);
+#endif
+    std::memset(rwx, 0x90, 64);
+
+    auto events = engine.AuditCycle();
+#if defined(_WIN32)
+    VirtualFree(rwx, 0, MEM_RELEASE);
+#else
+    munmap(rwx, 4096);
+#endif
+    ASSERT_GT(events.size(), 0u);
+    ASSERT_GT(engine.GetThreatScore(), 0u);
+}
+
+#if !defined(_WIN32)
+TEST(Regression, UninitializedEngineDestructorPreservesDumpableState) {
+    prctl(PR_SET_DUMPABLE, 0, 0, 0, 0);
+    ASSERT_EQ(prctl(PR_GET_DUMPABLE, 0, 0, 0, 0), 0);
+    {
+        core::EngineConfig cfg;
+        cfg.enableAntiDebug = true;
+        core::AntiCheatEngine uninitializedEngine(cfg);
+        // Destroyed without calling Initialize(): must not clobber PR_SET_DUMPABLE to 1
+    }
+    int after = prctl(PR_GET_DUMPABLE, 0, 0, 0, 0);
+    prctl(PR_SET_DUMPABLE, 1, 0, 0, 0);
+    ASSERT_EQ(after, 0);
+}
+
+TEST(Regression, ConcurrentUnhookerAndCanaryUnderNonDumpable) {
+    void* mockPage = mmap(nullptr, 4096, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    ASSERT_TRUE(mockPage != MAP_FAILED);
+    uint8_t cleanBytes[8] = {0x55, 0x48, 0x89, 0xE5, 0x48, 0x83, 0xEC, 0x20};
+    std::memcpy(mockPage, cleanBytes, sizeof(cleanBytes));
+
+    memory::HookInfo info;
+    info.function_name = "ConcurrentMock";
+    info.function_address = reinterpret_cast<uintptr_t>(mockPage);
+    info.hook_type = "JMP_REL32 (0xE9)";
+
+    prctl(PR_SET_DUMPABLE, 0, 0, 0, 0);
+    std::atomic<bool> failed{false};
+
+    std::thread t1([&]() {
+        for (int i = 0; i < 25; ++i) {
+            if (!memory::Unhooker::Instance().RestoreHook(info, cleanBytes, sizeof(cleanBytes))) {
+                failed.store(true);
+            }
+        }
+    });
+    std::thread t2([&]() {
+        auto& c = memory::CanaryMonitor::Instance();
+        for (int i = 0; i < 15; ++i) {
+            c.Shutdown();
+            if (!c.Initialize(1)) {
+                failed.store(true);
+            }
+        }
+    });
+    t1.join();
+    t2.join();
+
+    int finalDumpable = prctl(PR_GET_DUMPABLE, 0, 0, 0, 0);
+    prctl(PR_SET_DUMPABLE, 1, 0, 0, 0);
+    munmap(mockPage, 4096);
+
+    ASSERT_FALSE(failed.load());
+    ASSERT_EQ(finalDumpable, 0);
+}
+#endif
+
+TEST(Regression, UnhookerAndOverlayDetectCetEndbr64OffsetHooks) {
+    // 1. Synthetic function beginning with 4-byte Intel CET endbr64 (F3 0F 1E FA)
+    // followed at +4 by JMP rel32 (E9 20 00 00 00)
+    alignas(16) uint8_t cetHooked[32] = {
+        0xF3, 0x0F, 0x1E, 0xFA,             // endbr64
+        0xE9, 0x20, 0x00, 0x00, 0x00,       // jmp +0x20 (from insnAddr = base + 4)
+        0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90
+    };
+    uintptr_t base = reinterpret_cast<uintptr_t>(cetHooked);
+    auto h1 = memory::Unhooker::Instance().InspectFunction("CetEndbrJmp", cetHooked);
+    ASSERT_TRUE(h1.has_value());
+    ASSERT_EQ(h1->hook_type, "JMP_REL32 (0xE9)");
+    ASSERT_EQ(h1->target_destination, base + 4 + 5 + 0x20);
+    ASSERT_EQ(h1->patched_bytes.size(), 9u);
+
+    // 2. endbr64 followed at +4 by MOV RAX, imm64; JMP RAX (12 bytes -> total 16 bytes)
+    alignas(16) uint8_t cetMovRax[32] = {
+        0xF3, 0x0F, 0x1E, 0xFA,
+        0x48, 0xB8, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11, 0xFF, 0xE0
+    };
+    auto h2 = memory::Unhooker::Instance().InspectFunction("CetEndbrMovRax", cetMovRax);
+    ASSERT_TRUE(h2.has_value());
+    ASSERT_EQ(h2->hook_type, "MOV_RAX_JMP_RAX (0x48 0xB8 ... 0xFF 0xE0)");
+    ASSERT_EQ(h2->target_destination, 0x1122334455667788ULL);
+
+#if !defined(_WIN32)
+    // 3. Real disk-backed function in libc.so.6 (fmtmsg) with endbr64 +4 inline detour:
+    // verify OverlayDetector::InspectRenderingPointer flags it and AutoRestoreHook repairs it.
+    void* libc = dlopen("libc.so.6", RTLD_NOW | RTLD_NOLOAD);
+    if (!libc) return;
+    void* fn = dlsym(libc, "fmtmsg");
+    if (!fn) return;
+    auto addr = reinterpret_cast<uintptr_t>(fn);
+    uint8_t orig[16];
+    std::memcpy(orig, fn, sizeof(orig));
+    if (orig[0] == 0xF3 && orig[1] == 0x0F && orig[2] == 0x1E && orig[3] == 0xFA) {
+        uint8_t detourAt4[5] = {0xE9, 0x40, 0x00, 0x00, 0x00};
+        ASSERT_TRUE(PokeText(addr + 4, detourAt4, sizeof(detourAt4)));
+
+        auto overlayEv = overlay::OverlayDetector::Instance().InspectRenderingPointer("fmtmsg_Present", fn);
+        auto hookInfo = memory::Unhooker::Instance().InspectFunction("fmtmsg", fn);
+        bool restored = false;
+        if (hookInfo.has_value()) {
+            restored = memory::Unhooker::Instance().AutoRestoreHook(*hookInfo);
+        }
+        if (std::memcmp(fn, orig, sizeof(orig)) != 0) {
+            PokeText(addr, orig, sizeof(orig));
+        }
+        ASSERT_TRUE(overlayEv.has_value());
+        ASSERT_EQ(overlayEv->type, core::DetectionType::RENDERING_HOOK_DETECTED);
+        ASSERT_TRUE(hookInfo.has_value());
+        ASSERT_TRUE(restored);
+        ASSERT_EQ(std::memcmp(fn, orig, sizeof(orig)), 0);
+    }
+#endif
+}
+

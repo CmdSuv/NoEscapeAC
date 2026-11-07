@@ -22,6 +22,7 @@
 #include <csetjmp>
 #include <pthread.h>
 #include <sys/mman.h>
+#include <elf.h>
 #endif
 
 namespace noescape::memory {
@@ -123,20 +124,21 @@ static bool ScanChunkSafe(uintptr_t chunkStart,
     size_t span = ((chunkStart + chunkSize - pageStart) + pageSize - 1) & pageMask;
 
     // One mincore() over the whole chunk: fails if any page is unmapped (region changed under
-    // us) and tells us whether anything is resident. A chunk with no resident page is either
-    // never-touched reservation (reads as zeros) or fully swapped out: skip it instead of
-    // faulting in gigabytes of zero pages.
+    // us) and tells us which pages are resident. Non-resident pages are either never-touched
+    // reservations (reads as zeros) or swapped out: skip them at page granularity instead of
+    // faulting in megabytes of zero pages.
     thread_local std::vector<unsigned char> residency;
-    residency.assign(span / pageSize, 0);
+    const size_t numPages = span / pageSize;
+    residency.assign(numPages, 0);
     if (mincore(reinterpret_cast<void*>(pageStart), span, residency.data()) != 0) {
         return false;
     }
+    outMatches.clear();
     bool anyResident = false;
     for (unsigned char v : residency) {
         if (v & 1) { anyResident = true; break; }
     }
     if (!anyResident) {
-        outMatches.clear();
         return true;
     }
 
@@ -145,13 +147,28 @@ static bool ScanChunkSafe(uintptr_t chunkStart,
         return false;
     }
     g_scanActive = 1;
-    outMatches = PatternScanner::ScanSignatures(
-        reinterpret_cast<const uint8_t*>(chunkStart),
-        chunkSize,
-        applicable,
-        chunkStart,
-        16
-    );
+    const uintptr_t chunkEnd = chunkStart + chunkSize;
+    size_t p = 0;
+    while (p < numPages && outMatches.size() < 16) {
+        while (p < numPages && (residency[p] & 1) == 0) ++p;
+        if (p >= numPages) break;
+        size_t runEndPage = p + 1;
+        while (runEndPage < numPages && (residency[runEndPage] & 1) != 0) ++runEndPage;
+
+        uintptr_t runStart = std::max(chunkStart, pageStart + p * pageSize);
+        uintptr_t runEnd = std::min(chunkEnd, pageStart + runEndPage * pageSize);
+        if (runEnd > runStart) {
+            auto subMatches = PatternScanner::ScanSignatures(
+                reinterpret_cast<const uint8_t*>(runStart),
+                runEnd - runStart,
+                applicable,
+                runStart,
+                16 - outMatches.size()
+            );
+            outMatches.insert(outMatches.end(), subMatches.begin(), subMatches.end());
+        }
+        p = runEndPage;
+    }
     g_scanActive = 0;
     return true;
 #else
@@ -709,7 +726,130 @@ __attribute__((no_sanitize("address", "hwaddress", "thread")))
 std::vector<core::DetectionEvent> MemoryScanner::DetectModifiedModules() {
     std::vector<core::DetectionEvent> events;
 #if defined(_WIN32)
-    return events; // PE relocation-aware comparison not implemented yet
+    std::vector<MemoryRegion> candidates;
+    for (const auto& r : QueryMemoryRegions()) {
+        if (!r.executable || !r.readable || !r.is_backed_by_file || r.size == 0) continue;
+        if (r.size > 64u * 1024u * 1024u) continue;
+        candidates.push_back(r);
+    }
+    if (candidates.empty()) return events;
+
+    MemoryRegion r;
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        r = candidates[module_cursor_++ % candidates.size()];
+    }
+
+    HMODULE mod = nullptr;
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                            reinterpret_cast<LPCWSTR>(r.start), &mod) || !mod) {
+        return events;
+    }
+    wchar_t widePath[MAX_PATH * 2]{};
+    if (!GetModuleFileNameW(mod, widePath, MAX_PATH * 2)) return events;
+    HANDLE f = CreateFileW(widePath, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE, nullptr,
+                           OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (f == INVALID_HANDLE_VALUE) return events;
+    LARGE_INTEGER sz{};
+    if (!GetFileSizeEx(f, &sz) || sz.QuadPart <= 0 || sz.QuadPart > (256ll << 20)) { CloseHandle(f); return events; }
+    std::vector<uint8_t> file(static_cast<size_t>(sz.QuadPart));
+    DWORD gotBytes = 0;
+    bool ok = ReadFile(f, file.data(), static_cast<DWORD>(file.size()), &gotBytes, nullptr) && gotBytes == file.size();
+    CloseHandle(f);
+    if (!ok || file.size() < sizeof(IMAGE_DOS_HEADER)) return events;
+
+    auto rd = [&](size_t off, size_t len) { return off + len <= file.size(); };
+    auto dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(file.data());
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE || !rd(static_cast<size_t>(dos->e_lfanew), sizeof(IMAGE_NT_HEADERS64))) return events;
+    auto nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(file.data() + dos->e_lfanew);
+    if (nt->Signature != IMAGE_NT_SIGNATURE || nt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC) return events;
+
+    const size_t secOff = static_cast<size_t>(dos->e_lfanew) + offsetof(IMAGE_NT_HEADERS64, OptionalHeader) +
+                          nt->FileHeader.SizeOfOptionalHeader;
+    const WORD nsec = nt->FileHeader.NumberOfSections;
+    if (!rd(secOff, static_cast<size_t>(nsec) * sizeof(IMAGE_SECTION_HEADER))) return events;
+    auto sections = reinterpret_cast<const IMAGE_SECTION_HEADER*>(file.data() + secOff);
+
+    const uint32_t regionRva = static_cast<uint32_t>(r.start - reinterpret_cast<uintptr_t>(mod));
+    size_t codeOff = 0, compareLen = 0;
+    for (WORD i = 0; i < nsec; ++i) {
+        const auto& s = sections[i];
+        const uint32_t secSize = s.Misc.VirtualSize
+            ? std::min<uint32_t>(s.Misc.VirtualSize, s.SizeOfRawData)
+            : s.SizeOfRawData;
+        if (regionRva >= s.VirtualAddress && regionRva < s.VirtualAddress + secSize) {
+            size_t inSec = regionRva - s.VirtualAddress;
+            codeOff = static_cast<size_t>(s.PointerToRawData) + inSec;
+            compareLen = std::min<size_t>(r.size, static_cast<size_t>(secSize) - inSec);
+            break;
+        }
+    }
+    if (compareLen < 64 || !rd(codeOff, compareLen)) return events;
+
+    std::vector<uint8_t> memCopy(compareLen);
+    SIZE_T copied = 0;
+    if (!ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<LPCVOID>(r.start), memCopy.data(), compareLen, &copied) ||
+        copied != compareLen) {
+        return events;
+    }
+
+    std::vector<bool> mask(compareLen, true);
+    auto rvaToOff = [&](uint32_t rv, size_t len, size_t& offOut) {
+        for (WORD i = 0; i < nsec; ++i) {
+            const auto& s = sections[i];
+            if (rv >= s.VirtualAddress && rv + len <= s.VirtualAddress + s.SizeOfRawData) {
+                offOut = static_cast<size_t>(s.PointerToRawData) + (rv - s.VirtualAddress);
+                return rd(offOut, len);
+            }
+        }
+        return false;
+    };
+    const auto& relDir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC];
+    size_t relOff = 0;
+    if (relDir.VirtualAddress && relDir.Size && rvaToOff(relDir.VirtualAddress, relDir.Size, relOff)) {
+        size_t p = relOff, end = relOff + relDir.Size;
+        while (p + sizeof(IMAGE_BASE_RELOCATION) <= end) {
+            auto blk = reinterpret_cast<const IMAGE_BASE_RELOCATION*>(file.data() + p);
+            if (blk->SizeOfBlock < sizeof(IMAGE_BASE_RELOCATION) || p + blk->SizeOfBlock > end) break;
+            size_t n = (blk->SizeOfBlock - sizeof(IMAGE_BASE_RELOCATION)) / sizeof(WORD);
+            auto ent = reinterpret_cast<const WORD*>(file.data() + p + sizeof(IMAGE_BASE_RELOCATION));
+            for (size_t i = 0; i < n; ++i) {
+                int type = ent[i] >> 12;
+                uint32_t at = blk->VirtualAddress + (ent[i] & 0x0FFF);
+                size_t width = (type == IMAGE_REL_BASED_DIR64) ? 8 : (type == IMAGE_REL_BASED_HIGHLOW ? 4 : 0);
+                for (size_t b = 0; b < width; ++b) {
+                    uint32_t byteRva = at + static_cast<uint32_t>(b);
+                    if (byteRva >= regionRva && byteRva < regionRva + compareLen) {
+                        mask[byteRva - regionRva] = false;
+                    }
+                }
+            }
+            p += blk->SizeOfBlock;
+        }
+    }
+
+    const uint8_t* diskPtr = file.data() + codeOff;
+    size_t firstDiff = compareLen, diffCount = 0;
+    for (size_t i = 0; i < compareLen; ++i) {
+        if (mask[i] && memCopy[i] != diskPtr[i]) {
+            if (firstDiff == compareLen) firstDiff = i;
+            ++diffCount;
+        }
+    }
+    if (diffCount > 0) {
+        core::DetectionEvent ev;
+        ev.type = core::DetectionType::INLINE_HOOK_DETECTED;
+        ev.severity = core::Severity::HIGH;
+        ev.component = "MemoryScanner::ModuleIntegrity";
+        std::ostringstream ss;
+        ss << "In-memory executable differs from on-disk image: " << r.pathname
+           << " (" << diffCount << " bytes differ, first at +0x" << std::hex << firstDiff << ")";
+        ev.details = ss.str();
+        ev.timestamp = static_cast<uint64_t>(std::time(nullptr));
+        ev.threat_score = 50;
+        events.push_back(ev);
+    }
+    return events;
 #else
     std::vector<MemoryRegion> candidates;
     for (const auto& r : QueryMemoryRegions()) {
@@ -728,13 +868,34 @@ std::vector<core::DetectionEvent> MemoryScanner::DetectModifiedModules() {
 
     std::ifstream f(r.pathname, std::ios::binary);
     if (!f.is_open()) return events;
-    char magic[4]{};
-    f.read(magic, 4);
-    if (f.gcount() != 4 || std::memcmp(magic, "\x7f""ELF", 4) != 0) return events;
+    Elf64_Ehdr eh{};
+    f.read(reinterpret_cast<char*>(&eh), sizeof(eh));
+    if (f.gcount() != static_cast<std::streamsize>(sizeof(eh)) ||
+        std::memcmp(eh.e_ident, ELFMAG, SELFMAG) != 0) {
+        return events;
+    }
 
-    std::vector<uint8_t> disk(r.size);
+    size_t maxCompare = r.size;
+    if (eh.e_ident[EI_CLASS] == ELFCLASS64 && eh.e_phentsize >= sizeof(Elf64_Phdr) && eh.e_phnum <= 512) {
+        for (uint16_t i = 0; i < eh.e_phnum; ++i) {
+            Elf64_Phdr ph{};
+            f.seekg(static_cast<std::streamoff>(eh.e_phoff + static_cast<uint64_t>(i) * eh.e_phentsize));
+            f.read(reinterpret_cast<char*>(&ph), sizeof(ph));
+            if (f.gcount() != static_cast<std::streamsize>(sizeof(ph))) break;
+            if (ph.p_type != PT_LOAD || !(ph.p_flags & PF_X)) continue;
+            uint64_t segPageOff = ph.p_offset & ~static_cast<uint64_t>(0xFFF);
+            if (r.file_offset >= segPageOff && r.file_offset < ph.p_offset + ph.p_filesz) {
+                uint64_t avail = (ph.p_offset + ph.p_filesz) - r.file_offset;
+                maxCompare = std::min<size_t>(r.size, static_cast<size_t>(avail));
+                break;
+            }
+        }
+    }
+    f.clear();
+
+    std::vector<uint8_t> disk(maxCompare);
     f.seekg(static_cast<std::streamoff>(r.file_offset));
-    f.read(reinterpret_cast<char*>(disk.data()), static_cast<std::streamsize>(r.size));
+    f.read(reinterpret_cast<char*>(disk.data()), static_cast<std::streamsize>(maxCompare));
     size_t got = static_cast<size_t>(f.gcount());
     if (got < 64) return events;
 
