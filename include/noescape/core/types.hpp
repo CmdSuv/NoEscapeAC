@@ -68,6 +68,24 @@ enum class ConfidenceLevel : uint32_t {
     CONFIRMED = HIGH_CONFIDENCE_VIOLATION
 };
 
+enum class EvidenceState : uint32_t {
+    OBSERVED = 0,
+    SUSPICIOUS = 1,
+    CORROBORATED = 2,
+    SERVER_VERIFIED = 3,
+    HIGH_CONFIDENCE = 4,
+    DISPUTED = 5,
+    EXPIRED = 6
+};
+
+enum class ConfigurationProfile : uint32_t {
+    DEVELOPMENT = 0,
+    TESTING = 1,
+    SHADOW_PRODUCTION = 2,
+    PRODUCTION = 3,
+    OFFLINE_DIAGNOSTICS = 4
+};
+
 enum class EnforcementMode : uint32_t {
     REPORT_ONLY = 0,
     SHADOW = 1,
@@ -111,6 +129,11 @@ struct DetectionEvent {
     uint32_t occurrence_count{1};
     uint32_t corroborating_sources{1};
     bool server_verified{false};
+    EvidenceState evidence_state{EvidenceState::OBSERVED};
+    std::string session_id{"default_session"};
+    std::string match_id{"default_match"};
+    std::string root_cause_id{};
+    uint64_t expiration_timestamp{0};
     std::string detection_version{"7.0.13"};
     std::vector<uint64_t> related_event_ids{};
 
@@ -260,9 +283,23 @@ struct DetectionEvent {
             default: return "UNKNOWN";
         }
     }
+
+    static const char* EvidenceStateToString(EvidenceState s) {
+        switch (s) {
+            case EvidenceState::OBSERVED: return "OBSERVED";
+            case EvidenceState::SUSPICIOUS: return "SUSPICIOUS";
+            case EvidenceState::CORROBORATED: return "CORROBORATED";
+            case EvidenceState::SERVER_VERIFIED: return "SERVER_VERIFIED";
+            case EvidenceState::HIGH_CONFIDENCE: return "HIGH_CONFIDENCE";
+            case EvidenceState::DISPUTED: return "DISPUTED";
+            case EvidenceState::EXPIRED: return "EXPIRED";
+            default: return "OBSERVED";
+        }
+    }
 };
 
 struct EngineConfig {
+    ConfigurationProfile profile{ConfigurationProfile::DEVELOPMENT};
     std::string panelUrl{"http://127.0.0.1:8080/api/ac"};
     std::string secretKey{"NoEscape_Secret_Key_v2.0"};
     // Optional SHA-256 (hex) of the panel's TLS SubjectPublicKeyInfo. When set, https:// panel
@@ -311,6 +348,96 @@ struct EngineConfig {
         "hook.so", "ksdumper", "dbk64.sys", "winring0", "leechcore",
         "fpga_mem.bin"
     };
+
+    static EngineConfig DevelopmentProfile() {
+        EngineConfig cfg;
+        cfg.profile = ConfigurationProfile::DEVELOPMENT;
+        cfg.enforcementMode = EnforcementMode::REPORT_ONLY;
+        cfg.enforceBanOnViolation = false;
+        cfg.terminateProcessOnBan = false;
+        cfg.showBanUi = false;
+        cfg.requireMultiSignalCorroboration = false;
+        cfg.enableAntiDebug = false;
+        cfg.enableHeartbeat = false;
+        cfg.verifyPanelBan = false;
+        cfg.secretKey = "";
+        cfg.panelUrl = "";
+        return cfg;
+    }
+
+    static EngineConfig TestingProfile() {
+        EngineConfig cfg;
+        cfg.profile = ConfigurationProfile::TESTING;
+        cfg.enforcementMode = EnforcementMode::ENFORCE;
+        cfg.enforceBanOnViolation = true;
+        cfg.terminateProcessOnBan = false;
+        cfg.showBanUi = false;
+        cfg.banScoreThreshold = 100;
+        cfg.requireMultiSignalCorroboration = false;
+        cfg.enableAntiDebug = true;
+        cfg.enableHeartbeat = false;
+        cfg.verifyPanelBan = false;
+        cfg.blackboxDumpDirectory = "/tmp";
+        cfg.secretKey = "NoEscape_Test_Key";
+        cfg.panelUrl = "";
+        return cfg;
+    }
+
+    static EngineConfig ShadowProductionProfile() {
+        EngineConfig cfg;
+        cfg.profile = ConfigurationProfile::SHADOW_PRODUCTION;
+        cfg.enforcementMode = EnforcementMode::SHADOW;
+        cfg.enforceBanOnViolation = false;
+        cfg.terminateProcessOnBan = false;
+        cfg.showBanUi = false;
+        cfg.requireMultiSignalCorroboration = true;
+        cfg.enableHeartbeat = true;
+        cfg.verifyPanelBan = false;
+        cfg.secretKey = "";
+        cfg.panelUrl = "";
+        return cfg;
+    }
+
+    static EngineConfig ProductionProfile() {
+        EngineConfig cfg;
+        cfg.profile = ConfigurationProfile::PRODUCTION;
+        cfg.enforcementMode = EnforcementMode::SERVER_SESSION_REJECT;
+        cfg.enforceBanOnViolation = false;
+        cfg.terminateProcessOnBan = false;
+        cfg.showBanUi = false;
+        cfg.requireMultiSignalCorroboration = true;
+        cfg.enableHeartbeat = true;
+        cfg.verifyPanelBan = true;
+        cfg.secretKey = "";
+        cfg.panelUrl = "";
+        return cfg;
+    }
+
+    static EngineConfig OfflineDiagnosticsProfile() {
+        EngineConfig cfg;
+        cfg.profile = ConfigurationProfile::OFFLINE_DIAGNOSTICS;
+        cfg.enforcementMode = EnforcementMode::REPORT_ONLY;
+        cfg.enforceBanOnViolation = false;
+        cfg.terminateProcessOnBan = false;
+        cfg.showBanUi = false;
+        cfg.enableHeartbeat = false;
+        cfg.verifyPanelBan = false;
+        cfg.requireMultiSignalCorroboration = true;
+        cfg.secretKey = "";
+        cfg.panelUrl = "";
+        return cfg;
+    }
+
+    static EngineConfig FromProfile(ConfigurationProfile p) {
+        switch (p) {
+            case ConfigurationProfile::DEVELOPMENT: return DevelopmentProfile();
+            case ConfigurationProfile::TESTING: return TestingProfile();
+            case ConfigurationProfile::SHADOW_PRODUCTION: return ShadowProductionProfile();
+            case ConfigurationProfile::PRODUCTION: return ProductionProfile();
+            case ConfigurationProfile::OFFLINE_DIAGNOSTICS: return OfflineDiagnosticsProfile();
+            default: return DevelopmentProfile();
+        }
+    }
 };
 
 } // namespace noescape::core

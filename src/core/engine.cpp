@@ -344,6 +344,42 @@ void AntiCheatEngine::PushInputSample(float pitch, float yaw, uint64_t timestamp
     }
 }
 
+void AntiCheatEngine::PushRawInput(uint64_t interval_us, int32_t dx, int32_t dy) {
+    if (!config_.enableKinematics) return;
+    std::optional<DetectionEvent> ev;
+    {
+        std::lock_guard<std::mutex> lock(input_mutex_);
+        ev = aim_analyzer_.RecordRawInputSample(interval_us, dx, dy);
+    }
+    if (ev) ProcessDetection(*ev);
+}
+
+void AntiCheatEngine::RecordTargetAcquire(uint64_t timestamp_ms) {
+    if (!config_.enableKinematics) return;
+    std::lock_guard<std::mutex> lock(input_mutex_);
+    aim_analyzer_.RecordCrosshairTargetAcquire(timestamp_ms);
+}
+
+void AntiCheatEngine::PushWeaponFire(uint64_t timestamp_ms) {
+    if (!config_.enableKinematics) return;
+    std::optional<DetectionEvent> ev;
+    {
+        std::lock_guard<std::mutex> lock(input_mutex_);
+        ev = aim_analyzer_.RecordWeaponFire(timestamp_ms);
+    }
+    if (ev) ProcessDetection(*ev);
+}
+
+void AntiCheatEngine::PushRecoilEvent(float weapon_pitch, float weapon_yaw, float player_pitch, float player_yaw) {
+    if (!config_.enableKinematics) return;
+    std::optional<DetectionEvent> ev;
+    {
+        std::lock_guard<std::mutex> lock(input_mutex_);
+        ev = aim_analyzer_.RecordRecoilCompensation(weapon_pitch, weapon_yaw, player_pitch, player_yaw);
+    }
+    if (ev) ProcessDetection(*ev);
+}
+
 void AntiCheatEngine::ResetInput() {
     std::lock_guard<std::mutex> lock(input_mutex_);
     aim_analyzer_.Reset();

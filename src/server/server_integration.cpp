@@ -109,24 +109,19 @@ ReplicationDecision ServerEspFilter::EvaluateEntityReplication(
         return decision;
     }
 
-    // Always replicate within immediate close-quarters proximity to prevent latency pop-in
-    if (dist <= close_proximity_radius_) {
-        decision.replicate_full_transform = true;
-        return decision;
-    }
-
     bool occluded = IsLineOfSightOccluded(observer, target);
-    if (!occluded) {
-        decision.replicate_full_transform = true;
+    if (occluded) {
+        // Target is behind a solid wall/occluder. Even in close proximity, full transform
+        // must not be replicated to prevent Ring-3 wallhacks from reading player coordinates.
+        decision.culled_by_occlusion = true;
+        if (target.is_making_sound && dist <= target.sound_radius) {
+            decision.replicate_acoustic_cue_only = true;
+        }
         return decision;
     }
 
-    // Target is behind a solid wall/occluder. Check if acoustic cue applies.
-    decision.culled_by_occlusion = true;
-    if (target.is_making_sound && dist <= target.sound_radius) {
-        decision.replicate_acoustic_cue_only = true;
-    }
-
+    // Target is within line of sight
+    decision.replicate_full_transform = true;
     return decision;
 }
 

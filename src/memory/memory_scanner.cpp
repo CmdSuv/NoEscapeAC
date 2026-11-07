@@ -1353,7 +1353,8 @@ std::vector<ModuleProvenanceInfo> MemoryScanner::QueryModuleProvenance() {
         if (!isMemfdOrDeleted && path[0] == '/') {
             info.sha256_disk_hash = network::CryptoUtil::Sha256File(path);
             info.elf_build_id = ExtractElfBuildId(path);
-            info.is_signed = !info.elf_build_id.empty();
+            info.has_build_id = !info.elf_build_id.empty();
+            info.is_signed = false;
         }
 #endif
         provenance_cache_[path] = info;

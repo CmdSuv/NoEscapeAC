@@ -63,7 +63,20 @@ if os.environ.get("NOESCAPE_REF_IMAGE"):
 _seen_lock = threading.Lock()
 
 
+ED25519_KEY = None
+if os.environ.get("NOESCAPE_REF_ED25519_KEY"):
+    try:
+        from cryptography.hazmat.primitives.asymmetric import ed25519
+        raw_key = bytes.fromhex(os.environ["NOESCAPE_REF_ED25519_KEY"])
+        if len(raw_key) == 32:
+            ED25519_KEY = ed25519.Ed25519PrivateKey.from_private_bytes(raw_key)
+    except Exception:
+        pass
+
+
 def sign(msg: bytes) -> str:
+    if ED25519_KEY is not None:
+        return ED25519_KEY.sign(msg).hex()
     return hmac.new(SECRET, msg, hashlib.sha256).hexdigest()
 
 

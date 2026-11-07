@@ -1,9 +1,9 @@
 # NoEscapeAC — Comprehensive Test Strategy & Verification Harness
 
-**Version:** 7.0 / Release 1.3  
-**Total Test Count:** 133 Unit & Regression Tests (100% Passing)  
+**Version:** 7.0 / Release 2.0  
+**Total Test Count:** 145 Unit & Regression Tests (100% Passing)  
 **Preload Verification:** 6/6 Integration Tests (100% Passing)  
-**Attribution:** Omar Yiğitcan Mengü (`@CmdSuv`) & `OnlyCosmos` (`@OnlyCosmos`)
+**Attribution:** Omar Yiğitcan Mengü (`@CmdSuv`) & OnlyCosmos (`@OnlyCosmos`)
 
 ---
 
@@ -13,12 +13,13 @@ The test harness operates via a lightweight, deterministic C++20 test framework 
 
 ```
 +-----------------------------------------------------------------------------------+
-|                            NOESCAPE TEST SUITE (133 TESTS)                        |
+|                            NOESCAPE TEST SUITE (145 TESTS)                        |
 +-----------------------------------------------------------------------------------+
-|  [Core Cryptography & Obfuscation] (5 Tests)                                      |
+|  [Core Cryptography & Obfuscation] (8 Tests)                                      |
 |   - Crypto.Sha256StandardVectors, Crypto.HmacSha256StandardVectors                |
 |   - Crypto.MachineHwidGeneration, Obfuscation.CompileTimeFnv1a/XorStrings         |
-+-----------------------------------------------------------------------------------+
+|   - Crypto.Ed25519OfficialRfc8032Vectors, Crypto.Ed25519NegativeTests            |
+|   - Crypto.Ed25519KeyRotationScenario                                             |
 |  [SIMD & Pattern Scanner] (7 Tests)                                               |
 |   - ExactMatch, WildcardMatch, BoundaryCases, MultipleOccurrences                 |
 |   - LargeSimdBuffer, BatchScanning, AllWildcardsAndLeadingWildcards               |

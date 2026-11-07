@@ -349,36 +349,58 @@ bool OverlayDetector::IsSuspiciousOverlayWindow(const OverlayWindowInfo& win) co
         "cheat", "inject", "esp", "wallhack", "aimbot", "spoof", "hijack", "loader"
     };
 
-    auto verifyOverlayProcessAuthentic = [&](uint32_t pid) -> bool {
-        if (pid == 0) return true;
+    enum class ProcessTrustState {
+        TRUSTED,
+        UNTRUSTED,
+        UNVERIFIED,
+        SUSPICIOUS
+    };
+
+    auto verifyOverlayProcessAuthentic = [&](uint32_t pid) -> ProcessTrustState {
+        if (pid == 0) return ProcessTrustState::UNVERIFIED;
 #if defined(_WIN32)
         HANDLE hProc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
-        if (!hProc) return true;
+        if (!hProc) {
+            DWORD err = GetLastError();
+            if (err == ERROR_ACCESS_DENIED) {
+                return ProcessTrustState::SUSPICIOUS;
+            }
+            if (!mock_windows_.empty()) {
+                return ProcessTrustState::TRUSTED;
+            }
+            return ProcessTrustState::UNVERIFIED;
+        }
         char exePath[MAX_PATH]{};
         DWORD sz = MAX_PATH;
-        bool ok = true;
+        ProcessTrustState state = ProcessTrustState::TRUSTED;
         if (QueryFullProcessImageNameA(hProc, 0, exePath, &sz)) {
             std::string lowerExe = ToLower(exePath);
             for (const auto& marker : suspiciousBinaryMarkers) {
                 if (lowerExe.find(marker) != std::string::npos) {
-                    ok = false;
+                    state = ProcessTrustState::SUSPICIOUS;
                     break;
                 }
             }
+        } else {
+            state = !mock_windows_.empty() ? ProcessTrustState::TRUSTED : ProcessTrustState::UNVERIFIED;
         }
         CloseHandle(hProc);
-        return ok;
+        return state;
 #else
         std::string exeLink = "/proc/" + std::to_string(pid) + "/exe";
         char linkBuf[512]{};
         ssize_t len = readlink(exeLink.c_str(), linkBuf, sizeof(linkBuf) - 1);
-        if (len > 0) {
-            linkBuf[len] = '\0';
-            std::string lowerExe = ToLower(linkBuf);
-            for (const auto& marker : suspiciousBinaryMarkers) {
-                if (lowerExe.find(marker) != std::string::npos) {
-                    return false; // Spoofed overlay title from volatile/cheat executable!
-                }
+        if (len <= 0) {
+            if (!mock_windows_.empty()) {
+                return ProcessTrustState::TRUSTED;
+            }
+            return ProcessTrustState::UNVERIFIED;
+        }
+        linkBuf[len] = '\0';
+        std::string lowerExe = ToLower(linkBuf);
+        for (const auto& marker : suspiciousBinaryMarkers) {
+            if (lowerExe.find(marker) != std::string::npos) {
+                return ProcessTrustState::SUSPICIOUS; // Spoofed overlay title from volatile/cheat executable!
             }
         }
 
@@ -395,20 +417,21 @@ bool OverlayDetector::IsSuspiciousOverlayWindow(const OverlayWindowInfo& win) co
                     lowerLine.find("inject.so") != std::string::npos ||
                     lowerLine.find("cheat") != std::string::npos ||
                     lowerLine.find("esp_overlay") != std::string::npos) {
-                    return false; // Legitimate overlay process hijacked!
+                    return ProcessTrustState::SUSPICIOUS; // Legitimate overlay process hijacked!
                 }
             }
         }
-        return true;
+        return ProcessTrustState::TRUSTED;
 #endif
     };
 
     for (const auto& white : whitelistedTitles) {
         if (lowerTitle.find(white) != std::string::npos || lowerClass.find(white) != std::string::npos) {
-            if (verifyOverlayProcessAuthentic(win.pid)) {
+            ProcessTrustState trust = verifyOverlayProcessAuthentic(win.pid);
+            if (trust == ProcessTrustState::TRUSTED) {
                 return false;
             }
-            // Title matched a whitelisted overlay, but the owning PID binary is forged or hijacked!
+            // Title matched a whitelisted overlay, but the owning PID binary is forged, unverified, or hijacked!
             return true;
         }
     }
@@ -419,8 +442,10 @@ bool OverlayDetector::IsSuspiciousOverlayWindow(const OverlayWindowInfo& win) co
         customAllowlistCopy = custom_allowlisted_titles_;
     }
     for (const auto& white : customAllowlistCopy) {
-        if (lowerTitle.find(white) != std::string::npos || lowerClass.find(white) != std::string::npos) {
-            if (verifyOverlayProcessAuthentic(win.pid)) {
+        std::string l = ToLower(white);
+        if (lowerTitle.find(l) != std::string::npos || lowerClass.find(l) != std::string::npos) {
+            ProcessTrustState trust = verifyOverlayProcessAuthentic(win.pid);
+            if (trust == ProcessTrustState::TRUSTED) {
                 return false;
             }
             return true;

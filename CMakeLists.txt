@@ -64,6 +64,7 @@ set(CORE_SOURCES
     src/core/engine.cpp
     src/core/blackbox.cpp
     src/network/crypto_util.cpp
+    src/network/ed25519.cpp
     src/network/panel_client.cpp
     src/security/anti_debug_linux.cpp
     src/security/anti_debug_windows.cpp
@@ -151,6 +152,7 @@ set(TEST_SOURCES
     tests/test_signatures.cpp
     tests/test_regressions.cpp
     tests/test_server_and_correlation.cpp
+    tests/test_audit_v2_reengineering.cpp
 )
 
 add_executable(noescape_tests ${TEST_SOURCES})

@@ -286,45 +286,40 @@ std::vector<uint8_t> BlackboxDumper::SerializeAndEncrypt(
         PutString(plaintext, mod);
     }
 
-    // 2. Generate 16-byte unpredictable random IV via OS CSPRNG
-    std::vector<uint8_t> iv(16, 0);
-    network::CryptoUtil::GenerateRandomBytes(iv.data(), iv.size());
+    // 2. Generate 12-byte CSPRNG nonce and 16-byte random salt
+    std::vector<uint8_t> nonce(12, 0);
+    network::CryptoUtil::GenerateRandomBytes(nonce.data(), nonce.size());
+    std::vector<uint8_t> salt(16, 0);
+    network::CryptoUtil::GenerateRandomBytes(salt.data(), salt.size());
 
-    // 3. Keystream CTR encryption using SHA-256 blocks
-    std::string ivStr(reinterpret_cast<const char*>(iv.data()), 16);
-    std::string derivedKey = network::CryptoUtil::Sha256(secret_key + ivStr);
-
-    std::vector<uint8_t> ciphertext = plaintext;
-    size_t offset = 0;
-    uint32_t blockCounter = 0;
-
-    while (offset < ciphertext.size()) {
-        std::string blockHashHex = network::CryptoUtil::Sha256(derivedKey + ":" + std::to_string(blockCounter++));
-        std::vector<uint8_t> blockKey = HexToBytes(blockHashHex);
-
-        for (size_t b = 0; b < blockKey.size() && offset < ciphertext.size(); ++b, ++offset) {
-            ciphertext[offset] ^= blockKey[b];
-        }
+    // 3. Derive 32-byte key via HKDF-SHA256
+    std::string saltStr(reinterpret_cast<const char*>(salt.data()), salt.size());
+    std::string derivedKeyHex = network::CryptoUtil::DeriveKeyHkdf(secret_key, saltStr, "NoEscape-Blackbox-v2");
+    auto derivedKeyBytes = network::CryptoUtil::FromHex(derivedKeyHex);
+    if (derivedKeyBytes.size() < 32) {
+        derivedKeyBytes.resize(32, 0);
     }
 
-    // 4. Compute HMAC tag over (IV + ciphertext)
-    std::string signPayload = ivStr;
-    signPayload.append(reinterpret_cast<const char*>(ciphertext.data()), ciphertext.size());
-    std::string hmacTag = network::CryptoUtil::HmacSha256(secret_key, signPayload);
+    // 4. Construct AAD: Magic ("NEBB") + Version (2) + Nonce (12) + Salt (16)
+    std::vector<uint8_t> aad = {'N', 'E', 'B', 'B'};
+    PutU16(aad, 2);
+    aad.insert(aad.end(), nonce.begin(), nonce.end());
+    aad.insert(aad.end(), salt.begin(), salt.end());
 
-    // 5. Build final packet:
-    // [Magic: 4B "NEBB"] [Version: 2B (1)] [IV: 16B] [CipherLen: 4B] [Ciphertext: N] [HMAC Tag: 64B hex]
-    std::vector<uint8_t> packet;
-    packet.push_back('N');
-    packet.push_back('E');
-    packet.push_back('B');
-    packet.push_back('B');
+    // 5. Encrypt with RFC 8439 ChaCha20-Poly1305 AEAD
+    std::vector<uint8_t> ciphertext;
+    uint8_t tag[16]{};
+    if (!network::CryptoUtil::AeadChaCha20Poly1305Encrypt(
+            plaintext, aad, derivedKeyBytes.data(), nonce.data(), ciphertext, tag)) {
+        return {};
+    }
 
-    PutU16(packet, 1); // version
-    packet.insert(packet.end(), iv.begin(), iv.end());
+    // 6. Build final packet:
+    // [Magic: 4B "NEBB"] [Version: 2B (2)] [Nonce: 12B] [Salt: 16B] [Tag: 16B] [CipherLen: 4B] [Ciphertext: N]
+    std::vector<uint8_t> packet = aad; // Magic (4) + Version (2) + Nonce (12) + Salt (16)
+    packet.insert(packet.end(), tag, tag + 16);
     PutU32(packet, static_cast<uint32_t>(ciphertext.size()));
     packet.insert(packet.end(), ciphertext.begin(), ciphertext.end());
-    packet.insert(packet.end(), hmacTag.begin(), hmacTag.end());
 
     return packet;
 }
@@ -334,9 +329,8 @@ bool BlackboxDumper::DecryptAndDeserialize(
     const std::string& secret_key,
     BlackboxRecord& out_record
 ) {
-    // Header checks: 4 (Magic) + 2 (Version) + 16 (IV) + 4 (CipherLen) + 64 (HMAC) = 90 bytes minimum
-    constexpr size_t kMinHeader = 4 + 2 + 16 + 4 + 64;
-    if (encrypted_data.size() < kMinHeader) {
+    // Header checks: Version 2 requires at least 4 + 2 + 12 + 16 + 16 + 4 = 54 bytes
+    if (encrypted_data.size() < 54) {
         return false;
     }
 
@@ -349,50 +343,84 @@ bool BlackboxDumper::DecryptAndDeserialize(
     size_t remain = encrypted_data.size() - 4;
 
     uint16_t version = 0;
-    if (!GetU16(ptr, remain, version) || version != 1) {
+    if (!GetU16(ptr, remain, version)) {
         return false;
     }
 
-    if (remain < 16 + 4 + 64) return false;
-    std::vector<uint8_t> iv(ptr, ptr + 16);
-    ptr += 16; remain -= 16;
+    std::vector<uint8_t> plaintext;
 
-    uint32_t cipherLen = 0;
-    if (!GetU32(ptr, remain, cipherLen)) return false;
+    if (version == 2) {
+        // Version 2: RFC 8439 ChaCha20-Poly1305 AEAD
+        if (remain < 12 + 16 + 16 + 4) return false;
+        std::vector<uint8_t> nonce(ptr, ptr + 12);
+        ptr += 12; remain -= 12;
+        std::vector<uint8_t> salt(ptr, ptr + 16);
+        ptr += 16; remain -= 16;
+        uint8_t tag[16]{};
+        std::memcpy(tag, ptr, 16);
+        ptr += 16; remain -= 16;
 
-    // widen before adding: a uint32 sum wraps for cipherLen close to 4 GiB
-    if (remain < static_cast<size_t>(cipherLen) + 64) return false;
-    std::vector<uint8_t> ciphertext(ptr, ptr + cipherLen);
-    ptr += cipherLen; remain -= cipherLen;
+        uint32_t cipherLen = 0;
+        if (!GetU32(ptr, remain, cipherLen)) return false;
+        if (remain < static_cast<size_t>(cipherLen)) return false;
+        std::vector<uint8_t> ciphertext(ptr, ptr + cipherLen);
 
-    std::string providedTag(reinterpret_cast<const char*>(ptr), 64);
-    ptr += 64; remain -= 64;
+        std::string saltStr(reinterpret_cast<const char*>(salt.data()), salt.size());
+        std::string derivedKeyHex = network::CryptoUtil::DeriveKeyHkdf(secret_key, saltStr, "NoEscape-Blackbox-v2");
+        auto derivedKeyBytes = network::CryptoUtil::FromHex(derivedKeyHex);
+        if (derivedKeyBytes.size() < 32) derivedKeyBytes.resize(32, 0);
 
-    // Verify HMAC-SHA256 signature
-    std::string signPayload(reinterpret_cast<const char*>(iv.data()), 16);
-    signPayload.append(reinterpret_cast<const char*>(ciphertext.data()), ciphertext.size());
-    std::string expectedTag = network::CryptoUtil::HmacSha256(secret_key, signPayload);
+        std::vector<uint8_t> aad = {'N', 'E', 'B', 'B'};
+        PutU16(aad, 2);
+        aad.insert(aad.end(), nonce.begin(), nonce.end());
+        aad.insert(aad.end(), salt.begin(), salt.end());
 
-    if (!network::CryptoUtil::ConstantTimeEquals(providedTag, expectedTag)) {
-        Logger::Instance().Error("Blackbox decryption failed: HMAC signature mismatch (Tampered or Wrong Key)");
-        return false;
-    }
-
-    // Decrypt ciphertext using stream keystream
-    std::string ivStr(reinterpret_cast<const char*>(iv.data()), 16);
-    std::string derivedKey = network::CryptoUtil::Sha256(secret_key + ivStr);
-
-    std::vector<uint8_t> plaintext = ciphertext;
-    size_t offset = 0;
-    uint32_t blockCounter = 0;
-
-    while (offset < plaintext.size()) {
-        std::string blockHashHex = network::CryptoUtil::Sha256(derivedKey + ":" + std::to_string(blockCounter++));
-        std::vector<uint8_t> blockKey = HexToBytes(blockHashHex);
-
-        for (size_t b = 0; b < blockKey.size() && offset < plaintext.size(); ++b, ++offset) {
-            plaintext[offset] ^= blockKey[b];
+        if (!network::CryptoUtil::AeadChaCha20Poly1305Decrypt(
+                ciphertext, aad, tag, derivedKeyBytes.data(), nonce.data(), plaintext)) {
+            Logger::Instance().Error("Blackbox decryption failed: AEAD Poly1305 authentication tag mismatch");
+            return false;
         }
+    } else if (version == 1) {
+        // Version 1: Legacy SHA256 keystream + HMAC
+        if (remain < 16 + 4 + 64) return false;
+        std::vector<uint8_t> iv(ptr, ptr + 16);
+        ptr += 16; remain -= 16;
+
+        uint32_t cipherLen = 0;
+        if (!GetU32(ptr, remain, cipherLen)) return false;
+        if (remain < static_cast<size_t>(cipherLen) + 64) return false;
+        std::vector<uint8_t> ciphertext(ptr, ptr + cipherLen);
+        ptr += cipherLen; remain -= cipherLen;
+
+        std::string providedTag(reinterpret_cast<const char*>(ptr), 64);
+        ptr += 64; remain -= 64;
+
+        std::string signPayload(reinterpret_cast<const char*>(iv.data()), 16);
+        signPayload.append(reinterpret_cast<const char*>(ciphertext.data()), ciphertext.size());
+        std::string expectedTag = network::CryptoUtil::HmacSha256(secret_key, signPayload);
+
+        if (!network::CryptoUtil::ConstantTimeEquals(providedTag, expectedTag)) {
+            Logger::Instance().Error("Blackbox decryption failed: HMAC signature mismatch (Tampered or Wrong Key)");
+            return false;
+        }
+
+        std::string ivStr(reinterpret_cast<const char*>(iv.data()), 16);
+        std::string derivedKey = network::CryptoUtil::Sha256(secret_key + ivStr);
+
+        plaintext = ciphertext;
+        size_t offset = 0;
+        uint32_t blockCounter = 0;
+
+        while (offset < plaintext.size()) {
+            std::string blockHashHex = network::CryptoUtil::Sha256(derivedKey + ":" + std::to_string(blockCounter++));
+            std::vector<uint8_t> blockKey = HexToBytes(blockHashHex);
+
+            for (size_t b = 0; b < blockKey.size() && offset < plaintext.size(); ++b, ++offset) {
+                plaintext[offset] ^= blockKey[b];
+            }
+        }
+    } else {
+        return false;
     }
 
     // Deserialize plaintext fields

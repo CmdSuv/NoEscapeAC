@@ -1,4 +1,5 @@
 #include "noescape/network/crypto_util.hpp"
+#include "noescape/network/ed25519.hpp"
 #include "noescape/core/obfuscation.hpp"
 #include <cstring>
 #include <sstream>
@@ -368,17 +369,23 @@ CryptoUtil::AsymmetricKeyPair CryptoUtil::GenerateAsymmetricKeyPair() {
         return kp;
     }
 #endif
-    // Portable fallback when OpenSSL Ed25519 is unavailable
-    kp.private_key_hex = GenerateRandomHex(32);
-    kp.public_key_hex = DeriveKeyHkdf(kp.private_key_hex, "NoEscape-Asym-Salt-v1", "Ed25519-Fallback-Public");
+    // Genuine RFC 8032 Ed25519 portable provider
+    uint8_t seed[32]{};
+    GenerateRandomBytes(seed, sizeof(seed));
+    uint8_t pubKey[32]{};
+    uint8_t privKey[64]{};
+    if (ed25519::CreateKeyPair(seed, pubKey, privKey)) {
+        kp.private_key_hex = ToHex(seed, 32);
+        kp.public_key_hex = ToHex(pubKey, 32);
+    }
     return kp;
 }
 
 std::string CryptoUtil::SignAsymmetric(const std::string& private_key_hex, const std::string& message) {
     auto privBytes = FromHex(private_key_hex);
-    if (privBytes.size() != 32) return "";
+    if (privBytes.size() != 32 && privBytes.size() != 64) return "";
 #if defined(NOESCAPE_HAS_OPENSSL)
-    EVP_PKEY* pkey = EVP_PKEY_new_raw_private_key(EVP_PKEY_ED25519, nullptr, privBytes.data(), privBytes.size());
+    EVP_PKEY* pkey = EVP_PKEY_new_raw_private_key(EVP_PKEY_ED25519, nullptr, privBytes.data(), 32);
     if (pkey) {
         EVP_MD_CTX* mctx = EVP_MD_CTX_new();
         std::string sigHex;
@@ -396,10 +403,13 @@ std::string CryptoUtil::SignAsymmetric(const std::string& private_key_hex, const
         if (!sigHex.empty()) return sigHex;
     }
 #endif
-    std::string pubHex = DeriveKeyHkdf(private_key_hex, "NoEscape-Asym-Salt-v1", "Ed25519-Fallback-Public");
-    std::string p1 = HmacSha256(pubHex, "SIG-A:" + message);
-    std::string p2 = HmacSha256(pubHex, "SIG-B:" + message);
-    return p1 + p2;
+    // Genuine RFC 8032 Ed25519 portable provider
+    uint8_t sig[64]{};
+    if (ed25519::Sign(privBytes.data(), privBytes.size(),
+                      reinterpret_cast<const uint8_t*>(message.data()), message.size(), sig)) {
+        return ToHex(sig, 64);
+    }
+    return "";
 }
 
 bool CryptoUtil::VerifyAsymmetric(
@@ -424,12 +434,147 @@ bool CryptoUtil::VerifyAsymmetric(
             EVP_MD_CTX_free(mctx);
         }
         EVP_PKEY_free(pkey);
-        return ok;
+        if (ok) return true;
     }
 #endif
-    std::string expected = HmacSha256(public_key_hex, "SIG-A:" + message) +
-                           HmacSha256(public_key_hex, "SIG-B:" + message);
-    return ConstantTimeEquals(expected, signature_hex);
+    // Genuine RFC 8032 Ed25519 portable provider
+    return ed25519::Verify(pubBytes.data(),
+                           reinterpret_cast<const uint8_t*>(message.data()), message.size(),
+                           sigBytes.data());
+}
+
+bool CryptoUtil::AeadChaCha20Poly1305Encrypt(
+    const std::vector<uint8_t>& plaintext,
+    const std::vector<uint8_t>& aad,
+    const uint8_t key[32],
+    const uint8_t nonce[12],
+    std::vector<uint8_t>& out_ciphertext,
+    uint8_t out_tag[16]
+) {
+#if defined(NOESCAPE_HAS_OPENSSL)
+    EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
+    if (!ctx) return false;
+    int len = 0;
+    if (EVP_EncryptInit_ex(ctx, EVP_chacha20_poly1305(), nullptr, nullptr, nullptr) != 1 ||
+        EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_AEAD_SET_IVLEN, 12, nullptr) != 1 ||
+        EVP_EncryptInit_ex(ctx, nullptr, nullptr, key, nonce) != 1) {
+        EVP_CIPHER_CTX_free(ctx);
+        return false;
+    }
+    if (!aad.empty()) {
+        if (EVP_EncryptUpdate(ctx, nullptr, &len, aad.data(), static_cast<int>(aad.size())) != 1) {
+            EVP_CIPHER_CTX_free(ctx);
+            return false;
+        }
+    }
+    out_ciphertext.resize(plaintext.size());
+    if (!plaintext.empty()) {
+        if (EVP_EncryptUpdate(ctx, out_ciphertext.data(), &len, plaintext.data(), static_cast<int>(plaintext.size())) != 1) {
+            EVP_CIPHER_CTX_free(ctx);
+            return false;
+        }
+    }
+    int finalLen = 0;
+    if (EVP_EncryptFinal_ex(ctx, out_ciphertext.data() + len, &finalLen) != 1 ||
+        EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_AEAD_GET_TAG, 16, out_tag) != 1) {
+        EVP_CIPHER_CTX_free(ctx);
+        return false;
+    }
+    EVP_CIPHER_CTX_free(ctx);
+    return true;
+#else
+    std::string encKey = DeriveKeyHkdf(std::string(reinterpret_cast<const char*>(key), 32),
+                                       std::string(reinterpret_cast<const char*>(nonce), 12),
+                                       "ChaCha20-Poly1305-Fallback-Enc");
+    std::string macKey = DeriveKeyHkdf(std::string(reinterpret_cast<const char*>(key), 32),
+                                       std::string(reinterpret_cast<const char*>(nonce), 12),
+                                       "ChaCha20-Poly1305-Fallback-Mac");
+    out_ciphertext = plaintext;
+    size_t offset = 0;
+    uint32_t counter = 0;
+    while (offset < out_ciphertext.size()) {
+        std::string block = Sha256(encKey + ":" + std::to_string(counter++));
+        auto blockBytes = FromHex(block);
+        for (size_t i = 0; i < blockBytes.size() && offset < out_ciphertext.size(); ++i, ++offset) {
+            out_ciphertext[offset] ^= blockBytes[i];
+        }
+    }
+    std::string macPayload(reinterpret_cast<const char*>(aad.data()), aad.size());
+    macPayload.append(reinterpret_cast<const char*>(nonce), 12);
+    macPayload.append(reinterpret_cast<const char*>(out_ciphertext.data()), out_ciphertext.size());
+    std::string fullTagHex = HmacSha256(macKey, macPayload);
+    auto tagBytes = FromHex(fullTagHex);
+    std::memcpy(out_tag, tagBytes.data(), 16);
+    return true;
+#endif
+}
+
+bool CryptoUtil::AeadChaCha20Poly1305Decrypt(
+    const std::vector<uint8_t>& ciphertext,
+    const std::vector<uint8_t>& aad,
+    const uint8_t tag[16],
+    const uint8_t key[32],
+    const uint8_t nonce[12],
+    std::vector<uint8_t>& out_plaintext
+) {
+#if defined(NOESCAPE_HAS_OPENSSL)
+    EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
+    if (!ctx) return false;
+    int len = 0;
+    if (EVP_DecryptInit_ex(ctx, EVP_chacha20_poly1305(), nullptr, nullptr, nullptr) != 1 ||
+        EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_AEAD_SET_IVLEN, 12, nullptr) != 1 ||
+        EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_AEAD_SET_TAG, 16, const_cast<uint8_t*>(tag)) != 1 ||
+        EVP_DecryptInit_ex(ctx, nullptr, nullptr, key, nonce) != 1) {
+        EVP_CIPHER_CTX_free(ctx);
+        return false;
+    }
+    if (!aad.empty()) {
+        if (EVP_DecryptUpdate(ctx, nullptr, &len, aad.data(), static_cast<int>(aad.size())) != 1) {
+            EVP_CIPHER_CTX_free(ctx);
+            return false;
+        }
+    }
+    out_plaintext.resize(ciphertext.size());
+    if (!ciphertext.empty()) {
+        if (EVP_DecryptUpdate(ctx, out_plaintext.data(), &len, ciphertext.data(), static_cast<int>(ciphertext.size())) != 1) {
+            EVP_CIPHER_CTX_free(ctx);
+            return false;
+        }
+    }
+    int finalLen = 0;
+    if (EVP_DecryptFinal_ex(ctx, out_plaintext.data() + len, &finalLen) != 1) {
+        EVP_CIPHER_CTX_free(ctx);
+        return false;
+    }
+    EVP_CIPHER_CTX_free(ctx);
+    return true;
+#else
+    std::string encKey = DeriveKeyHkdf(std::string(reinterpret_cast<const char*>(key), 32),
+                                       std::string(reinterpret_cast<const char*>(nonce), 12),
+                                       "ChaCha20-Poly1305-Fallback-Enc");
+    std::string macKey = DeriveKeyHkdf(std::string(reinterpret_cast<const char*>(key), 32),
+                                       std::string(reinterpret_cast<const char*>(nonce), 12),
+                                       "ChaCha20-Poly1305-Fallback-Mac");
+    std::string macPayload(reinterpret_cast<const char*>(aad.data()), aad.size());
+    macPayload.append(reinterpret_cast<const char*>(nonce), 12);
+    macPayload.append(reinterpret_cast<const char*>(ciphertext.data()), ciphertext.size());
+    std::string expectedTagHex = HmacSha256(macKey, macPayload);
+    auto expectedTagBytes = FromHex(expectedTagHex);
+    if (!ConstantTimeEquals(ToHex(tag, 16), ToHex(expectedTagBytes.data(), 16))) {
+        return false;
+    }
+    out_plaintext = ciphertext;
+    size_t offset = 0;
+    uint32_t counter = 0;
+    while (offset < out_plaintext.size()) {
+        std::string block = Sha256(encKey + ":" + std::to_string(counter++));
+        auto blockBytes = FromHex(block);
+        for (size_t i = 0; i < blockBytes.size() && offset < out_plaintext.size(); ++i, ++offset) {
+            out_plaintext[offset] ^= blockBytes[i];
+        }
+    }
+    return true;
+#endif
 }
 
 bool CryptoUtil::IsVersionAtLeast(const std::string& actual_version, const std::string& minimum_required) {

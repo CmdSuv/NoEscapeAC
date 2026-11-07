@@ -20,6 +20,23 @@
 extern "C" {
 #endif
 
+// Profile presets for multi-tier deployment
+typedef enum NoEscapeProfile {
+    NOESCAPE_PROFILE_DEVELOPMENT = 0,
+    NOESCAPE_PROFILE_TESTING = 1,
+    NOESCAPE_PROFILE_SHADOW_PRODUCTION = 2,
+    NOESCAPE_PROFILE_PRODUCTION = 3,
+    NOESCAPE_PROFILE_OFFLINE_DIAGNOSTICS = 4
+} NoEscapeProfile;
+
+typedef enum NoEscapeEnforcementMode {
+    NOESCAPE_ENFORCEMENT_REPORT_ONLY = 0,
+    NOESCAPE_ENFORCEMENT_SHADOW = 1,
+    NOESCAPE_ENFORCEMENT_MATCH_RESTRICTION = 2,
+    NOESCAPE_ENFORCEMENT_SERVER_SESSION_REJECT = 3,
+    NOESCAPE_ENFORCEMENT_ENFORCE = 4
+} NoEscapeEnforcementMode;
+
 // Callback signature for violation notifications
 typedef void (*NoEscapeViolationCallback)(int violation_type, int score, const char* details);
 
@@ -44,10 +61,23 @@ typedef struct NoEscapeConfig {
     bool terminate_on_ban;
     bool show_ban_ui;
     const char* ban_ui_path;
+
+    // Extended v2.0 fields
+    uint32_t struct_size;
+    uint32_t config_version;
+    const char* server_public_key;
+    const char* key_id;
+    const char* client_build_version;
+    int enforcement_mode;
+    bool require_multi_signal_corroboration;
+    uint64_t memory_scan_budget_ms;
 } NoEscapeConfig;
 
 // Returns the default recommended anti-cheat configuration
 NOESCAPE_API NoEscapeConfig NoEscape_GetDefaultConfig(void);
+
+// Returns the configuration corresponding to a specific architectural profile
+NOESCAPE_API NoEscapeConfig NoEscape_GetProfileConfig(NoEscapeProfile profile);
 
 // Initializes the anti-cheat engine. Pass NULL to use defaults. Returns 0 on success.
 NOESCAPE_API int NoEscape_Init(const NoEscapeConfig* config);
@@ -66,6 +96,18 @@ NOESCAPE_API void NoEscape_Tick(void);
 
 // Feeds mouse/view angle motion delta into the kinematics aimbot detector
 NOESCAPE_API void NoEscape_PushMouseEvent(float delta_yaw, float delta_pitch, uint64_t timestamp_ms);
+
+// Feeds raw mouse input timing & deltas for HID macro and quantization analysis
+NOESCAPE_API void NoEscape_PushRawInput(uint64_t interval_us, int32_t dx, int32_t dy);
+
+// Feeds crosshair target acquisition timestamp for triggerbot reaction timing
+NOESCAPE_API void NoEscape_RecordTargetAcquire(uint64_t timestamp_ms);
+
+// Feeds weapon fire timestamp for triggerbot evaluation
+NOESCAPE_API void NoEscape_PushWeaponFire(uint64_t timestamp_ms);
+
+// Feeds recoil compensation observation (weapon kick vs player counter-movement)
+NOESCAPE_API void NoEscape_PushRecoilEvent(float weapon_pitch, float weapon_yaw, float player_pitch, float player_yaw);
 
 // Resets accumulated mouse delta orientation and kinematics history (e.g. teleport/respawn)
 NOESCAPE_API void NoEscape_ResetInput(void);
@@ -165,6 +207,26 @@ public:
 
     static void UpdatePhantom(uint32_t id, float x, float y, float z) {
         NoEscape_UpdatePhantom(id, x, y, z);
+    }
+
+    static NoEscapeConfig GetProfileConfig(NoEscapeProfile profile) {
+        return NoEscape_GetProfileConfig(profile);
+    }
+
+    static void PushRawInput(uint64_t interval_us, int32_t dx, int32_t dy) {
+        NoEscape_PushRawInput(interval_us, dx, dy);
+    }
+
+    static void RecordTargetAcquire(uint64_t timestamp_ms) {
+        NoEscape_RecordTargetAcquire(timestamp_ms);
+    }
+
+    static void PushWeaponFire(uint64_t timestamp_ms) {
+        NoEscape_PushWeaponFire(timestamp_ms);
+    }
+
+    static void PushRecoilEvent(float weapon_pitch, float weapon_yaw, float player_pitch, float player_yaw) {
+        NoEscape_PushRecoilEvent(weapon_pitch, weapon_yaw, player_pitch, player_yaw);
     }
 
     static void PushView(float x, float y, float z, float pitch, float yaw, uint64_t timestamp_ms) {

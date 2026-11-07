@@ -53,6 +53,26 @@ public:
         const std::string& signature_hex
     );
 
+    // RFC 8439 ChaCha20-Poly1305 AEAD authenticated encryption & decryption
+    // key: 32 bytes, nonce: 12 bytes, tag: 16 bytes
+    static bool AeadChaCha20Poly1305Encrypt(
+        const std::vector<uint8_t>& plaintext,
+        const std::vector<uint8_t>& aad,
+        const uint8_t key[32],
+        const uint8_t nonce[12],
+        std::vector<uint8_t>& out_ciphertext,
+        uint8_t out_tag[16]
+    );
+
+    static bool AeadChaCha20Poly1305Decrypt(
+        const std::vector<uint8_t>& ciphertext,
+        const std::vector<uint8_t>& aad,
+        const uint8_t tag[16],
+        const uint8_t key[32],
+        const uint8_t nonce[12],
+        std::vector<uint8_t>& out_plaintext
+    );
+
     // Semantic version check for anti-rollback protection (returns true if actual >= minimum_required)
     static bool IsVersionAtLeast(const std::string& actual_version, const std::string& minimum_required);
 };

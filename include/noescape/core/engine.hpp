@@ -46,6 +46,18 @@ public:
     // Feed an input sample into kinematics aim analyzer
     void PushInputSample(float pitch, float yaw, uint64_t timestamp_ms);
 
+    // Feed raw mouse input timing & deltas for HID macro and quantization analysis
+    void PushRawInput(uint64_t interval_us, int32_t dx, int32_t dy);
+
+    // Feed crosshair target acquisition timestamp for triggerbot reaction timing
+    void RecordTargetAcquire(uint64_t timestamp_ms);
+
+    // Feed weapon fire timestamp for triggerbot evaluation
+    void PushWeaponFire(uint64_t timestamp_ms);
+
+    // Feed recoil compensation observation (weapon kick vs player counter-movement)
+    void PushRecoilEvent(float weapon_pitch, float weapon_yaw, float player_pitch, float player_yaw);
+
     // Process a newly triggered detection event
     void ProcessDetection(const DetectionEvent& event);
 

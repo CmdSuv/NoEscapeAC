@@ -43,6 +43,7 @@ struct ModuleProvenanceInfo {
     size_t executable_size{0};
     std::string sha256_disk_hash;
     std::string elf_build_id;
+    bool has_build_id{false};
     bool is_signed{false};
     bool is_suspicious_origin{false};
 };

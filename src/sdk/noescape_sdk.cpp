@@ -40,8 +40,60 @@ float g_accum_yaw = 0.0f;
 
 extern "C" {
 
+NoEscapeConfig NoEscape_GetProfileConfig(NoEscapeProfile profile) {
+    NoEscapeConfig cfg{};
+    cfg.struct_size = sizeof(NoEscapeConfig);
+    cfg.config_version = 2;
+
+    noescape::core::ConfigurationProfile coreProfile;
+    switch (profile) {
+        case NOESCAPE_PROFILE_DEVELOPMENT: coreProfile = noescape::core::ConfigurationProfile::DEVELOPMENT; break;
+        case NOESCAPE_PROFILE_TESTING: coreProfile = noescape::core::ConfigurationProfile::TESTING; break;
+        case NOESCAPE_PROFILE_SHADOW_PRODUCTION: coreProfile = noescape::core::ConfigurationProfile::SHADOW_PRODUCTION; break;
+        case NOESCAPE_PROFILE_PRODUCTION: coreProfile = noescape::core::ConfigurationProfile::PRODUCTION; break;
+        case NOESCAPE_PROFILE_OFFLINE_DIAGNOSTICS: coreProfile = noescape::core::ConfigurationProfile::OFFLINE_DIAGNOSTICS; break;
+        default: coreProfile = noescape::core::ConfigurationProfile::DEVELOPMENT; break;
+    }
+
+    auto coreCfg = noescape::core::EngineConfig::FromProfile(coreProfile);
+    static const std::string s_panel_url = "http://127.0.0.1:8080/api/ac";
+    static const std::string s_secret_key = "NoEscape_Secret_Key_v2.0";
+    static const std::string s_key_id = "default-v1";
+    static const std::string s_client_version = "7.0.13";
+
+    cfg.panel_url = coreCfg.panelUrl.empty() ? nullptr : s_panel_url.c_str();
+    cfg.secret_key = coreCfg.secretKey.empty() ? nullptr : s_secret_key.c_str();
+    cfg.key_id = s_key_id.c_str();
+    cfg.client_build_version = s_client_version.c_str();
+    cfg.server_public_key = nullptr;
+    cfg.blackbox_dump_dir = coreCfg.blackboxDumpDirectory.empty() ? nullptr : "/tmp";
+    cfg.ban_threshold = coreCfg.banScoreThreshold;
+    cfg.enforce_ban = coreCfg.enforceBanOnViolation;
+    cfg.enforcement_mode = static_cast<int>(coreCfg.enforcementMode);
+    cfg.require_multi_signal_corroboration = coreCfg.requireMultiSignalCorroboration;
+    cfg.memory_scan_budget_ms = coreCfg.memoryScanBudgetMs;
+    cfg.enable_anti_debug = coreCfg.enableAntiDebug;
+    cfg.enable_integrity_scan = coreCfg.enableIntegrityScan;
+    cfg.enable_speedhack_detection = coreCfg.enableSpeedhackDetection;
+    cfg.enable_memory_scan = coreCfg.enableMemoryScan;
+    cfg.enable_unhooker = coreCfg.enableUnhooker;
+    cfg.enable_forensics = coreCfg.enableForensics;
+    cfg.enable_dma_detection = coreCfg.enableDmaDetection;
+    cfg.enable_kinematics = coreCfg.enableKinematics;
+    cfg.enable_overlay_detection = coreCfg.enableOverlayDetection;
+    cfg.enable_blackbox_dump = coreCfg.enableBlackboxDump;
+    cfg.enable_heartbeat = coreCfg.enableHeartbeat;
+    cfg.terminate_on_ban = coreCfg.terminateProcessOnBan;
+    cfg.show_ban_ui = coreCfg.showBanUi;
+    cfg.ban_ui_path = nullptr;
+
+    return cfg;
+}
+
 NoEscapeConfig NoEscape_GetDefaultConfig(void) {
     NoEscapeConfig cfg{};
+    cfg.struct_size = sizeof(NoEscapeConfig);
+    cfg.config_version = 2;
     cfg.panel_url = "http://127.0.0.1:8080/api/ac";
     cfg.secret_key = "NoEscape_Secret_Key_v2.0";
     cfg.blackbox_dump_dir = nullptr;
@@ -61,6 +113,13 @@ NoEscapeConfig NoEscape_GetDefaultConfig(void) {
     cfg.terminate_on_ban = false;
     cfg.show_ban_ui = true;
     cfg.ban_ui_path = nullptr;
+
+    cfg.server_public_key = nullptr;
+    cfg.key_id = "default-v1";
+    cfg.client_build_version = "7.0.13";
+    cfg.enforcement_mode = static_cast<int>(noescape::core::EnforcementMode::ENFORCE);
+    cfg.require_multi_signal_corroboration = false;
+    cfg.memory_scan_budget_ms = 25;
     return cfg;
 }
 
@@ -101,6 +160,15 @@ int NoEscape_Init(const NoEscapeConfig* config) {
         engineCfg.terminateProcessOnBan = config->terminate_on_ban;
         engineCfg.showBanUi = config->show_ban_ui;
         if (config->ban_ui_path) engineCfg.banUiExecutable = config->ban_ui_path;
+
+        if (config->struct_size >= sizeof(NoEscapeConfig)) {
+            if (config->server_public_key) engineCfg.serverPublicKey = config->server_public_key;
+            if (config->key_id) engineCfg.keyId = config->key_id;
+            if (config->client_build_version) engineCfg.clientBuildVersion = config->client_build_version;
+            engineCfg.enforcementMode = static_cast<noescape::core::EnforcementMode>(config->enforcement_mode);
+            engineCfg.requireMultiSignalCorroboration = config->require_multi_signal_corroboration;
+            if (config->memory_scan_budget_ms > 0) engineCfg.memoryScanBudgetMs = config->memory_scan_budget_ms;
+        }
     } else {
         engineCfg.enableHeartbeat = false;
     }
@@ -195,6 +263,26 @@ void NoEscape_PushMouseEvent(float delta_yaw, float delta_pitch, uint64_t timest
 
     // Pass sample into the engine's internal synchronized input queue without holding SDK mutex
     engine->PushInputSample(p, y, timestamp_ms);
+}
+
+void NoEscape_PushRawInput(uint64_t interval_us, int32_t dx, int32_t dy) {
+    auto engine = ActiveEngine();
+    if (engine) engine->PushRawInput(interval_us, dx, dy);
+}
+
+void NoEscape_RecordTargetAcquire(uint64_t timestamp_ms) {
+    auto engine = ActiveEngine();
+    if (engine) engine->RecordTargetAcquire(timestamp_ms);
+}
+
+void NoEscape_PushWeaponFire(uint64_t timestamp_ms) {
+    auto engine = ActiveEngine();
+    if (engine) engine->PushWeaponFire(timestamp_ms);
+}
+
+void NoEscape_PushRecoilEvent(float weapon_pitch, float weapon_yaw, float player_pitch, float player_yaw) {
+    auto engine = ActiveEngine();
+    if (engine) engine->PushRecoilEvent(weapon_pitch, weapon_yaw, player_pitch, player_yaw);
 }
 
 void NoEscape_ResetInput(void) {
