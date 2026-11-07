@@ -46,8 +46,8 @@ private:
     bool tracking_supported_{false};
     // Opened once at Initialize(): after PR_SET_DUMPABLE=0 (AntiDebug::HideCurrentThread)
     // /proc/self/* can no longer be opened by an unprivileged process.
-    int pagemap_fd_{-1};
-    int clear_refs_fd_{-1};
+    [[maybe_unused]] int pagemap_fd_{-1};
+    [[maybe_unused]] int clear_refs_fd_{-1};
 };
 
 } // namespace noescape::memory

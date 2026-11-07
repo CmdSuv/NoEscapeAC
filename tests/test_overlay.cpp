@@ -102,9 +102,8 @@ TEST(Overlay, SwapchainPointerInspectionUnbackedAddress) {
 }
 
 TEST(Overlay, SwapchainInlineHookDetection) {
-    auto& detector = OverlayDetector::Instance();
-
 #if !defined(_WIN32)
+    auto& detector = OverlayDetector::Instance();
     // Create an executable page with an inline hook stub (e.g. 0xE9 JMP rel32)
     long pageSize = sysconf(_SC_PAGESIZE);
     if (pageSize <= 0) pageSize = 4096;

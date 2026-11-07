@@ -473,10 +473,10 @@ TEST(Hardening, MemoryScannerCacheSnapshot) {
 }
 
 TEST(Hardening, LargeMemoryChunkingScanAbove32MB) {
+#if !defined(_WIN32)
     auto& scanner = memory::MemoryScanner::Instance();
     // Allocate 36 MB of anonymous executable memory (>32MB threshold previously skipped)
     size_t allocSize = 36 * 1024 * 1024;
-#if !defined(_WIN32)
     uint8_t* mem = static_cast<uint8_t*>(mmap(nullptr, allocSize, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
     ASSERT_TRUE(mem != MAP_FAILED);
 

@@ -274,7 +274,7 @@ std::vector<OverlayWindowInfo> OverlayDetector::EnumerateTopLevelWindows() {
             static const std::vector<std::string> whitelistedTools = {
                 "picom", "compton", "kwin", "mutter", "sway", "waybar",
                 "wf-shell", "mangohud", "vkbasalt", "obs-vkcapture", "obs",
-                "steam", "discord", "gamescope", "xwayland", "gnome-shell",
+                "steam", "gameoverlayui", "discord", "gamescope", "xwayland", "gnome-shell",
                 "plasmashell", "xfwm4", "marco", "compiz"
             };
 
