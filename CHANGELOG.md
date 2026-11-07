@@ -4,7 +4,7 @@ All notable technical changes to the NoEscape Anti-Cheat system are documented i
 
 ---
 
-## [Release 2.0.0] — 2026-11-07 (Ultimate Ring-3 Anti-Cheat Architecture Reengineering)
+## [Release 1.4.0 / Architecture v2.0] — 2026-11-07 (Ultimate Ring-3 Anti-Cheat Architecture Reengineering)
 
 ### Added
 - **RFC 8032 Pure Ed25519 Implementation (`ed25519.hpp`, `ed25519.cpp`):**
