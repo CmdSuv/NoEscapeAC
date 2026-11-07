@@ -680,6 +680,7 @@ void AntiCheatEngine::BackgroundLoop() {
 }
 
 void AntiCheatEngine::UpdateAuditHeartbeat() {
+    std::lock_guard<std::mutex> lock(heartbeat_mutex_);
     if (!freeze_background_loop_for_testing_.load(std::memory_order_acquire)) {
         last_audit_heartbeat_ms_.store(GetSteadyNowMs(), std::memory_order_release);
     }
@@ -689,8 +690,11 @@ void AntiCheatEngine::WatchdogLoop() {
     while (running_.load(std::memory_order_acquire)) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
         if (!running_.load(std::memory_order_acquire)) break;
-        if (!freeze_watchdog_for_testing_.load(std::memory_order_acquire)) {
-            watchdog_heartbeat_ms_.store(GetSteadyNowMs(), std::memory_order_release);
+        {
+            std::lock_guard<std::mutex> lock(heartbeat_mutex_);
+            if (!freeze_watchdog_for_testing_.load(std::memory_order_acquire)) {
+                watchdog_heartbeat_ms_.store(GetSteadyNowMs(), std::memory_order_release);
+            }
         }
         if (is_banned_.load(std::memory_order_acquire)) break;
 

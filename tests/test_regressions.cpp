@@ -6,8 +6,12 @@
 #include "noescape/core/envutil.hpp"
 #include "noescape/kinematics/aim_analyzer.hpp"
 #include "noescape/memory/memory_scanner.hpp"
+#include "noescape/memory/unhooker.hpp"
 #include "noescape/overlay/overlay_detector.hpp"
 #include "noescape/network/crypto_util.hpp"
+#if defined(_WIN32)
+#include <windows.h>
+#endif
 #include <cmath>
 #include <cstdlib>
 #include <cstring>

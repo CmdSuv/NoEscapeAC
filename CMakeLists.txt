@@ -7,6 +7,10 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(NOESCAPE_WERROR "Treat warnings as errors (CI only; breaks on newer toolchains)" OFF)
 # Optimization & Compiler Flags
+if(WIN32)
+    add_compile_definitions(_WIN32_WINNT=0x0A00 WINVER=0x0A00)
+endif()
+
 if(MSVC)
     add_compile_options(/W4 /arch:AVX2 /permissive- /utf-8 /EHsc)
     add_compile_definitions(_CRT_SECURE_NO_WARNINGS)

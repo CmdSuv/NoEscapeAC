@@ -71,11 +71,23 @@ public:
     // Watchdog heartbeat monitoring & testing interface
     void UpdateAuditHeartbeat();
     uint64_t GetLastAuditHeartbeatMs() const { return last_audit_heartbeat_ms_.load(std::memory_order_acquire); }
-    void SetAuditHeartbeatForTesting(uint64_t timestamp_ms) { last_audit_heartbeat_ms_.store(timestamp_ms, std::memory_order_release); }
+    void SetAuditHeartbeatForTesting(uint64_t timestamp_ms) {
+        std::lock_guard<std::mutex> lock(heartbeat_mutex_);
+        last_audit_heartbeat_ms_.store(timestamp_ms, std::memory_order_release);
+    }
     uint64_t GetWatchdogHeartbeatMs() const { return watchdog_heartbeat_ms_.load(std::memory_order_acquire); }
-    void SetWatchdogHeartbeatForTesting(uint64_t ts) { watchdog_heartbeat_ms_.store(ts, std::memory_order_release); }
-    void FreezeWatchdogForTesting(bool f) { freeze_watchdog_for_testing_.store(f, std::memory_order_release); }
-    void FreezeBackgroundLoopForTesting(bool freeze) { freeze_background_loop_for_testing_.store(freeze, std::memory_order_release); }
+    void SetWatchdogHeartbeatForTesting(uint64_t ts) {
+        std::lock_guard<std::mutex> lock(heartbeat_mutex_);
+        watchdog_heartbeat_ms_.store(ts, std::memory_order_release);
+    }
+    void FreezeWatchdogForTesting(bool f) {
+        std::lock_guard<std::mutex> lock(heartbeat_mutex_);
+        freeze_watchdog_for_testing_.store(f, std::memory_order_release);
+    }
+    void FreezeBackgroundLoopForTesting(bool freeze) {
+        std::lock_guard<std::mutex> lock(heartbeat_mutex_);
+        freeze_background_loop_for_testing_.store(freeze, std::memory_order_release);
+    }
 
 private:
     EngineConfig config_;
@@ -98,6 +110,7 @@ private:
 
     mutable std::mutex history_mutex_;
     mutable std::mutex input_mutex_;
+    mutable std::mutex heartbeat_mutex_;
     std::vector<DetectionEvent> history_;
     std::vector<uint8_t> last_blackbox_payload_;
     std::vector<memory::CheatSignature> default_signatures_;
@@ -116,7 +129,7 @@ private:
     void NetworkLoop();
     void HandleAttestation(const network::HeartbeatResult& hb);
     std::atomic<uint32_t> panel_failures_{0};
-    bool dumpable_modified_{false};
+    [[maybe_unused]] bool dumpable_modified_{false};
 
     std::thread background_thread_;
     std::thread watchdog_thread_;
