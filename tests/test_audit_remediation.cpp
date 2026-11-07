@@ -71,6 +71,7 @@ TEST(Remediation, OverlayCompositorWhitelist) {
     picomWin.is_topmost = true;
     picomWin.is_transparent = true;
     picomWin.is_layered = true;
+    picomWin.exe_path = "/usr/bin/picom";
     detector.AddMockWindow(picomWin);
 
     // 2. Steam Overlay window
@@ -83,6 +84,7 @@ TEST(Remediation, OverlayCompositorWhitelist) {
     steamWin.is_topmost = true;
     steamWin.is_transparent = true;
     steamWin.is_layered = true;
+    steamWin.exe_path = "/usr/bin/gameoverlayui";
     detector.AddMockWindow(steamWin);
 
     // 3. MangoHud FPS HUD
@@ -95,6 +97,7 @@ TEST(Remediation, OverlayCompositorWhitelist) {
     mangoWin.is_topmost = true;
     mangoWin.is_transparent = true;
     mangoWin.is_layered = true;
+    mangoWin.exe_path = "/usr/bin/mangohud";
     detector.AddMockWindow(mangoWin);
 
     auto alerts = detector.DetectSuspiciousWindows();

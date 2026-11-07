@@ -4,6 +4,7 @@
 #include "noescape/network/crypto_util.hpp"
 #include "noescape/overlay/overlay_detector.hpp"
 #include "noescape/core/blackbox.hpp"
+#include "noescape/server/server_integration.hpp"
 #include "noescape_sdk.h"
 #include <iostream>
 #include <chrono>
@@ -15,7 +16,7 @@ using namespace noescape;
 int main() {
     std::cout << "\033[1;36m"
               << "============================================================\n"
-              << "      NoEscape Anti-Cheat Engine v7.0 - Interactive Demo     \n"
+              << "      NoEscape Anti-Cheat Engine v2.0 - Interactive Demo     \n"
               << "============================================================\033[0m\n\n";
 
     core::EngineConfig config;
@@ -115,7 +116,7 @@ int main() {
               << " | Input Trail: " << snapshot.recent_input_trail.size() << " samples\n";
 
     auto encPayload = dumper.SerializeAndEncrypt(snapshot, config.secretKey);
-    std::cout << "  -> Authenticated encrypted payload: " << encPayload.size() << " bytes (HMAC-SHA256 verified)\n";
+    std::cout << "  -> Authenticated encrypted payload: " << encPayload.size() << " bytes (RFC 8439 ChaCha20-Poly1305 AEAD)\n";
 
     core::BlackboxRecord decryptedSnap{};
     if (dumper.DecryptAndDeserialize(encPayload, config.secretKey, decryptedSnap)) {
@@ -123,7 +124,7 @@ int main() {
                   << decryptedSnap.hwid.substr(0, 16) << "...)\033[0m\n";
     }
 
-    std::cout << "\n\033[1;33m[DEMO 7] C-API & SDK Layer Integration\033[0m\n";
+    std::cout << "\n\033[1;33m[DEMO 7] C-API & SDK v2.0 Layer Integration\033[0m\n";
     NoEscapeConfig sdkCfg = NoEscape_GetDefaultConfig();
     sdkCfg.enable_heartbeat = false;
     sdkCfg.enable_anti_debug = false;
@@ -132,11 +133,30 @@ int main() {
     if (NoEscape_Init(&sdkCfg) == 0) {
         std::cout << "  -> SDK Initialized via C-ABI successfully.\n";
         NoEscape_PushMouseEvent(1.2f, 0.4f, 20000);
+        NoEscape_PushRawInput(1000, 5, 3);
+        NoEscape_RecordTargetAcquire(20050);
+        NoEscape_PushWeaponFire(20060);
+        NoEscape_PushRecoilEvent(0.8f, 1.2f, 0.79f, 1.18f);
+        NoEscape_PushView(100.0f, 200.0f, 50.0f, 0.0f, 90.0f, 20060);
+        NoEscape_AddPhantom(101, 105.0f, 200.0f, 50.0f);
         NoEscape_Tick();
         std::cout << "  -> SDK Threat Score: " << NoEscape_GetThreatScore() << "\n";
         NoEscape_Shutdown();
         std::cout << "  -> SDK Shutdown cleanly.\n";
     }
+
+    std::cout << "\n\033[1;33m[DEMO 8] Server-Authoritative ESP Occlusion Culling (Anti-Wallhack)\033[0m\n";
+    server::ServerEspFilter espFilter;
+    server::OccluderBox wall{40.0f, -50.0f, -50.0f, 45.0f, 50.0f, 50.0f, false};
+    espFilter.AddOccluder(wall);
+
+    server::ObserverState observer{1, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 90.0f};
+    server::TargetEntityState enemyHidden{2, 100.0f, 0.0f, 0.0f, 0.6f, false, 18.0f};
+    auto decision = espFilter.EvaluateEntityReplication(observer, enemyHidden);
+    std::cout << "  -> Target behind occluding wall: " 
+              << (decision.culled_by_occlusion ? "\033[32mCULLED (Coordinates withheld from client)\033[0m" : "REPLICATED") << "\n";
+    std::cout << "  -> Full transform replication permitted: " 
+              << (decision.replicate_full_transform ? "YES" : "\033[33mNO (ESP / DMA cheat blind)\033[0m") << "\n";
 
     std::cout << "\n\033[1;32m[DEMO COMPLETE] All NoEscape Anti-Cheat subsystems verified successfully.\033[0m\n";
     return 0;

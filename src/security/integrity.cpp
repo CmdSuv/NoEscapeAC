@@ -306,12 +306,12 @@ std::optional<core::DetectionEvent> IntegrityChecker::VerifyIntegrity() {
     if (currentHash != baseline_hash_) {
         core::DetectionEvent ev;
         ev.type = core::DetectionType::SELF_INTEGRITY_VIOLATION;
-        ev.severity = core::Severity::FATAL_BAN;
+        ev.severity = core::Severity::CRITICAL;
         ev.component = "IntegrityChecker::TextSection";
         ev.details = "Executable text segment hash mismatch. Expected: " + 
                      baseline_hash_.substr(0, 16) + "... Actual: " + currentHash.substr(0, 16) + "...";
         ev.timestamp = static_cast<uint64_t>(time(nullptr));
-        ev.threat_score = 100;
+        ev.threat_score = 95;
         return ev;
     }
 

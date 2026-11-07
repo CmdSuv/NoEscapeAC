@@ -356,17 +356,26 @@ bool OverlayDetector::IsSuspiciousOverlayWindow(const OverlayWindowInfo& win) co
         SUSPICIOUS
     };
 
-    auto verifyOverlayProcessAuthentic = [&](uint32_t pid) -> ProcessTrustState {
-        if (pid == 0) return ProcessTrustState::UNVERIFIED;
+    auto verifyOverlayProcessAuthentic = [&](const OverlayWindowInfo& w) -> ProcessTrustState {
+        // If an explicit executable path was provided (e.g. from Window inspection or test framework),
+        // verify its provenance directly against known volatile/cheat paths.
+        if (!w.exe_path.empty()) {
+            std::string lowerExe = ToLower(w.exe_path);
+            for (const auto& marker : suspiciousBinaryMarkers) {
+                if (lowerExe.find(marker) != std::string::npos) {
+                    return ProcessTrustState::SUSPICIOUS;
+                }
+            }
+            return ProcessTrustState::TRUSTED;
+        }
+
+        if (w.pid == 0) return ProcessTrustState::UNVERIFIED;
 #if defined(_WIN32)
-        HANDLE hProc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+        HANDLE hProc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, w.pid);
         if (!hProc) {
             DWORD err = GetLastError();
             if (err == ERROR_ACCESS_DENIED) {
                 return ProcessTrustState::SUSPICIOUS;
-            }
-            if (!mock_windows_.empty()) {
-                return ProcessTrustState::TRUSTED;
             }
             return ProcessTrustState::UNVERIFIED;
         }
@@ -382,18 +391,15 @@ bool OverlayDetector::IsSuspiciousOverlayWindow(const OverlayWindowInfo& win) co
                 }
             }
         } else {
-            state = !mock_windows_.empty() ? ProcessTrustState::TRUSTED : ProcessTrustState::UNVERIFIED;
+            state = ProcessTrustState::UNVERIFIED;
         }
         CloseHandle(hProc);
         return state;
 #else
-        std::string exeLink = "/proc/" + std::to_string(pid) + "/exe";
+        std::string exeLink = "/proc/" + std::to_string(w.pid) + "/exe";
         char linkBuf[512]{};
         ssize_t len = readlink(exeLink.c_str(), linkBuf, sizeof(linkBuf) - 1);
         if (len <= 0) {
-            if (!mock_windows_.empty()) {
-                return ProcessTrustState::TRUSTED;
-            }
             return ProcessTrustState::UNVERIFIED;
         }
         linkBuf[len] = '\0';
@@ -405,7 +411,7 @@ bool OverlayDetector::IsSuspiciousOverlayWindow(const OverlayWindowInfo& win) co
         }
 
         // Also check if a legitimate overlay process has been hijacked via volatile .so injection
-        std::string mapsPath = "/proc/" + std::to_string(pid) + "/maps";
+        std::string mapsPath = "/proc/" + std::to_string(w.pid) + "/maps";
         std::ifstream mapsFile(mapsPath);
         if (mapsFile.is_open()) {
             std::string line;
@@ -425,9 +431,11 @@ bool OverlayDetector::IsSuspiciousOverlayWindow(const OverlayWindowInfo& win) co
 #endif
     };
 
+    bool matchedWhitelistTitle = false;
     for (const auto& white : whitelistedTitles) {
         if (lowerTitle.find(white) != std::string::npos || lowerClass.find(white) != std::string::npos) {
-            ProcessTrustState trust = verifyOverlayProcessAuthentic(win.pid);
+            matchedWhitelistTitle = true;
+            ProcessTrustState trust = verifyOverlayProcessAuthentic(win);
             if (trust == ProcessTrustState::TRUSTED) {
                 return false;
             }
@@ -446,17 +454,20 @@ bool OverlayDetector::IsSuspiciousOverlayWindow(const OverlayWindowInfo& win) co
         std::lock_guard<std::mutex> lock(mutex_);
         customAllowlistCopy = custom_allowlisted_titles_;
     }
-    for (const auto& white : customAllowlistCopy) {
-        std::string l = ToLower(white);
-        if (lowerTitle.find(l) != std::string::npos || lowerClass.find(l) != std::string::npos) {
-            ProcessTrustState trust = verifyOverlayProcessAuthentic(win.pid);
-            if (trust == ProcessTrustState::TRUSTED) {
-                return false;
+    if (!matchedWhitelistTitle) {
+        for (const auto& white : customAllowlistCopy) {
+            std::string l = ToLower(white);
+            if (lowerTitle.find(l) != std::string::npos || lowerClass.find(l) != std::string::npos) {
+                matchedWhitelistTitle = true;
+                ProcessTrustState trust = verifyOverlayProcessAuthentic(win);
+                if (trust == ProcessTrustState::TRUSTED) {
+                    return false;
+                }
+                if (trust == ProcessTrustState::SUSPICIOUS || trust == ProcessTrustState::UNTRUSTED) {
+                    return true;
+                }
+                break;
             }
-            if (trust == ProcessTrustState::SUSPICIOUS || trust == ProcessTrustState::UNTRUSTED) {
-                return true;
-            }
-            break;
         }
     }
 
@@ -468,16 +479,19 @@ bool OverlayDetector::IsSuspiciousOverlayWindow(const OverlayWindowInfo& win) co
     }
 
     // Check 2: Topmost transparent window with suspicious class or window title keywords
-    static const std::vector<std::string> suspiciousKeywords = {
-        "overlay", "esp", "wallhack", "imgui", "dear imgui",
-        "external", "aimbot", "chams", "d3d overlay", "transparent draw",
-        "crosshair", "radar", "glow"
-    };
+    // Only applied if window title did not match a known legitimate overlay whitelist
+    if (!matchedWhitelistTitle) {
+        static const std::vector<std::string> suspiciousKeywords = {
+            "esp", "wallhack", "imgui", "dear imgui",
+            "external", "aimbot", "chams", "d3d overlay", "transparent draw",
+            "crosshair", "radar", "glow"
+        };
 
-    for (const auto& kw : suspiciousKeywords) {
-        if (lowerTitle.find(kw) != std::string::npos || lowerClass.find(kw) != std::string::npos) {
-            if (win.is_topmost || win.is_layered || win.is_transparent) {
-                return true;
+        for (const auto& kw : suspiciousKeywords) {
+            if (lowerTitle.find(kw) != std::string::npos || lowerClass.find(kw) != std::string::npos) {
+                if (win.is_topmost || win.is_layered || win.is_transparent) {
+                    return true;
+                }
             }
         }
     }

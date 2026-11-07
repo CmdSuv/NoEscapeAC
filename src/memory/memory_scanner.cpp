@@ -488,7 +488,7 @@ std::vector<core::DetectionEvent> MemoryScanner::DetectUnbackedExecutableRegions
 
             core::DetectionEvent ev;
             ev.type = core::DetectionType::UNBACKED_EXECUTABLE_MEMORY;
-            ev.severity = isRwx ? core::Severity::FATAL_BAN
+            ev.severity = isRwx ? core::Severity::CRITICAL
                                 : (transientOnly ? core::Severity::MEDIUM : core::Severity::HIGH);
             ev.component = "MemoryScanner::UnbackedPages";
             ev.details = reason + " [0x" + [] (uintptr_t v) {
@@ -501,7 +501,7 @@ std::vector<core::DetectionEvent> MemoryScanner::DetectUnbackedExecutableRegions
                 return ss.str();
             }(r.end) + "] " + (isRwx ? "(RWX-PROTECTION)" : "(RX-PROTECTION)");
             ev.timestamp = static_cast<uint64_t>(std::time(nullptr));
-            ev.threat_score = isRwx ? 100 : (transientOnly ? 40 : 75);
+            ev.threat_score = isRwx ? 85 : (transientOnly ? 40 : 75);
 
             events.push_back(ev);
         }

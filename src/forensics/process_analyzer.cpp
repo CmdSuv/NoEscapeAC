@@ -418,11 +418,11 @@ std::vector<core::DetectionEvent> ProcessAnalyzer::AuditProcesses(
     if (CheckCurrentProcessEnvironment()) {
         core::DetectionEvent ev;
         ev.type = core::DetectionType::ENVIRONMENT_TAMPERING;
-        ev.severity = core::Severity::FATAL_BAN;
+        ev.severity = core::Severity::MEDIUM;
         ev.component = "ProcessAnalyzer::EnvironmentAudit";
-        ev.details = "Suspicious dynamic linker injection detected in process environment (LD_PRELOAD / LD_AUDIT)";
+        ev.details = "Security anomaly / instrumentation: dynamic linker or debugger environment variable present (LD_PRELOAD / LD_AUDIT / ATTACH_DEBUGGER)";
         ev.timestamp = static_cast<uint64_t>(std::time(nullptr));
-        ev.threat_score = 100;
+        ev.threat_score = 35;
         events.push_back(ev);
     }
 

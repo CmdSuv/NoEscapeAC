@@ -96,3 +96,40 @@
 - **Root Cause:** Reliance on custom cryptographic constructions rather than standardized AEAD.
 - **Remediation:** Upgraded blackbox envelope to Version 2 featuring RFC 8439 ChaCha20-Poly1305 AEAD authenticated encryption with a 12-byte CSPRNG nonce, 16-byte random salt, and 16-byte Poly1305 authentication tag, while preserving backward compatibility for Version 1 dumps.
 - **Verification:** Verified via `TEST(Blackbox, SnapshotCaptureAndSerializationRoundTrip)` and `TEST(Blackbox, TamperResistanceCiphertextMutation)`.
+
+### Finding SEC-15: Overlay Detector Test Backdoor & Whitelist Keyword False Positives
+- **Vulnerability Description:** In `src/overlay/overlay_detector.cpp`, `verifyOverlayProcessAuthentic` contained a test backdoor: `if (!mock_windows_.empty()) return ProcessTrustState::TRUSTED;`. When mock windows were active, unverified or failed PID lookups were unconditionally treated as trusted. Furthermore, generic `"overlay"` was in `suspiciousKeywords`. Any legitimate overlay whose title contained "overlay" (e.g. Steam Overlay, Discord Overlay) and whose process could not be inspected (unverified PID) triggered Check 2 as a rogue cheat overlay (`OVERLAY_HIJACK_DETECTED`).
+- **Root Cause:** Test scaffolding altering production verification behavior; overly broad keyword blacklist overlapping legitimate gaming tools.
+- **Remediation:** 
+  1. Removed `!mock_windows_.empty()` backdoor completely.
+  2. Extended `OverlayWindowInfo` with `exe_path` for authentic binary image provenance.
+  3. Matched against allowlisted titles first (`matchedWhitelistTitle`). Whitelisted titles bypass generic keyword checks and are only evaluated for full-viewport invisible layered hijacking or suspicious executable paths (`/tmp/`, `/dev/shm/`, etc.).
+  4. Removed `"overlay"` from `suspiciousKeywords`.
+- **Verification:** Verified via `TEST(OverlayV2, UnverifiedPidDoesNotTriggerImmediateHijack)` (with `is_topmost = true`) and `TEST(OverlayV2, SpoofedTitleDetectedViaExePath)`.
+
+### Finding SEC-16: Process Environment Hardcoded FATAL_BAN on Instrumentation
+- **Vulnerability Description:** In `src/forensics/process_analyzer.cpp`, `AuditProcesses()` unconditionally flagged `CheckCurrentProcessEnvironment()` as `core::Severity::FATAL_BAN` with threat score 100. Innocuous environment variables (`ATTACH_DEBUGGER`, development profilers, or benign dynamic linkers in `LD_PRELOAD`) resulted in immediate irreversible bans.
+- **Root Cause:** Violation of anti-cheat design principle separating environmental posture/instrumentation anomalies from verified cheat behavior.
+- **Remediation:** Downgraded process environment anomalies to `core::Severity::MEDIUM` (threat score 35) and classified as weak single signals in `EvidenceCorrelator::IsWeakSingleHeuristic`.
+- **Verification:** Verified via test suite and engine audit cycle.
+
+### Finding SEC-17: Benign OEM Motherboard Driver Hardcoded FATAL_BAN
+- **Vulnerability Description:** In `src/forensics/artifact_analyzer.cpp`, `ScanKernelDrivers()` unconditionally assigned `core::Severity::FATAL_BAN` (threat score 100) to all 27 blacklisted drivers, including common OEM utilities like `ene.sys` (ASUS Aura RGB), `speedfan`, `asio64`, and `msio64`. Innocent players with OEM lighting or audio software were banned instantly.
+- **Root Cause:** Failure to distinguish active cheat rootkits/mappers from vulnerable third-party OEM hardware drivers.
+- **Remediation:** Partitioned driver audits into two distinct classes:
+  1. Active cheat tools, rootkits, and mappers (`dbk64`, `ksdumper`, `leechcore`, `kdmapper`, `diamorphine`, `reptile`, `suterusu`): `core::Severity::CRITICAL` (score 85).
+  2. Benign vulnerable OEM utilities (`ene.sys`, `speedfan`, `asio64`, `msio64`, `atillk64`): `core::Severity::MEDIUM` (score 30, posture risk only).
+- **Verification:** Verified via `TEST(ArtifactV2, VulnerableOemDriverIsMediumSeverityNotFatalBan)`.
+
+### Finding SEC-18: EvidenceCorrelator Unbounded Timeline Quadratic Memory Stall
+- **Vulnerability Description:** In `src/core/evidence_correlator.cpp`, `category_timeline_` appended every incoming event without capacity limits or deduplication. During high-frequency event storms (> 5,000 events/min), this resulted in unbounded memory growth and $O(N^2)$ lock contention across `related_event_ids`.
+- **Root Cause:** Missing per-category deduplication and capacity bounds on timeline collections.
+- **Remediation:** Deduplicated timeline entries by `root_cause_id` (updating timestamps in-place), capped entries per category to 32, and capped `related_event_ids` to 16.
+- **Verification:** Verified via `TEST(CorrelatorV2, HighEventSaturationStressTest)` processing 5,000 synthetic events in 1 ms with zero lock stalling.
+
+### Finding SEC-19: PanelClient Unprovisioned Key HMAC Forgery Bypass
+- **Vulnerability Description:** In `src/network/panel_client.cpp`, `VerifyServerSignature` checked `if (!server_public_key_.empty())` for Ed25519; otherwise, it computed `CryptoUtil::HmacSha256(secret_key_, message)`. If neither key was provisioned (`secret_key_ == ""`), it computed HMAC using an empty key, allowing forged signatures `HmacSha256("", message)` to succeed.
+- **Root Cause:** Missing fail-closed guard when keys are unprovisioned.
+- **Remediation:** Added `if (secret_key_.empty()) return false;` to ensure signature verification fails closed when keys are absent.
+- **Verification:** Verified via `TEST(NetworkV2, EmptySecretKeyRefusesHmacVerification)`.
+

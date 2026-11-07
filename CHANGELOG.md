@@ -19,9 +19,21 @@ All notable technical changes to the NoEscape Anti-Cheat system are documented i
   - Added bounded storage capacity (`max_stored_events_ = 512`) with two-phase eviction (expired first, then oldest low-confidence).
   - Integrated root-cause grouping (`DeriveRootCauseId`) to prevent multiple events from the same physical memory span from falsely inflating corroboration.
   - Implemented session and match isolation keys.
-- **Overlay Detector Process Trust State (`overlay_detector.cpp`):**
+- **Overlay Detector Process Trust State & Provenance (`overlay_detector.cpp`):**
   - Introduced `ProcessTrustState` enum (`TRUSTED`, `UNTRUSTED`, `UNVERIFIED`, `SUSPICIOUS`).
   - Closed fail-open bypass on `pid == 0` and `ERROR_ACCESS_DENIED`. Denied allowlist title exemptions to any unverified or elevated PID.
+  - Removed mock window test backdoor completely from `verifyOverlayProcessAuthentic`.
+  - Added `exe_path` to `OverlayWindowInfo` for explicit binary image provenance verification.
+  - Eliminated false positive keyword matches on legitimate whitelisted overlays and removed `"overlay"` from generic suspicious keywords.
+- **Benign OEM Driver & Environment Anomaly Classification (`artifact_analyzer.cpp`, `process_analyzer.cpp`):**
+  - Partitioned driver blacklist into active cheat tools/rootkits (`CRITICAL`, score 85) vs common OEM motherboard utilities (`MEDIUM`, score 30, `ene.sys`, `speedfan`, `asio64`, `msio64`).
+  - Downgraded process environment instrumentation detections (`ATTACH_DEBUGGER`, `LD_PRELOAD`) from hardcoded `FATAL_BAN` to `MEDIUM` security anomalies (score 35).
+  - Downgraded single-probe text mismatch, unbacked RWX, and LeechCore handle detections to `CRITICAL` requiring multi-signal corroboration before permanent bans.
+- **EvidenceCorrelator Timeline Bounds & Deduplication (`evidence_correlator.cpp`):**
+  - Deduplicated category timeline entries by `root_cause_id` and strictly capped entries per category to 32.
+  - Capped related event IDs collection to 16, preventing $O(N^2)$ lock stalls under high event saturation (>5,000 events/sec).
+- **Panel Client Fail-Closed Signature Verification (`panel_client.cpp`):**
+  - Refused HMAC verification when neither asymmetric server public key nor secret key is provisioned, eliminating empty-key HMAC signature bypasses.
 - **Server ESP Close-Proximity Occlusion Hardening (`server_integration.cpp`):**
   - Fixed 6-meter close-proximity wallhack bypass by strictly enforcing 3D AABB raycast occlusion culling before proximity replication.
   - Occluded targets within close proximity (<6m) are strictly blocked from full transform replication; only acoustic cues are transmitted if audible sound is produced.
@@ -36,7 +48,7 @@ All notable technical changes to the NoEscape Anti-Cheat system are documented i
   - `Development`, `Testing`, `ShadowProduction`, `Production`, and `OfflineDiagnostics`.
   - Added `struct_size` and versioning guards ensuring backward compatibility for legacy struct layouts.
 - **Complete Test Suite Expansion:**
-  - Expanded test suite to **153 total unit & integration tests**, verified 100% green with zero warnings under `-DNOESCAPE_WERROR=ON`.
+  - Expanded test suite to **157 total unit & integration tests**, verified 100% green with zero warnings under `-DNOESCAPE_WERROR=ON`.
   - Scenario B Preload Verification verified **6/6 passed (100%)**.
 
 ---

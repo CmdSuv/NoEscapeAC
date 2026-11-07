@@ -5,6 +5,8 @@
 #include "noescape/server/server_integration.hpp"
 #include "noescape/kinematics/aim_analyzer.hpp"
 #include "noescape/network/crypto_util.hpp"
+#include "noescape/network/panel_client.hpp"
+#include "noescape/forensics/artifact_analyzer.hpp"
 #include "noescape_sdk.h"
 
 #include <thread>
@@ -15,6 +17,8 @@ using namespace noescape::core;
 using namespace noescape::server;
 using namespace noescape::kinematics;
 using namespace noescape::overlay;
+using namespace noescape::network;
+using namespace noescape::forensics;
 
 // ============================================================================
 // 1. EvidenceCorrelator Temporal & Session Verification
@@ -311,18 +315,40 @@ TEST(OverlayV2, UnverifiedPidDoesNotTriggerImmediateHijack) {
     detector.ClearMockWindows();
 
     // A legitimate window titled "Steam Overlay", but PID is inaccessible / unverified (PID 0)
+    // Even if is_topmost is true, whitelisted title matching must NOT false-positive on generic keyword checks
     OverlayWindowInfo win{};
     win.title = "Steam Overlay";
     win.class_name = "ValveSteamOverlay";
     win.pid = 0;
     win.is_layered = false;
     win.is_transparent = false;
-    win.is_topmost = false;
+    win.is_topmost = true;
     detector.AddMockWindow(win);
 
     // Must not be flagged as a suspicious cheating overlay hijack
     auto alerts = detector.DetectSuspiciousWindows();
     ASSERT_EQ(alerts.size(), 0u);
+    detector.ClearMockWindows();
+}
+
+TEST(OverlayV2, SpoofedTitleDetectedViaExePath) {
+    auto& detector = OverlayDetector::Instance();
+    detector.ClearMockWindows();
+
+    // A rogue cheat window masquerading under the title "Steam Overlay" but executing from /tmp/
+    OverlayWindowInfo win{};
+    win.title = "Steam Overlay";
+    win.class_name = "ValveSteamOverlay";
+    win.pid = 9999;
+    win.exe_path = "/tmp/cheat_overlay";
+    win.is_topmost = true;
+    detector.AddMockWindow(win);
+
+    // Must detect the spoofed overlay because the binary path is suspicious
+    auto alerts = detector.DetectSuspiciousWindows();
+    ASSERT_EQ(alerts.size(), 1u);
+    ASSERT_EQ(alerts[0].type, DetectionType::OVERLAY_HIJACK_DETECTED);
+    detector.ClearMockWindows();
 }
 
 TEST(WatchdogV2, WatchdogDelayDoesNotCausePermanentBanInProduction) {
@@ -346,4 +372,49 @@ TEST(WatchdogV2, WatchdogDelayDoesNotCausePermanentBanInProduction) {
     ASSERT_FALSE(engine.IsBanned());
     ASSERT_LT(engine.GetThreatScore(), 100u);
 }
+
+TEST(CorrelatorV2, HighEventSaturationStressTest) {
+    EvidenceCorrelator correlator;
+    correlator.SetTimeWindowMs(60000);
+    // Rapidly feed 5,000 synthetic events within the temporal window
+    for (uint32_t i = 0; i < 5000; ++i) {
+        DetectionEvent ev;
+        ev.type = DetectionType::SPEEDHACK_TIMING_DISCREPANCY;
+        ev.severity = Severity::MEDIUM;
+        ev.component = "TimingAnomaly::Rdtsc";
+        ev.details = "Delta sample " + std::to_string(i % 10);
+        ev.threat_score = 15;
+        ev.timestamp = 1000 + (i / 100);
+        auto decision = correlator.Evaluate(ev, 0, 100, true);
+        // Single heuristic must be identified as weak single signal
+        ASSERT_TRUE(decision.is_weak_single_signal);
+        // Must never exceed ban threshold or promote to permanent ban
+        ASSERT_FALSE(decision.eligible_for_permanent_ban);
+    }
+}
+
+TEST(NetworkV2, EmptySecretKeyRefusesHmacVerification) {
+    // Unconfigured client with empty server public key and empty secret key
+    PanelClient client("http://127.0.0.1:18433", "");
+    std::string msg = "{\"status\":\"banned\",\"reason\":\"test\"}";
+    std::string forgedHmac = CryptoUtil::HmacSha256("", msg);
+
+    // Verification must fail closed: an unconfigured client must NEVER accept empty-key HMAC signatures
+    ASSERT_FALSE(client.VerifyServerSignature(msg, forgedHmac));
+}
+
+TEST(ArtifactV2, VulnerableOemDriverIsMediumSeverityNotFatalBan) {
+    auto& analyzer = forensics::ArtifactAnalyzer::Instance();
+    std::vector<std::string> drivers = {"ene.sys", "speedfan.sys", "asio64.sys"};
+    auto events = analyzer.PerformAudit({}, drivers);
+    for (const auto& ev : events) {
+        if (ev.component == "ArtifactAnalyzer::DriverWatch") {
+            // OEM vulnerable driver posture warnings must be MEDIUM severity (score 30), never FATAL_BAN
+            ASSERT_EQ(ev.severity, Severity::MEDIUM);
+            ASSERT_EQ(ev.threat_score, 30u);
+            ASSERT_NE(ev.details.find("Vulnerable OEM"), std::string::npos);
+        }
+    }
+}
+
 

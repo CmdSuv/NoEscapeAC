@@ -529,11 +529,11 @@ std::vector<core::DetectionEvent> DmaDetector::PerformAudit() {
     if (leechcore_found) {
         core::DetectionEvent ev;
         ev.type = core::DetectionType::DMA_PCIE_LEECH_DEVICE;
-        ev.severity = core::Severity::FATAL_BAN;
+        ev.severity = core::Severity::CRITICAL;
         ev.component = "DmaDetector::LeechCoreDriver";
         ev.details = "Active Direct Memory Access (DMA) LeechCore device handle identified";
         ev.timestamp = static_cast<uint64_t>(std::time(nullptr));
-        ev.threat_score = 100;
+        ev.threat_score = 90;
         ev.confidence = core::ConfidenceLevel::CONFIRMED;
         events.push_back(ev);
     }

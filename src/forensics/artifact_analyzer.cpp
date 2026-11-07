@@ -309,15 +309,34 @@ std::vector<core::DetectionEvent> ArtifactAnalyzer::PerformAudit(
     }
 
     // Scan kernel drivers
+    static const std::unordered_set<std::string> kKnownCheatDrivers = {
+        "dbk64", "dbk32", "ksdumper", "leechcore", "kdmapper", "efi_mapper",
+        "vmread", "kmrw", "diamorphine", "reptile", "suterusu", "physmem"
+    };
+
     auto driverArtifacts = ScanKernelDrivers(blacklisted_drivers);
     for (const auto& drv : driverArtifacts) {
         core::DetectionEvent ev;
         ev.type = core::DetectionType::FORENSICS_ARTIFACT_DETECTED;
-        ev.severity = core::Severity::FATAL_BAN;
+        std::string lowerSig = ToLower(drv.matched_signature);
+        bool isCheatDriver = false;
+        for (const auto& cd : kKnownCheatDrivers) {
+            if (lowerSig.find(cd) != std::string::npos) {
+                isCheatDriver = true;
+                break;
+            }
+        }
+        if (isCheatDriver) {
+            ev.severity = core::Severity::CRITICAL;
+            ev.threat_score = 85;
+            ev.details = "Active cheat tool or rootkit kernel driver detected: " + drv.path + " (matched: " + drv.matched_signature + ")";
+        } else {
+            ev.severity = core::Severity::MEDIUM;
+            ev.threat_score = 30;
+            ev.details = "Vulnerable OEM or third-party kernel driver active (BYOVD risk posture): " + drv.path + " (matched: " + drv.matched_signature + ")";
+        }
         ev.component = "ArtifactAnalyzer::DriverWatch";
-        ev.details = "Dangerous/vulnerable kernel driver active: " + drv.path + " (matched: " + drv.matched_signature + ")";
         ev.timestamp = static_cast<uint64_t>(std::time(nullptr));
-        ev.threat_score = 100;
         events.push_back(ev);
     }
 
@@ -326,13 +345,12 @@ std::vector<core::DetectionEvent> ArtifactAnalyzer::PerformAudit(
     for (const auto& ki : kernelIntegrity) {
         core::DetectionEvent ev;
         ev.type = core::DetectionType::ENVIRONMENT_TAMPERING;
-        ev.severity = (ki.artifact_type == "KernelCheatDevice" || ki.matched_signature.rfind("HiddenLKMRootkit:", 0) == 0)
-                          ? core::Severity::FATAL_BAN
-                          : core::Severity::CRITICAL;
+        bool isDirectCheatNode = (ki.artifact_type == "KernelCheatDevice" || ki.matched_signature.rfind("HiddenLKMRootkit:", 0) == 0);
+        ev.severity = isDirectCheatNode ? core::Severity::CRITICAL : core::Severity::HIGH;
         ev.component = "ArtifactAnalyzer::KernelIntegrity";
         ev.details = "Ring-0 kernel integrity anomaly detected: " + ki.path + " (" + ki.matched_signature + ")";
         ev.timestamp = static_cast<uint64_t>(std::time(nullptr));
-        ev.threat_score = (ev.severity == core::Severity::FATAL_BAN) ? 100 : 85;
+        ev.threat_score = isDirectCheatNode ? 90 : 75;
         events.push_back(ev);
     }
 

@@ -588,6 +588,10 @@ bool PanelClient::VerifyServerSignature(const std::string& message, const std::s
         // a leaked symmetric client key cannot forge server challenges or ban status responses.
         return CryptoUtil::VerifyAsymmetric(server_public_key_, message, signature_hex);
     }
+    if (secret_key_.empty()) {
+        // If neither asymmetric server public key nor shared secret key is provisioned, refuse verification
+        return false;
+    }
     std::string expectedHmac = CryptoUtil::HmacSha256(secret_key_, message);
     return CryptoUtil::ConstantTimeEquals(signature_hex, expectedHmac);
 }

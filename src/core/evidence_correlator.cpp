@@ -128,6 +128,23 @@ bool EvidenceCorrelator::IsWeakSingleHeuristic(const DetectionEvent& event) {
         event.component.find("KernelIntegrity") != std::string::npos) {
         return true;
     }
+    // 6. Watchdog scheduling delay / heartbeat timing jitter alone
+    if (event.type == DetectionType::HEARTBEAT_TAMPERING &&
+        event.component.find("Watchdog") != std::string::npos) {
+        return true;
+    }
+    // 7. Process environment audit / dynamic linker environment variables alone
+    if (event.type == DetectionType::ENVIRONMENT_TAMPERING &&
+        event.component.find("EnvironmentAudit") != std::string::npos) {
+        return true;
+    }
+    // 8. Filesystem artifact or vulnerable OEM driver alone
+    if (event.type == DetectionType::FORENSICS_ARTIFACT_DETECTED) {
+        if (event.component.find("Filesystem") != std::string::npos ||
+            event.details.find("Vulnerable OEM") != std::string::npos) {
+            return true;
+        }
+    }
     return false;
 }
 
@@ -280,9 +297,24 @@ CorrelationDecision EvidenceCorrelator::Evaluate(
         ev.related_event_ids = it->second.related_event_ids;
     }
 
-    // Append to category timeline
+    // Update or append to category timeline with deduplication and bounded capacity
     uint32_t catKey = static_cast<uint32_t>(ev.category);
-    category_timeline_[catKey].push_back(CategoryTimelineEntry{ev.event_id, now, ev.root_cause_id});
+    auto& catEntries = category_timeline_[catKey];
+    bool foundRootCause = false;
+    for (auto& entry : catEntries) {
+        if (entry.root_cause_id == ev.root_cause_id) {
+            entry.timestamp = now;
+            entry.event_id = ev.event_id;
+            foundRootCause = true;
+            break;
+        }
+    }
+    if (!foundRootCause) {
+        catEntries.push_back(CategoryTimelineEntry{ev.event_id, now, ev.root_cause_id});
+        if (catEntries.size() > 32) {
+            catEntries.erase(catEntries.begin());
+        }
+    }
 
     // Compute independent active categories with distinct root causes
     std::unordered_set<uint32_t> distinctCategories;
@@ -294,7 +326,8 @@ CorrelationDecision EvidenceCorrelator::Evaluate(
             if (entry.timestamp >= cutoff) {
                 distinctCategories.insert(otherCat);
                 distinctRootCauses.insert(entry.root_cause_id);
-                if (otherCat != catKey && std::find(ev.related_event_ids.begin(), ev.related_event_ids.end(), entry.event_id) == ev.related_event_ids.end()) {
+                if (ev.related_event_ids.size() < 16 && otherCat != catKey &&
+                    std::find(ev.related_event_ids.begin(), ev.related_event_ids.end(), entry.event_id) == ev.related_event_ids.end()) {
                     ev.related_event_ids.push_back(entry.event_id);
                 }
             }

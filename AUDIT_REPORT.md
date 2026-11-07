@@ -130,9 +130,14 @@ In the v2.0 Reengineering cycle, all 20 critical and major security findings wer
 6. **Full Kinematics Telemetry Connection:** Exposed and connected raw HID mouse interval quantization analysis (macro detection), triggerbot reaction latency analysis, and recoil compensation analysis to the engine pipeline and SDK.
 7. **Module Provenance Disassociation:** Disassociated ELF Build-ID from cryptographic digital signatures in `memory_scanner.cpp`.
 8. **5 Formal Configuration Profiles:** Integrated `Development`, `Testing`, `ShadowProduction`, `Production`, and `OfflineDiagnostics` with ABI versioning (`struct_size`).
+9. **Overlay Detector Test Backdoor Removal & Image Provenance:** Eliminated test bypass in `verifyOverlayProcessAuthentic`, added `exe_path` binary verification, and prevented generic keyword false positives on whitelisted overlays.
+10. **Benign OEM Driver & Environment Posture Classification:** Partitioned driver blacklist into active cheat tools/rootkits (`CRITICAL`, score 85) vs common OEM utilities (`MEDIUM`, score 30, `ene.sys`, `speedfan`, `asio64`, `msio64`). Downgraded environment instrumentation audits to `MEDIUM` (score 35).
+11. **EvidenceCorrelator Timeline Bounds & Deduplication:** Deduplicated timeline entries by `root_cause_id` and capped entries per category to 32, eliminating $O(N^2)$ lock stalls under high event saturation.
+12. **Panel Client Fail-Closed Signature Verification:** Enforced fail-closed signature verification when neither server public key nor secret key is provisioned.
 
 ### 5.2 Verification Metrics
 - **Compilation:** `-DNOESCAPE_WERROR=ON` with zero compiler warnings under GCC 16 C++20.
-- **Unit & Integration Test Suite:** **153 / 153 Tests Passed (100% Green)**.
+- **Unit & Integration Test Suite:** **157 / 157 Tests Passed (100% Green)**.
 - **Preload Verification:** `tools/verify_preload.sh` **6 / 6 Passed (100% Green)**.
+- **Interactive Demonstration:** `demo/noescape_demo` runs all 8 live subsystem scenarios flawlessly.
 - **System Integrity:** Verified zero AI attribution artifacts; strictly Omar Yiğitcan Mengü (`@CmdSuv`) and OnlyCosmos (`@OnlyCosmos`).

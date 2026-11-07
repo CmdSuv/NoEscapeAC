@@ -65,6 +65,7 @@ struct OverlayWindowInfo {
     bool is_layered{false};
     bool is_transparent{false};
     bool is_topmost{false};
+    std::string exe_path{""};
 };
 
 class OverlayDetector {
