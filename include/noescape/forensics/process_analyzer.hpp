@@ -16,6 +16,7 @@ struct ProcessRecord {
     std::string cmdline;
     bool is_deleted_binary{false};
     bool has_injected_env{false};
+    uint32_t granted_access_mask{0};
 };
 
 class ProcessAnalyzer {
@@ -35,8 +36,18 @@ public:
     bool CheckCurrentProcessEnvironment();
 
     // Detect external processes holding open file descriptors / handles to our process memory
-    // (/proc/<self>/mem or /proc/<self>/pagemap on Linux)
+    // (/proc/<self>/mem, /proc/<self>/pagemap, /proc/<self>/map_files on Linux;
+    // SystemExtendedHandleInformation with VM_READ/VM_WRITE on Windows)
     std::vector<ProcessRecord> DetectExternalMemoryReaders();
+
+    // Evaluates an external process handle and its granted access mask (e.g., PROCESS_VM_READ=0x0010,
+    // PROCESS_VM_WRITE=0x0020, PROCESS_VM_OPERATION=0x0008, PROCESS_CREATE_THREAD=0x0002)
+    std::optional<core::DetectionEvent> InspectExternalHandle(
+        uint32_t owner_pid,
+        const std::string& owner_name,
+        const std::string& owner_path,
+        uint32_t granted_access_mask
+    );
 
 private:
     ProcessAnalyzer() = default;

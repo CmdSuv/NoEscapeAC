@@ -15,6 +15,7 @@
 #else
 #include <dlfcn.h>
 #include <elf.h>
+#include <link.h>
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/prctl.h>
@@ -519,10 +520,12 @@ std::vector<core::DetectionEvent> Unhooker::AuditSystemHooks() {
         }
 
         bool restored = false;
-        // Only neutralise patches we are confident about; never "unhook" another installed module
-        // (that would break AV/EDR or overlays and is not evidence of cheating on its own).
-        if (disk.valid && api.restorable && !intoExternalModule) {
-            restored = AutoRestoreHook(info);
+        // Only neutralise patches according to the configured repair policy; never "unhook" another
+        // installed module unless REPAIR_ALL is explicitly enabled.
+        if (repair_policy_ != UnhookRepairPolicy::DETECT_ONLY && disk.valid && api.restorable) {
+            if (!intoExternalModule || repair_policy_ == UnhookRepairPolicy::REPAIR_ALL) {
+                restored = AutoRestoreHook(info);
+            }
         }
 
         std::ostringstream ss;
@@ -536,6 +539,186 @@ std::vector<core::DetectionEvent> Unhooker::AuditSystemHooks() {
         ev.details = ss.str();
         events.push_back(ev);
     }
+
+    auto tableEvents = AuditImportExportTables();
+    events.insert(events.end(), tableEvents.begin(), tableEvents.end());
+
+    return events;
+}
+
+std::optional<core::DetectionEvent> Unhooker::InspectTableEntry(
+    const std::string& table_type,
+    const std::string& symbol_name,
+    uintptr_t slot_address,
+    uintptr_t resolved_target
+) {
+    if (resolved_target < 0x10000ULL) return std::nullopt;
+
+    auto regions = MemoryScanner::Instance().QueryMemoryRegions();
+    for (const auto& r : regions) {
+        if (resolved_target >= r.start && resolved_target < r.end) {
+            if (r.pathname == "[vdso]" || r.pathname == "[vsyscall]") {
+                return std::nullopt;
+            }
+#if defined(_WIN32)
+            bool genuineBacked = r.is_backed_by_file;
+#else
+            bool genuineBacked = r.is_backed_by_file && !r.pathname.empty() && r.pathname[0] == '/' &&
+                                 r.pathname.find("(deleted)") == std::string::npos &&
+                                 r.pathname.rfind("/memfd:", 0) != 0;
+#endif
+            if (!r.executable) {
+                core::DetectionEvent ev;
+                ev.type = core::DetectionType::IAT_GOT_HOOK_DETECTED;
+                ev.severity = core::Severity::CRITICAL;
+                ev.component = "Unhooker::TableIntegrity";
+                std::ostringstream ss;
+                ss << table_type << " slot for '" << symbol_name << "' [" << Hex(slot_address)
+                   << "] redirects to non-executable region " << Hex(resolved_target);
+                ev.details = ss.str();
+                ev.timestamp = static_cast<uint64_t>(std::time(nullptr));
+                ev.threat_score = 95;
+                return ev;
+            }
+            if (!genuineBacked && !MemoryScanner::Instance().HostUsesJit()) {
+                core::DetectionEvent ev;
+                ev.type = core::DetectionType::IAT_GOT_HOOK_DETECTED;
+                ev.severity = core::Severity::CRITICAL;
+                ev.component = "Unhooker::TableIntegrity";
+                std::ostringstream ss;
+                ss << table_type << " slot for '" << symbol_name << "' [" << Hex(slot_address)
+                   << "] hijacked to unbacked anonymous executable memory " << Hex(resolved_target);
+                ev.details = ss.str();
+                ev.timestamp = static_cast<uint64_t>(std::time(nullptr));
+                ev.threat_score = 95;
+                return ev;
+            }
+            return std::nullopt;
+        }
+    }
+
+    core::DetectionEvent ev;
+    ev.type = core::DetectionType::IAT_GOT_HOOK_DETECTED;
+    ev.severity = core::Severity::HIGH;
+    ev.component = "Unhooker::TableIntegrity";
+    std::ostringstream ss;
+    ss << table_type << " slot for '" << symbol_name << "' [" << Hex(slot_address)
+       << "] points to unmapped address " << Hex(resolved_target);
+    ev.details = ss.str();
+    ev.timestamp = static_cast<uint64_t>(std::time(nullptr));
+    ev.threat_score = 80;
+    return ev;
+}
+
+std::vector<core::DetectionEvent> Unhooker::AuditImportExportTables() {
+    std::vector<core::DetectionEvent> events;
+
+#if defined(_WIN32)
+    HMODULE hMain = GetModuleHandleW(nullptr);
+    if (!hMain) return events;
+    auto base = reinterpret_cast<uintptr_t>(hMain);
+    auto dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE) return events;
+    auto nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
+    if (nt->Signature != IMAGE_NT_SIGNATURE) return events;
+
+    const auto& impDir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+    if (impDir.VirtualAddress && impDir.Size) {
+        auto desc = reinterpret_cast<const IMAGE_IMPORT_DESCRIPTOR*>(base + impDir.VirtualAddress);
+        for (; desc->Name != 0 && desc->FirstThunk != 0; ++desc) {
+            const char* dllName = reinterpret_cast<const char*>(base + desc->Name);
+            auto thunk = reinterpret_cast<const IMAGE_THUNK_DATA*>(base + desc->FirstThunk);
+            auto origThunk = desc->OriginalFirstThunk
+                ? reinterpret_cast<const IMAGE_THUNK_DATA*>(base + desc->OriginalFirstThunk)
+                : thunk;
+            for (; thunk->u1.Function != 0; ++thunk, ++origThunk) {
+                uintptr_t slotAddr = reinterpret_cast<uintptr_t>(&thunk->u1.Function);
+                uintptr_t fnTarget = static_cast<uintptr_t>(thunk->u1.Function);
+                std::string symName = dllName ? dllName : "IAT";
+                if (!(origThunk->u1.Ordinal & IMAGE_ORDINAL_flag)) {
+                    auto byName = reinterpret_cast<const IMAGE_IMPORT_BY_NAME*>(base + origThunk->u1.AddressOfData);
+                    symName += std::string("!") + reinterpret_cast<const char*>(byName->Name);
+                }
+                auto ev = InspectTableEntry("PE_IAT", symName, slotAddr, fnTarget);
+                if (ev.has_value()) events.push_back(*ev);
+            }
+        }
+    }
+#else
+    struct GotWalkCtx {
+        Unhooker* self;
+        std::vector<core::DetectionEvent>* outEvents;
+    };
+    GotWalkCtx ctx{this, &events};
+
+    dl_iterate_phdr([](struct dl_phdr_info* info, size_t, void* data) -> int {
+        // Inspect the main executable's GOT/PLT table (dlpi_name is empty for main binary)
+        if (!info->dlpi_name || info->dlpi_name[0] != '\0') return 0;
+        auto* c = static_cast<GotWalkCtx*>(data);
+        uintptr_t base = static_cast<uintptr_t>(info->dlpi_addr);
+
+        const ElfW(Dyn)* dyn = nullptr;
+        for (int i = 0; i < info->dlpi_phnum; ++i) {
+            if (info->dlpi_phdr[i].p_type == PT_DYNAMIC) {
+                dyn = reinterpret_cast<const ElfW(Dyn)*>(base + info->dlpi_phdr[i].p_vaddr);
+                break;
+            }
+        }
+        if (!dyn) return 0;
+
+        uintptr_t jmprel = 0;
+        size_t pltrelsz = 0;
+        uintptr_t symtab = 0;
+        uintptr_t strtab = 0;
+        uintptr_t pltgot = 0;
+
+        for (const ElfW(Dyn)* d = dyn; d->d_tag != DT_NULL; ++d) {
+            switch (d->d_tag) {
+                case DT_JMPREL:   jmprel = static_cast<uintptr_t>(d->d_un.d_ptr); break;
+                case DT_PLTRELSZ: pltrelsz = static_cast<size_t>(d->d_un.d_val); break;
+                case DT_SYMTAB:   symtab = static_cast<uintptr_t>(d->d_un.d_ptr); break;
+                case DT_STRTAB:   strtab = static_cast<uintptr_t>(d->d_un.d_ptr); break;
+                case DT_PLTGOT:   pltgot = static_cast<uintptr_t>(d->d_un.d_ptr); break;
+                default: break;
+            }
+        }
+        // On glibc, d_ptr in memory is already relocated; if not (< base), add base
+        if (jmprel && jmprel < base) jmprel += base;
+        if (symtab && symtab < base) symtab += base;
+        if (strtab && strtab < base) strtab += base;
+        if (pltgot && pltgot < base) pltgot += base;
+
+        if (!jmprel || !pltrelsz || !IsReadableAddress(jmprel, pltrelsz)) return 0;
+
+        size_t count = pltrelsz / sizeof(ElfW(Rela));
+        const auto* relas = reinterpret_cast<const ElfW(Rela)*>(jmprel);
+        for (size_t i = 0; i < count && i < 512; ++i) {
+            uintptr_t gotSlot = base + relas[i].r_offset;
+            if (!IsReadableAddress(gotSlot, sizeof(uintptr_t))) continue;
+            uintptr_t resolved = *reinterpret_cast<const uintptr_t*>(gotSlot);
+            if (resolved == 0) continue;
+
+            std::string symName = "plt_slot_" + std::to_string(i);
+#if defined(ELF64_R_SYM)
+            uint32_t symIdx = static_cast<uint32_t>(ELF64_R_SYM(relas[i].r_info));
+            if (symtab && strtab && symIdx > 0 && symIdx < 4096) {
+                uintptr_t symAddr = symtab + symIdx * sizeof(ElfW(Sym));
+                if (IsReadableAddress(symAddr, sizeof(ElfW(Sym)))) {
+                    const auto* sym = reinterpret_cast<const ElfW(Sym)*>(symAddr);
+                    if (sym->st_name > 0 && IsReadableAddress(strtab + sym->st_name, 1)) {
+                        symName = reinterpret_cast<const char*>(strtab + sym->st_name);
+                    }
+                }
+            }
+#endif
+            auto ev = c->self->InspectTableEntry("ELF_GOT_PLT", symName, gotSlot, resolved);
+            if (ev.has_value()) {
+                c->outEvents->push_back(*ev);
+            }
+        }
+        return 1;
+    }, &ctx);
+#endif
 
     return events;
 }

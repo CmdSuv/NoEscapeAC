@@ -11,6 +11,11 @@ AimAnalyzer::AimAnalyzer(size_t history_capacity)
 
 void AimAnalyzer::Reset() {
     history_.clear();
+    raw_input_history_.clear();
+    reaction_delays_ms_.clear();
+    recoil_history_.clear();
+    last_target_acquire_ms_.reset();
+    session_anomaly_count_ = 0;
 }
 
 float AimAnalyzer::NormalizeAngleDelta(float delta) const {
@@ -70,19 +75,32 @@ std::optional<core::DetectionEvent> AimAnalyzer::PushSample(const AngleSample& s
         return std::nullopt;
     }
 
+    auto recordAndPromote = [this](std::optional<core::DetectionEvent> ev) -> std::optional<core::DetectionEvent> {
+        if (!ev) return std::nullopt;
+        ++session_anomaly_count_;
+        if (session_anomaly_count_ >= 5) {
+            ev->confidence = core::ConfidenceLevel::HIGH;
+        } else if (session_anomaly_count_ >= 3) {
+            ev->confidence = core::ConfidenceLevel::MEDIUM;
+        } else {
+            ev->confidence = core::ConfidenceLevel::LOW;
+        }
+        return ev;
+    };
+
     // Check 1: Instant Snap (Silent Aim / Instant Flick)
     auto snapEvent = CheckInstantSnap();
-    if (snapEvent) return snapEvent;
+    if (snapEvent) return recordAndPromote(snapEvent);
 
     // Checks requiring a longer trajectory window
     if (history_.size() >= min_samples_) {
         // Check 2: Perfect Linearity
         auto linearEvent = CheckPerfectLinearity();
-        if (linearEvent) return linearEvent;
+        if (linearEvent) return recordAndPromote(linearEvent);
 
         // Check 3: Artificial Smoothing
         auto smoothEvent = CheckArtificialSmoothing();
-        if (smoothEvent) return smoothEvent;
+        if (smoothEvent) return recordAndPromote(smoothEvent);
     }
 
     return std::nullopt;
@@ -358,7 +376,220 @@ KinematicMetrics AimAnalyzer::ComputeCurrentMetrics() const {
         }
     }
 
+    if (raw_input_history_.size() >= 2) {
+        double meanUs = 0.0;
+        for (const auto& r : raw_input_history_) {
+            meanUs += static_cast<double>(r.interval_us);
+        }
+        meanUs /= raw_input_history_.size();
+        double varUs = 0.0;
+        for (const auto& r : raw_input_history_) {
+            double diff = static_cast<double>(r.interval_us) - meanUs;
+            varUs += diff * diff;
+        }
+        m.polling_jitter_stddev_us = static_cast<float>(std::sqrt(varUs / raw_input_history_.size()));
+    }
+
+    if (!reaction_delays_ms_.empty()) {
+        double sumMs = std::accumulate(reaction_delays_ms_.begin(), reaction_delays_ms_.end(), 0.0);
+        m.mean_reaction_time_ms = static_cast<float>(sumMs / reaction_delays_ms_.size());
+    }
+
+    m.session_anomaly_count = session_anomaly_count_;
     return m;
+}
+
+std::optional<core::DetectionEvent> AimAnalyzer::RecordRawInputSample(
+    uint64_t interval_us, int32_t dx, int32_t dy) {
+    if (interval_us == 0 || interval_us > 1000000) return std::nullopt;
+    if (dx == 0 && dy == 0) return std::nullopt;
+
+    raw_input_history_.push_back(RawInputSample{interval_us, dx, dy});
+    if (raw_input_history_.size() > history_capacity_) {
+        raw_input_history_.pop_front();
+    }
+
+    return CheckSyntheticInputTiming();
+}
+
+std::optional<core::DetectionEvent> AimAnalyzer::CheckSyntheticInputTiming() {
+    constexpr size_t kMinRawSamples = 16;
+    if (raw_input_history_.size() < kMinRawSamples) return std::nullopt;
+
+    size_t n = raw_input_history_.size();
+    double sumUs = 0.0;
+    size_t identicalDeltaCount = 0;
+
+    for (size_t i = n - kMinRawSamples; i < n; ++i) {
+        sumUs += static_cast<double>(raw_input_history_[i].interval_us);
+        if (i > n - kMinRawSamples) {
+            if (raw_input_history_[i].dx == raw_input_history_[i - 1].dx &&
+                raw_input_history_[i].dy == raw_input_history_[i - 1].dy) {
+                ++identicalDeltaCount;
+            }
+        }
+    }
+
+    double meanUs = sumUs / kMinRawSamples;
+    if (meanUs < 100.0) return std::nullopt;
+
+    double varUs = 0.0;
+    for (size_t i = n - kMinRawSamples; i < n; ++i) {
+        double diff = static_cast<double>(raw_input_history_[i].interval_us) - meanUs;
+        varUs += diff * diff;
+    }
+    double stddevUs = std::sqrt(varUs / kMinRawSamples);
+
+    // Synthetic software timers / macro loops produce near-zero interval jitter (< 1.5 us)
+    // combined with quantized identical step deltas across >= 85% of samples
+    if (stddevUs < 1.5 && identicalDeltaCount >= (kMinRawSamples - 3)) {
+        ++session_anomaly_count_;
+        core::DetectionEvent ev;
+        ev.type = core::DetectionType::KINEMATICS_SYNTHETIC_INPUT;
+        ev.severity = core::Severity::MEDIUM;
+        ev.component = "Kinematics::SyntheticInputDetector";
+        ev.timestamp = static_cast<uint64_t>(std::time(nullptr));
+        ev.threat_score = 45;
+        ev.confidence = core::ConfidenceLevel::MEDIUM;
+
+        std::ostringstream ss;
+        ss << "Synthetic quantized mouse input stream detected: interval_mean=" << meanUs
+           << " us, jitter_stddev=" << stddevUs << " us, identical_step_ratio="
+           << identicalDeltaCount << "/" << (kMinRawSamples - 1);
+        ev.details = ss.str();
+        return ev;
+    }
+
+    return std::nullopt;
+}
+
+void AimAnalyzer::RecordCrosshairTargetAcquire(uint64_t timestamp_ms) {
+    last_target_acquire_ms_ = timestamp_ms;
+}
+
+std::optional<core::DetectionEvent> AimAnalyzer::RecordWeaponFire(uint64_t timestamp_ms) {
+    if (!last_target_acquire_ms_.has_value()) return std::nullopt;
+    uint64_t acquire_ms = *last_target_acquire_ms_;
+    last_target_acquire_ms_.reset();
+
+    if (timestamp_ms < acquire_ms) return std::nullopt;
+    uint64_t delay_ms = timestamp_ms - acquire_ms;
+    // Ignore pre-fires or engagements longer than 1.5 seconds after initial target acquisition
+    if (delay_ms > 1500) return std::nullopt;
+
+    reaction_delays_ms_.push_back(delay_ms);
+    if (reaction_delays_ms_.size() > 32) {
+        reaction_delays_ms_.pop_front();
+    }
+
+    return CheckTriggerbotTiming();
+}
+
+std::optional<core::DetectionEvent> AimAnalyzer::CheckTriggerbotTiming() {
+    constexpr size_t kMinTriggerSamples = 6;
+    if (reaction_delays_ms_.size() < kMinTriggerSamples) return std::nullopt;
+
+    size_t n = reaction_delays_ms_.size();
+    double sum = 0.0;
+    for (size_t i = n - kMinTriggerSamples; i < n; ++i) {
+        sum += static_cast<double>(reaction_delays_ms_[i]);
+    }
+    double meanMs = sum / kMinTriggerSamples;
+
+    double var = 0.0;
+    for (size_t i = n - kMinTriggerSamples; i < n; ++i) {
+        double diff = static_cast<double>(reaction_delays_ms_[i]) - meanMs;
+        var += diff * diff;
+    }
+    double stddevMs = std::sqrt(var / kMinTriggerSamples);
+
+    // Human visual reaction times average 150-250ms with >= 12ms standard deviation.
+    // Triggerbots either fire sub-45ms consistently or use a fixed sleep timer (e.g. 60ms +/- 2ms).
+    if (meanMs < 45.0 || (meanMs < 95.0 && stddevMs < 3.0)) {
+        ++session_anomaly_count_;
+        core::DetectionEvent ev;
+        ev.type = core::DetectionType::KINEMATICS_TRIGGERBOT;
+        ev.severity = core::Severity::HIGH;
+        ev.component = "Kinematics::TriggerbotAnalyzer";
+        ev.timestamp = static_cast<uint64_t>(std::time(nullptr));
+        ev.threat_score = 55;
+        ev.confidence = core::ConfidenceLevel::MEDIUM;
+
+        std::ostringstream ss;
+        ss << "Automated triggerbot reaction profile over " << kMinTriggerSamples
+           << " engagements: mean_delay=" << meanMs << " ms, stddev=" << stddevMs << " ms";
+        ev.details = ss.str();
+        return ev;
+    }
+
+    return std::nullopt;
+}
+
+std::optional<core::DetectionEvent> AimAnalyzer::RecordRecoilCompensation(
+    float weapon_recoil_pitch, float weapon_recoil_yaw,
+    float player_input_pitch, float player_input_yaw) {
+    if (!std::isfinite(weapon_recoil_pitch) || !std::isfinite(weapon_recoil_yaw) ||
+        !std::isfinite(player_input_pitch) || !std::isfinite(player_input_yaw)) {
+        return std::nullopt;
+    }
+    // Only record non-trivial weapon kick events
+    float kickMag = std::sqrt(weapon_recoil_pitch * weapon_recoil_pitch +
+                              weapon_recoil_yaw * weapon_recoil_yaw);
+    if (kickMag < 0.25f) return std::nullopt;
+
+    recoil_history_.push_back(RecoilSample{
+        weapon_recoil_pitch, weapon_recoil_yaw,
+        player_input_pitch, player_input_yaw
+    });
+    if (recoil_history_.size() > 32) {
+        recoil_history_.pop_front();
+    }
+
+    return CheckRecoilAutomation();
+}
+
+std::optional<core::DetectionEvent> AimAnalyzer::CheckRecoilAutomation() {
+    constexpr size_t kMinRecoilSamples = 10;
+    if (recoil_history_.size() < kMinRecoilSamples) return std::nullopt;
+
+    size_t n = recoil_history_.size();
+    double totalResidualSq = 0.0;
+    double totalKickSq = 0.0;
+
+    for (size_t i = n - kMinRecoilSamples; i < n; ++i) {
+        const auto& s = recoil_history_[i];
+        // Ideal counter-recoil is player_input == -weapon_recoil
+        double resPitch = static_cast<double>(s.weapon_pitch + s.input_pitch);
+        double resYaw = static_cast<double>(s.weapon_yaw + s.input_yaw);
+        totalResidualSq += (resPitch * resPitch + resYaw * resYaw);
+        totalKickSq += (static_cast<double>(s.weapon_pitch) * s.weapon_pitch +
+                        static_cast<double>(s.weapon_yaw) * s.weapon_yaw);
+    }
+
+    if (totalKickSq < 1.0) return std::nullopt;
+    double meanResidualSq = totalResidualSq / kMinRecoilSamples;
+    double cancellationRatio = 1.0 - std::sqrt(totalResidualSq / totalKickSq);
+
+    // Automated recoil scripts cancel > 98.5% of both vertical and horizontal kick with near-zero residual error
+    if (cancellationRatio > 0.985 && meanResidualSq < 0.002) {
+        ++session_anomaly_count_;
+        core::DetectionEvent ev;
+        ev.type = core::DetectionType::KINEMATICS_RECOIL_AUTOMATION;
+        ev.severity = core::Severity::MEDIUM;
+        ev.component = "Kinematics::RecoilAnalyzer";
+        ev.timestamp = static_cast<uint64_t>(std::time(nullptr));
+        ev.threat_score = 50;
+        ev.confidence = core::ConfidenceLevel::MEDIUM;
+
+        std::ostringstream ss;
+        ss << "Deterministic recoil compensation script detected over " << kMinRecoilSamples
+           << " shots: cancellation=" << (cancellationRatio * 100.0)
+           << "%, mean_residual_sq=" << meanResidualSq;
+        ev.details = ss.str();
+        return ev;
+    }
+
+    return std::nullopt;
 }
 
 } // namespace noescape::kinematics

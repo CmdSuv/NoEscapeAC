@@ -12,7 +12,9 @@ if(WIN32)
 endif()
 
 if(MSVC)
-    add_compile_options(/W4 /arch:AVX2 /permissive- /utf-8 /EHsc)
+    # AVX2 is selected at runtime inside the pattern scanner via __cpuidex + _xgetbv;
+    # never compile the whole library with /arch:AVX2 or it faults on CPUs without AVX2.
+    add_compile_options(/W4 /permissive- /utf-8 /EHsc)
     add_compile_definitions(_CRT_SECURE_NO_WARNINGS)
 else()
     # AVX2 is selected at runtime inside the pattern scanner (target attribute + cpu check);
@@ -58,6 +60,7 @@ include_directories(
 set(CORE_SOURCES
     src/core/logger.cpp
     src/core/thread_pool.cpp
+    src/core/evidence_correlator.cpp
     src/core/engine.cpp
     src/core/blackbox.cpp
     src/network/crypto_util.cpp
@@ -77,6 +80,7 @@ set(CORE_SOURCES
     src/kinematics/aim_analyzer.cpp
     src/kinematics/phantom_monitor.cpp
     src/overlay/overlay_detector.cpp
+    src/server/server_integration.cpp
     src/sdk/noescape_sdk.cpp
     src/sdk/auto_init.cpp
 )
@@ -146,6 +150,7 @@ set(TEST_SOURCES
     tests/test_audit_remediation.cpp
     tests/test_signatures.cpp
     tests/test_regressions.cpp
+    tests/test_server_and_correlation.cpp
 )
 
 add_executable(noescape_tests ${TEST_SOURCES})

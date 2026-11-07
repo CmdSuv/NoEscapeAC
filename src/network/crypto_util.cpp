@@ -5,12 +5,18 @@
 #include <iomanip>
 #include <fstream>
 #include <array>
+#include <random>
+#include <chrono>
 
 #if defined(_WIN32)
 #include <windows.h>
 #else
 #include <unistd.h>
 #include <sys/types.h>
+#endif
+
+#if defined(NOESCAPE_HAS_OPENSSL)
+#include <openssl/evp.h>
 #endif
 
 namespace noescape::network {
@@ -256,6 +262,202 @@ std::string CryptoUtil::GetMachineHWID() {
     gethostname(hostname, sizeof(hostname) - 1);
     return Sha256(std::string("LINUX-HWID-") + hostname);
 #endif
+}
+
+std::vector<uint8_t> CryptoUtil::FromHex(const std::string& hex) {
+    std::vector<uint8_t> out;
+    if (hex.size() % 2 != 0) return out;
+    out.reserve(hex.size() / 2);
+    auto hexVal = [](char c) -> int {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        return -1;
+    };
+    for (size_t i = 0; i < hex.size(); i += 2) {
+        int hi = hexVal(hex[i]);
+        int lo = hexVal(hex[i + 1]);
+        if (hi < 0 || lo < 0) {
+            out.clear();
+            return out;
+        }
+        out.push_back(static_cast<uint8_t>((hi << 4) | lo));
+    }
+    return out;
+}
+
+std::string CryptoUtil::Sha256File(const std::string& file_path) {
+    if (file_path.empty()) return "";
+    std::ifstream ifs(file_path, std::ios::binary);
+    if (!ifs.is_open()) return "";
+
+    Sha256Context ctx;
+    std::array<uint8_t, 65536> buf{};
+    while (ifs.good()) {
+        ifs.read(reinterpret_cast<char*>(buf.data()), static_cast<std::streamsize>(buf.size()));
+        std::streamsize n = ifs.gcount();
+        if (n > 0) {
+            ctx.Update(buf.data(), static_cast<size_t>(n));
+        }
+    }
+    uint8_t digest[32];
+    ctx.Finalize(digest);
+    return ToHex(digest, 32);
+}
+
+void CryptoUtil::GenerateRandomBytes(uint8_t* out, size_t length) {
+    if (!out || length == 0) return;
+#if !defined(_WIN32)
+    std::ifstream urandom("/dev/urandom", std::ios::binary);
+    if (urandom.is_open()) {
+        urandom.read(reinterpret_cast<char*>(out), static_cast<std::streamsize>(length));
+        if (static_cast<size_t>(urandom.gcount()) == length) {
+            return;
+        }
+    }
+#endif
+    std::random_device rd;
+    uint64_t seedNs = static_cast<uint64_t>(
+        std::chrono::high_resolution_clock::now().time_since_epoch().count()
+    );
+    for (size_t i = 0; i < length; ++i) {
+        uint32_t r = rd();
+        seedNs ^= (seedNs << 13) ^ (seedNs >> 7) ^ static_cast<uint64_t>(r);
+        out[i] = static_cast<uint8_t>((r ^ (seedNs >> ((i % 8) * 8))) & 0xFF);
+    }
+}
+
+std::string CryptoUtil::GenerateRandomHex(size_t byte_length) {
+    std::vector<uint8_t> bytes(byte_length);
+    GenerateRandomBytes(bytes.data(), byte_length);
+    return ToHex(bytes.data(), bytes.size());
+}
+
+std::string CryptoUtil::DeriveKeyHkdf(
+    const std::string& input_key_material,
+    const std::string& salt,
+    const std::string& info
+) {
+    std::string effectiveSalt = salt.empty() ? std::string(32, '\0') : salt;
+    std::string prk = HmacSha256(effectiveSalt, input_key_material);
+    std::string expandInput = info + std::string(1, '\x01');
+    return HmacSha256(prk, expandInput);
+}
+
+CryptoUtil::AsymmetricKeyPair CryptoUtil::GenerateAsymmetricKeyPair() {
+    AsymmetricKeyPair kp{};
+#if defined(NOESCAPE_HAS_OPENSSL)
+    EVP_PKEY* pkey = nullptr;
+    EVP_PKEY_CTX* pctx = EVP_PKEY_CTX_new_id(EVP_PKEY_ED25519, nullptr);
+    if (pctx) {
+        if (EVP_PKEY_keygen_init(pctx) == 1 && EVP_PKEY_keygen(pctx, &pkey) == 1 && pkey) {
+            uint8_t privBuf[32]{};
+            uint8_t pubBuf[32]{};
+            size_t privLen = sizeof(privBuf);
+            size_t pubLen = sizeof(pubBuf);
+            if (EVP_PKEY_get_raw_private_key(pkey, privBuf, &privLen) == 1 &&
+                EVP_PKEY_get_raw_public_key(pkey, pubBuf, &pubLen) == 1) {
+                kp.private_key_hex = ToHex(privBuf, privLen);
+                kp.public_key_hex = ToHex(pubBuf, pubLen);
+            }
+        }
+        if (pkey) EVP_PKEY_free(pkey);
+        EVP_PKEY_CTX_free(pctx);
+    }
+    if (!kp.private_key_hex.empty() && !kp.public_key_hex.empty()) {
+        return kp;
+    }
+#endif
+    // Portable fallback when OpenSSL Ed25519 is unavailable
+    kp.private_key_hex = GenerateRandomHex(32);
+    kp.public_key_hex = DeriveKeyHkdf(kp.private_key_hex, "NoEscape-Asym-Salt-v1", "Ed25519-Fallback-Public");
+    return kp;
+}
+
+std::string CryptoUtil::SignAsymmetric(const std::string& private_key_hex, const std::string& message) {
+    auto privBytes = FromHex(private_key_hex);
+    if (privBytes.size() != 32) return "";
+#if defined(NOESCAPE_HAS_OPENSSL)
+    EVP_PKEY* pkey = EVP_PKEY_new_raw_private_key(EVP_PKEY_ED25519, nullptr, privBytes.data(), privBytes.size());
+    if (pkey) {
+        EVP_MD_CTX* mctx = EVP_MD_CTX_new();
+        std::string sigHex;
+        if (mctx) {
+            uint8_t sig[64]{};
+            size_t sigLen = sizeof(sig);
+            if (EVP_DigestSignInit(mctx, nullptr, nullptr, nullptr, pkey) == 1 &&
+                EVP_DigestSign(mctx, sig, &sigLen,
+                               reinterpret_cast<const uint8_t*>(message.data()), message.size()) == 1) {
+                sigHex = ToHex(sig, sigLen);
+            }
+            EVP_MD_CTX_free(mctx);
+        }
+        EVP_PKEY_free(pkey);
+        if (!sigHex.empty()) return sigHex;
+    }
+#endif
+    std::string pubHex = DeriveKeyHkdf(private_key_hex, "NoEscape-Asym-Salt-v1", "Ed25519-Fallback-Public");
+    std::string p1 = HmacSha256(pubHex, "SIG-A:" + message);
+    std::string p2 = HmacSha256(pubHex, "SIG-B:" + message);
+    return p1 + p2;
+}
+
+bool CryptoUtil::VerifyAsymmetric(
+    const std::string& public_key_hex,
+    const std::string& message,
+    const std::string& signature_hex
+) {
+    auto pubBytes = FromHex(public_key_hex);
+    auto sigBytes = FromHex(signature_hex);
+    if (pubBytes.size() != 32 || sigBytes.size() != 64) return false;
+#if defined(NOESCAPE_HAS_OPENSSL)
+    EVP_PKEY* pkey = EVP_PKEY_new_raw_public_key(EVP_PKEY_ED25519, nullptr, pubBytes.data(), pubBytes.size());
+    if (pkey) {
+        EVP_MD_CTX* mctx = EVP_MD_CTX_new();
+        bool ok = false;
+        if (mctx) {
+            if (EVP_DigestVerifyInit(mctx, nullptr, nullptr, nullptr, pkey) == 1 &&
+                EVP_DigestVerify(mctx, sigBytes.data(), sigBytes.size(),
+                                 reinterpret_cast<const uint8_t*>(message.data()), message.size()) == 1) {
+                ok = true;
+            }
+            EVP_MD_CTX_free(mctx);
+        }
+        EVP_PKEY_free(pkey);
+        return ok;
+    }
+#endif
+    std::string expected = HmacSha256(public_key_hex, "SIG-A:" + message) +
+                           HmacSha256(public_key_hex, "SIG-B:" + message);
+    return ConstantTimeEquals(expected, signature_hex);
+}
+
+bool CryptoUtil::IsVersionAtLeast(const std::string& actual_version, const std::string& minimum_required) {
+    if (minimum_required.empty()) return true;
+    if (actual_version.empty()) return false;
+
+    auto parseVer = [](const std::string& v) -> std::array<int, 3> {
+        std::array<int, 3> parts{0, 0, 0};
+        std::istringstream ss(v);
+        std::string token;
+        size_t idx = 0;
+        while (idx < 3 && std::getline(ss, token, '.')) {
+            try {
+                parts[idx++] = std::stoi(token);
+            } catch (...) {
+                parts[idx++] = 0;
+            }
+        }
+        return parts;
+    };
+
+    auto act = parseVer(actual_version);
+    auto req = parseVer(minimum_required);
+    for (size_t i = 0; i < 3; ++i) {
+        if (act[i] > req[i]) return true;
+        if (act[i] < req[i]) return false;
+    }
+    return true;
 }
 
 } // namespace noescape::network

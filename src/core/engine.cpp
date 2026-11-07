@@ -49,7 +49,17 @@ uint64_t GetSteadyNowMs() {
 AntiCheatEngine::AntiCheatEngine(EngineConfig config)
     : config_(std::move(config)),
       panel_client_(config_.panelUrl, config_.secretKey, config_.panelPinSha256),
-      aim_analyzer_(64) {}
+      aim_analyzer_(64) {
+    if (!config_.serverPublicKey.empty()) {
+        panel_client_.SetServerPublicKey(config_.serverPublicKey);
+    }
+    if (!config_.keyId.empty()) {
+        panel_client_.SetKeyId(config_.keyId);
+    }
+    if (!config_.clientBuildVersion.empty()) {
+        panel_client_.SetClientBuildVersion(config_.clientBuildVersion);
+    }
+}
 
 AntiCheatEngine::~AntiCheatEngine() {
     Stop();
@@ -177,6 +187,7 @@ std::vector<DetectionEvent> AntiCheatEngine::AuditCycle() {
     } else if (!auditLock.try_lock()) {
         return cycleEvents;
     }
+    const auto cycleStartTime = std::chrono::steady_clock::now();
     const uint64_t cycleStartMs = GetSteadyNowMs();
     // Process-table / window-tree scans read every /proc entry: run them every 5 s, not per cycle
     const uint64_t lastHeavy = last_heavy_scan_ms_.load(std::memory_order_acquire);
@@ -221,10 +232,16 @@ std::vector<DetectionEvent> AntiCheatEngine::AuditCycle() {
     if (stop_requested_.load(std::memory_order_acquire)) return cycleEvents;
     UpdateAuditHeartbeat();
 
-    // 4. Memory Scanner (Unbacked executable memory + signature scan)
+    // 4. Memory Scanner (Unbacked executable memory + signature scan + thread/module provenance)
     if (config_.enableMemoryScan) {
         auto memEvents = memory::MemoryScanner::Instance().PerformAudit(default_signatures_);
         cycleEvents.insert(cycleEvents.end(), memEvents.begin(), memEvents.end());
+        if (heavyScansDue) {
+            auto threadEvents = memory::MemoryScanner::Instance().AuditThreadProvenance();
+            cycleEvents.insert(cycleEvents.end(), threadEvents.begin(), threadEvents.end());
+            auto modEvents = memory::MemoryScanner::Instance().AuditModuleProvenance();
+            cycleEvents.insert(cycleEvents.end(), modEvents.begin(), modEvents.end());
+        }
     }
     if (stop_requested_.load(std::memory_order_acquire)) return cycleEvents;
     UpdateAuditHeartbeat();
@@ -238,10 +255,14 @@ std::vector<DetectionEvent> AntiCheatEngine::AuditCycle() {
     if (stop_requested_.load(std::memory_order_acquire)) return cycleEvents;
     UpdateAuditHeartbeat();
 
-    // 5. Inline Unhooker Audit
+    // 5. Inline Unhooker & IAT/GOT/EAT Table Audit
     if (config_.enableUnhooker) {
         auto hookEvents = memory::Unhooker::Instance().AuditSystemHooks();
         cycleEvents.insert(cycleEvents.end(), hookEvents.begin(), hookEvents.end());
+        if (heavyScansDue) {
+            auto tableEvents = memory::Unhooker::Instance().AuditImportExportTables();
+            cycleEvents.insert(cycleEvents.end(), tableEvents.begin(), tableEvents.end());
+        }
     }
     if (stop_requested_.load(std::memory_order_acquire)) return cycleEvents;
     UpdateAuditHeartbeat();
@@ -298,6 +319,11 @@ std::vector<DetectionEvent> AntiCheatEngine::AuditCycle() {
         ProcessDetection(ev);
     }
 
+    const auto cycleEndTime = std::chrono::steady_clock::now();
+    const uint64_t elapsedUs = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(cycleEndTime - cycleStartTime).count());
+    last_audit_duration_us_.store(elapsedUs, std::memory_order_relaxed);
+
     return cycleEvents;
 }
 
@@ -342,26 +368,72 @@ std::string DetectionKey(const DetectionEvent& e) {
 
 void AntiCheatEngine::ProcessDetection(const DetectionEvent& event) {
     bool firstSighting = true;
+    uint32_t currentScore = threat_score_.load();
+    auto decision = correlator_.Evaluate(
+        event,
+        currentScore,
+        config_.banScoreThreshold,
+        config_.requireMultiSignalCorroboration
+    );
+    const DetectionEvent& enriched = decision.enriched_event;
+
     {
         std::lock_guard<std::mutex> lock(history_mutex_);
-        firstSighting = scored_keys_.insert(DetectionKey(event)).second;
-        if (firstSighting) history_.push_back(event);
+        firstSighting = scored_keys_.insert(DetectionKey(enriched)).second;
+        if (firstSighting) {
+            history_.push_back(enriched);
+        }
     }
 
     // A persistent condition is scored once; repeats must not snowball into a ban.
     // Fatal events still enforce on every sighting.
     if (firstSighting) {
-        threat_score_.fetch_add(event.threat_score);
-        Logger::Instance().SecurityAlert(event);
+        threat_score_.fetch_add(decision.effective_score_delta);
+        Logger::Instance().SecurityAlert(enriched);
         std::function<void(const DetectionEvent&)> cb;
         { std::lock_guard<std::mutex> lock(history_mutex_); cb = violation_callback_; }
-        if (cb) cb(event);
+        if (cb) cb(enriched);
+    }
+
+    if (decision.eligible_for_match_restriction) {
+        is_match_restricted_.store(true, std::memory_order_release);
+    }
+    if (decision.eligible_for_session_reject) {
+        is_session_rejected_.store(true, std::memory_order_release);
+    }
+
+    // Apply configured enforcement mode
+    if (config_.enforcementMode == EnforcementMode::REPORT_ONLY) {
+        return;
+    }
+    if (config_.enforcementMode == EnforcementMode::SHADOW) {
+        uint32_t cur = threat_score_.load();
+        if ((cur >= config_.banScoreThreshold && cur > 0) || enriched.severity == Severity::FATAL_BAN) {
+            is_shadow_flagged_.store(true, std::memory_order_release);
+        }
+        return;
+    }
+    if (config_.enforcementMode == EnforcementMode::MATCH_RESTRICTION) {
+        uint32_t cur = threat_score_.load();
+        if ((cur >= config_.banScoreThreshold && cur > 0) || enriched.severity == Severity::FATAL_BAN) {
+            is_match_restricted_.store(true, std::memory_order_release);
+        }
+        return;
+    }
+    if (config_.enforcementMode == EnforcementMode::SERVER_SESSION_REJECT) {
+        uint32_t cur = threat_score_.load();
+        if ((cur >= config_.banScoreThreshold && cur > 0) || enriched.severity == Severity::FATAL_BAN) {
+            is_session_rejected_.store(true, std::memory_order_release);
+        }
+        return;
     }
 
     if (config_.enforceBanOnViolation) {
         uint32_t cur = threat_score_.load();
-        if ((cur >= config_.banScoreThreshold && cur > 0) || event.severity == Severity::FATAL_BAN) {
-            TriggerBan(event.details, event.type, event.component);
+        bool thresholdExceeded = (cur >= config_.banScoreThreshold && cur > 0) ||
+                                 (enriched.severity == Severity::FATAL_BAN);
+        if (thresholdExceeded && decision.eligible_for_permanent_ban) {
+            TriggerBan(enriched.details, enriched.type, enriched.component);
         }
     }
 }
@@ -693,10 +765,33 @@ void AntiCheatEngine::UpdateAuditHeartbeat() {
     }
 }
 
+void AntiCheatEngine::SimulateSystemWakeRecoveryForTesting() {
+    std::lock_guard<std::mutex> lock(heartbeat_mutex_);
+    uint64_t now = GetSteadyNowMs();
+    if (!freeze_background_loop_for_testing_.load(std::memory_order_acquire)) {
+        last_audit_heartbeat_ms_.store(now, std::memory_order_release);
+    }
+    if (!freeze_watchdog_for_testing_.load(std::memory_order_acquire)) {
+        watchdog_heartbeat_ms_.store(now, std::memory_order_release);
+    }
+}
+
 void AntiCheatEngine::WatchdogLoop() {
     while (running_.load(std::memory_order_acquire)) {
+        uint64_t sleepStart = GetSteadyNowMs();
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        uint64_t sleepEnd = GetSteadyNowMs();
         if (!running_.load(std::memory_order_acquire)) break;
+
+        // If a 100ms sleep took > 1500ms of steady clock time, the entire process or OS
+        // underwent system suspend/hibernate or a host-wide VM/scheduler pause rather than
+        // targeted suspension of the audit thread alone. Resynchronize heartbeats on wake.
+        if (sleepEnd > sleepStart && (sleepEnd - sleepStart) > 1500 &&
+            !freeze_background_loop_for_testing_.load(std::memory_order_acquire)) {
+            SimulateSystemWakeRecoveryForTesting();
+            continue;
+        }
+
         {
             std::lock_guard<std::mutex> lock(heartbeat_mutex_);
             if (!freeze_watchdog_for_testing_.load(std::memory_order_acquire)) {
@@ -717,7 +812,9 @@ void AntiCheatEngine::WatchdogLoop() {
             ev.timestamp = static_cast<uint64_t>(std::time(nullptr));
             ev.threat_score = 100;
             ProcessDetection(ev);
-            if (!is_banned_.load(std::memory_order_acquire)) {
+            if (!is_banned_.load(std::memory_order_acquire) &&
+                config_.enforcementMode == EnforcementMode::ENFORCE &&
+                config_.enforceBanOnViolation) {
                 TriggerBan(ev.details, ev.type, ev.component);
             }
             break;

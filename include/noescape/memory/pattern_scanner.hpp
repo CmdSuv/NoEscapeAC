@@ -27,10 +27,12 @@ public:
     const std::vector<PatternByte>& GetBytes() const { return bytes_; }
     const std::string& GetName() const { return name_; }
 
-    // First non-wildcard byte and its offset for SIMD quick skipping
+    // First and last non-wildcard bytes and their offsets for dual-anchor SIMD quick skipping
     bool HasNonWildcard() const { return has_non_wildcard_; }
     uint8_t FirstByte() const { return first_byte_; }
     size_t FirstByteOffset() const { return first_byte_offset_; }
+    uint8_t LastByte() const { return last_byte_; }
+    size_t LastByteOffset() const { return last_byte_offset_; }
 
 private:
     std::vector<PatternByte> bytes_;
@@ -38,17 +40,39 @@ private:
     bool has_non_wildcard_{false};
     uint8_t first_byte_{0};
     size_t first_byte_offset_{0};
+    uint8_t last_byte_{0};
+    size_t last_byte_offset_{0};
 };
 
 class CheatSignature;
 
+enum class SimdIsa : uint8_t {
+    AUTO = 0,
+    SCALAR = 1,
+    SSE2 = 2,
+    AVX2 = 3
+};
+
 class PatternScanner {
 public:
-    // Scans a memory buffer for a single pattern
+    // Runtime CPU ISA support queries
+    static bool HasAvx2Support();
+    static bool HasSse2Support();
+
+    // Scans a memory buffer for a single pattern (uses runtime SIMD dispatch)
     static std::optional<uintptr_t> Scan(
         const uint8_t* data, 
         size_t size, 
         const Pattern& pattern,
+        uintptr_t base_address = 0
+    );
+
+    // Explicit ISA scan entry point for verification and benchmarking
+    static std::optional<uintptr_t> ScanWithIsa(
+        const uint8_t* data,
+        size_t size,
+        const Pattern& pattern,
+        SimdIsa isa,
         uintptr_t base_address = 0
     );
 

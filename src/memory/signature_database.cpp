@@ -1,6 +1,10 @@
 #include "noescape/memory/signature_database.hpp"
+#include "noescape/network/crypto_util.hpp"
 #include <mutex>
 #include <algorithm>
+#include <sstream>
+#include <iomanip>
+#include <set>
 
 namespace noescape::memory {
 
@@ -52,6 +56,7 @@ namespace {
     std::mutex g_dbMutex;
     std::vector<CheatSignature> g_signatures;
     bool g_initialized = false;
+    uint32_t g_dbVersion = 1;
 }
 
 std::vector<CheatSignature> SignatureDatabase::CreateDefaultSignatures() {
@@ -649,6 +654,7 @@ void SignatureDatabase::Reset() {
     std::lock_guard<std::mutex> lock(g_dbMutex);
     g_signatures = CreateDefaultSignatures();
     g_initialized = true;
+    g_dbVersion = 1;
 }
 
 size_t SignatureDatabase::Count() {
@@ -698,6 +704,156 @@ std::vector<std::pair<uintptr_t, uintptr_t>> SignatureDatabase::GetInternalSpans
         }
     }
     return spans;
+}
+
+namespace {
+std::string FormatPatternToIda(const Pattern& p) {
+    std::ostringstream ss;
+    const auto& bytes = p.GetBytes();
+    for (size_t i = 0; i < bytes.size(); ++i) {
+        if (i > 0) ss << ' ';
+        if (bytes[i].is_wildcard) {
+            ss << '?';
+        } else {
+            ss << std::uppercase << std::hex << std::setw(2) << std::setfill('0')
+               << static_cast<int>(bytes[i].value);
+        }
+    }
+    return ss.str();
+}
+} // namespace
+
+uint32_t SignatureDatabase::GetDatabaseVersion() {
+    std::lock_guard<std::mutex> lock(g_dbMutex);
+    return g_dbVersion;
+}
+
+size_t SignatureDatabase::Deduplicate() {
+    std::lock_guard<std::mutex> lock(g_dbMutex);
+    if (!g_initialized) {
+        g_signatures = CreateDefaultSignatures();
+        g_initialized = true;
+    }
+    std::set<std::string> seenFingerprints;
+    std::vector<CheatSignature> uniqueList;
+    uniqueList.reserve(g_signatures.size());
+    size_t removed = 0;
+
+    for (auto& sig : g_signatures) {
+        std::string fp = FormatPatternToIda(sig) + "|" +
+                         std::to_string(static_cast<uint32_t>(sig.GetTargetRule()));
+        if (seenFingerprints.insert(fp).second) {
+            uniqueList.push_back(std::move(sig));
+        } else {
+            ++removed;
+        }
+    }
+    g_signatures = std::move(uniqueList);
+    return removed;
+}
+
+std::string SignatureDatabase::ExportSignedBundle(
+    uint32_t version,
+    const std::vector<CheatSignature>& signatures,
+    const std::string& signing_key,
+    bool use_asymmetric
+) {
+    std::ostringstream body;
+    body << "NESIGDB1|" << version << "|" << signatures.size() << "\n";
+    for (const auto& s : signatures) {
+        body << s.GetName() << "|"
+             << FormatPatternToIda(s) << "|"
+             << static_cast<uint32_t>(s.GetCategory()) << "|"
+             << s.GetThreatScore() << "|"
+             << static_cast<uint32_t>(s.GetSeverity()) << "|"
+             << static_cast<uint32_t>(s.GetTargetRule()) << "|"
+             << s.GetDescription() << "\n";
+    }
+    std::string canonical = body.str();
+    std::string sigHex = use_asymmetric
+        ? network::CryptoUtil::SignAsymmetric(signing_key, canonical)
+        : network::CryptoUtil::HmacSha256(signing_key, canonical);
+    return "SIG:" + sigHex + "\n" + canonical;
+}
+
+bool SignatureDatabase::ImportSignedBundle(
+    const std::string& bundle_payload,
+    const std::string& verification_key,
+    bool use_asymmetric
+) {
+    if (bundle_payload.rfind("SIG:", 0) != 0) return false;
+    size_t nl = bundle_payload.find('\n');
+    if (nl == std::string::npos) return false;
+
+    std::string sigHex = bundle_payload.substr(4, nl - 4);
+    std::string canonical = bundle_payload.substr(nl + 1);
+
+    bool validSig = use_asymmetric
+        ? network::CryptoUtil::VerifyAsymmetric(verification_key, canonical, sigHex)
+        : network::CryptoUtil::ConstantTimeEquals(sigHex, network::CryptoUtil::HmacSha256(verification_key, canonical));
+    if (!validSig) return false;
+
+    std::istringstream ss(canonical);
+    std::string header;
+    if (!std::getline(ss, header)) return false;
+
+    std::istringstream hss(header);
+    std::string magic, verStr, countStr;
+    if (!std::getline(hss, magic, '|') || magic != "NESIGDB1" ||
+        !std::getline(hss, verStr, '|') ||
+        !std::getline(hss, countStr, '|')) {
+        return false;
+    }
+
+    uint32_t version = 0;
+    try {
+        version = static_cast<uint32_t>(std::stoul(verStr));
+    } catch (...) {
+        return false;
+    }
+
+    // Anti-rollback enforcement: reject older or replayed equal-version bundles
+    {
+        std::lock_guard<std::mutex> lock(g_dbMutex);
+        if (version <= g_dbVersion) return false;
+    }
+
+    std::vector<CheatSignature> parsed;
+    std::string line;
+    while (std::getline(ss, line)) {
+        if (line.empty()) continue;
+        std::istringstream lss(line);
+        std::string name, idaPat, catStr, scoreStr, sevStr, ruleStr, desc;
+        if (!std::getline(lss, name, '|') ||
+            !std::getline(lss, idaPat, '|') ||
+            !std::getline(lss, catStr, '|') ||
+            !std::getline(lss, scoreStr, '|') ||
+            !std::getline(lss, sevStr, '|') ||
+            !std::getline(lss, ruleStr, '|')) {
+            return false;
+        }
+        std::getline(lss, desc);
+
+        try {
+            auto cat = static_cast<SignatureCategory>(std::stoul(catStr));
+            auto score = static_cast<uint32_t>(std::stoul(scoreStr));
+            auto sev = static_cast<core::Severity>(std::stoul(sevStr));
+            auto rule = static_cast<MemoryTargetRule>(std::stoul(ruleStr));
+            parsed.emplace_back(idaPat, name, cat, score, sev, rule, desc);
+        } catch (...) {
+            return false;
+        }
+    }
+
+    for (auto& sig : parsed) {
+        RegisterCustomSignature(std::move(sig));
+    }
+    Deduplicate();
+    {
+        std::lock_guard<std::mutex> lock(g_dbMutex);
+        g_dbVersion = version;
+    }
+    return true;
 }
 
 } // namespace noescape::memory

@@ -24,6 +24,27 @@ struct PciDeviceInfo {
     bool is_suspicious{false};
 };
 
+enum class HardwareConfidenceLevel : uint8_t {
+    KNOWN_LEGITIMATE = 0,
+    BENIGN_DEV_HARDWARE = 0,
+    TIMING_ANOMALY_ONLY = 1,
+    SUSPICIOUS_CHARACTERISTICS = 2,
+    SUSPICIOUS_BRIDGE_OR_FPGA = 2,
+    KNOWN_CHEAT_HARDWARE = 3,
+    CONFIRMED_TOOL_ARTIFACT = 4,
+    CORROBORATED_DMA_EVIDENCE = 4
+};
+
+struct IommuStatusInfo {
+    bool iommu_present{false};
+    bool dma_remapping_enabled{false};
+    bool dma_remapping_active{false};
+    bool strict_mode{false};
+    uint32_t isolated_group_count{0};
+    std::string source{};
+    std::string provider{};
+};
+
 class DmaDetector {
 public:
     static DmaDetector& Instance();
@@ -39,6 +60,25 @@ public:
 
     // Check for LeechCore / shadow memory interfaces
     bool CheckLeechCoreArtifacts();
+
+    // Inspects OS / hardware IOMMU (VT-d / AMD-Vi / Kernel DMA Protection) status
+    IommuStatusInfo CheckIommuStatus();
+
+    // Computes multi-signal hardware confidence classification
+    HardwareConfidenceLevel EvaluateHardwareConfidence(
+        const PciDeviceInfo& dev,
+        bool has_leechcore_artifact,
+        bool has_bus_jitter_anomaly
+    ) const;
+
+    HardwareConfidenceLevel EvaluateHardwareConfidence(
+        const DmaProfile& jitter_profile,
+        const std::vector<PciDeviceInfo>& devices,
+        bool leechcore_present,
+        const IommuStatusInfo& iommu_status
+    ) const;
+
+    static const char* ConfidenceLevelToString(HardwareConfidenceLevel level);
 
     // Runs a full DMA audit
     std::vector<core::DetectionEvent> PerformAudit();

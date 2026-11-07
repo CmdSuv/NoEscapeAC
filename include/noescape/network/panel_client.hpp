@@ -44,14 +44,18 @@ struct BanCheckResult {
 struct AttestChallenge {
     bool present{false};
     bool forged{false};        // a challenge arrived but its signature did not verify
+    bool expired{false};       // challenge timestamp/TTL expired
     std::string id;
     std::string nonce;
     uint64_t offset{0};        // into the anti-cheat's executable segment
     uint64_t length{0};
+    uint64_t expires_at{0};
 };
 
 struct HeartbeatResult {
     bool ok{false};
+    bool version_rejected{false};
+    std::string required_min_version;
     AttestChallenge challenge;
 };
 
@@ -79,6 +83,17 @@ public:
     void SetBaseUrl(std::string url) { base_url_ = std::move(url); }
     void SetPin(std::string spki_pin_sha256_hex);
 
+    // Asymmetric server public key & key rotation / build version anti-rollback controls
+    void SetServerPublicKey(std::string pub_key_hex) { server_public_key_ = std::move(pub_key_hex); }
+    const std::string& GetServerPublicKey() const { return server_public_key_; }
+    void SetKeyId(std::string key_id) { key_id_ = std::move(key_id); }
+    const std::string& GetKeyId() const { return key_id_; }
+    void SetClientBuildVersion(std::string ver) { client_build_version_ = std::move(ver); }
+    const std::string& GetClientBuildVersion() const { return client_build_version_; }
+
+    // Verifies a server message using Ed25519 asymmetric key if configured, else HMAC
+    bool VerifyServerSignature(const std::string& message, const std::string& signature_hex) const;
+
     // True when this build can speak https:// (OpenSSL / WinHTTP available)
     static bool TlsSupported();
 
@@ -102,6 +117,9 @@ private:
     std::string secret_key_;
     std::string pin_;
     std::string hwid_;
+    std::string server_public_key_;
+    std::string key_id_{"default-v1"};
+    std::string client_build_version_{"7.0.13"};
 
     HttpResult Request(const ParsedUrl& target, const char* method, const std::string& body,
                        uint32_t timeout_ms) const;

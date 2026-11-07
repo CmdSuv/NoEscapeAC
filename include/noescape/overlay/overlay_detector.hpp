@@ -99,6 +99,10 @@ public:
     // Helper: checks whether an address is within a mapped module
     bool IsAddressInLoadedModule(uintptr_t addr) const;
 
+    // Auditable custom overlay allowlist (still requires authentic PID image provenance)
+    void AllowlistOverlayTitle(const std::string& title_keyword);
+    void ClearCustomOverlayAllowlist();
+
 private:
     OverlayDetector();
 
@@ -108,6 +112,7 @@ private:
     std::vector<void**> registered_vtables_;
     std::vector<size_t> registered_vtable_sizes_;
     std::vector<OverlayWindowInfo> mock_windows_;
+    std::vector<std::string> custom_allowlisted_titles_;
 
     bool IsSuspiciousOverlayWindow(const OverlayWindowInfo& win) const;
 };

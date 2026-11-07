@@ -67,6 +67,9 @@ public:
     // Platform-specific sample of loaded module paths
     static std::vector<std::string> SampleLoadedModules(size_t max_count = 16);
 
+    // Privacy helper: redacts OS usernames from file paths (/home/<user>/ -> /home/<REDACTED>/)
+    static std::string RedactSensitivePaths(const std::string& input);
+
     // Clears the input trail buffer
     void ClearInputTrail();
 

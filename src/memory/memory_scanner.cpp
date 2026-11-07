@@ -1,6 +1,7 @@
 #include "noescape/memory/memory_scanner.hpp"
 #include "noescape/core/obfuscation.hpp"
 #include "noescape/core/envutil.hpp"
+#include "noescape/network/crypto_util.hpp"
 #include <fstream>
 #include <sstream>
 #include <iostream>
@@ -11,10 +12,15 @@
 #include <atomic>
 #include <climits>
 #include <set>
+#include <filesystem>
+#include <chrono>
 
 #if defined(_WIN32)
 #include <windows.h>
 #include <psapi.h>
+#include <tlhelp32.h>
+#include <wintrust.h>
+#include <softpub.h>
 #else
 #include <unistd.h>
 #include <sys/types.h>
@@ -560,6 +566,7 @@ std::vector<core::DetectionEvent> MemoryScanner::ScanSignatures(const std::vecto
     SafeScanGuard safeGuard;
 #endif
 
+    const auto scanStartTp = std::chrono::steady_clock::now();
     size_t budget = 0;
     uintptr_t cursor = 0;
     {
@@ -568,6 +575,7 @@ std::vector<core::DetectionEvent> MemoryScanner::ScanSignatures(const std::vecto
         cursor = scan_cursor_;
     }
     size_t scannedBytes = 0;
+    size_t scannedRegionsCount = 0;
     bool budgetExhausted = false;
     uintptr_t nextCursor = 0;
 
@@ -604,6 +612,7 @@ std::vector<core::DetectionEvent> MemoryScanner::ScanSignatures(const std::vecto
             }
         }
         if (applicable.empty()) continue;
+        ++scannedRegionsCount;
 
         // Chunk large memory blocks into safe segments (8MB) to prevent cheats hiding in >32MB allocations
         constexpr size_t kChunkSize = 8 * 1024 * 1024; // 8 MB safe chunk size
@@ -692,6 +701,11 @@ std::vector<core::DetectionEvent> MemoryScanner::ScanSignatures(const std::vecto
         std::lock_guard<std::mutex> l(state_mutex_);
         scan_cursor_ = budgetExhausted ? nextCursor : 0; // wrap around after a full pass
     }
+    const auto scanEndTp = std::chrono::steady_clock::now();
+    uint64_t durationUs = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(scanEndTp - scanStartTp).count()
+    );
+    RecordScanDurationUs(durationUs, scannedRegionsCount, scannedBytes);
     return events;
 }
 
@@ -966,6 +980,415 @@ std::vector<core::DetectionEvent> MemoryScanner::DetectSleepingPayloads() {
     return events;
 }
 
+void MemoryScanner::RecordScanDurationUs(uint64_t duration_us, uint64_t regions_count, uint64_t bytes_count) {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    telemetry_.total_scans_completed++;
+    telemetry_.regions_scanned += regions_count;
+    telemetry_.bytes_scanned += bytes_count;
+    telemetry_.last_scan_duration_us = duration_us;
+
+    scan_durations_us_.push_back(duration_us);
+    if (scan_durations_us_.size() > 128) {
+        scan_durations_us_.erase(scan_durations_us_.begin());
+    }
+
+    uint64_t sum = 0;
+    for (uint64_t v : scan_durations_us_) sum += v;
+    telemetry_.mean_scan_duration_us = scan_durations_us_.empty() ? 0 : (sum / scan_durations_us_.size());
+
+    auto sorted = scan_durations_us_;
+    std::sort(sorted.begin(), sorted.end());
+    if (!sorted.empty()) {
+        size_t idx95 = (sorted.size() * 95) / 100;
+        if (idx95 >= sorted.size()) idx95 = sorted.size() - 1;
+        size_t idx99 = (sorted.size() * 99) / 100;
+        if (idx99 >= sorted.size()) idx99 = sorted.size() - 1;
+        telemetry_.p95_scan_duration_us = sorted[idx95];
+        telemetry_.p99_scan_duration_us = sorted[idx99];
+    }
+}
+
+ScanTelemetry MemoryScanner::GetScanTelemetry() const {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    return telemetry_;
+}
+
+std::optional<core::DetectionEvent> MemoryScanner::InspectThreadAddress(uint32_t tid, uintptr_t code_address) {
+    if (code_address < 0x10000ULL) return std::nullopt;
+#if defined(__x86_64__) || defined(_M_X64)
+    if (code_address >= 0x0000800000000000ULL) return std::nullopt;
+#endif
+
+    auto regions = QueryMemoryRegions();
+    const bool jitHost = IsJitRuntime(regions);
+
+    for (const auto& r : regions) {
+        if (code_address >= r.start && code_address < r.end) {
+            if (r.pathname == "[vdso]" || r.pathname == "[vsyscall]" || r.pathname.rfind("[vvar", 0) == 0) {
+                return std::nullopt;
+            }
+#if defined(_WIN32)
+            bool genuineBacked = r.is_backed_by_file;
+#else
+            bool genuineBacked = r.is_backed_by_file && !r.pathname.empty() && r.pathname[0] == '/' &&
+                                 r.pathname.find("(deleted)") == std::string::npos &&
+                                 r.pathname.rfind("/memfd:", 0) != 0;
+#endif
+            if (!r.executable) {
+                core::DetectionEvent ev;
+                ev.type = core::DetectionType::THREAD_PROVENANCE_ANOMALY;
+                ev.severity = core::Severity::CRITICAL;
+                ev.component = "MemoryScanner::ThreadProvenance";
+                std::ostringstream ss;
+                ss << "Thread TID " << tid << " execution pointer 0x" << std::hex << code_address
+                   << " resides in non-executable region [0x" << r.start << " - 0x" << r.end << "]";
+                ev.details = ss.str();
+                ev.timestamp = static_cast<uint64_t>(std::time(nullptr));
+                ev.threat_score = 95;
+                return ev;
+            }
+            if (!genuineBacked && !jitHost) {
+                core::DetectionEvent ev;
+                ev.type = core::DetectionType::THREAD_PROVENANCE_ANOMALY;
+                ev.severity = core::Severity::CRITICAL;
+                ev.component = "MemoryScanner::ThreadProvenance";
+                std::ostringstream ss;
+                ss << "Thread TID " << tid << " executing in unbacked anonymous memory at 0x"
+                   << std::hex << code_address << " [0x" << r.start << " - 0x" << r.end << "] ("
+                   << (r.pathname.empty() ? "[anon]" : r.pathname) << ")";
+                ev.details = ss.str();
+                ev.timestamp = static_cast<uint64_t>(std::time(nullptr));
+                ev.threat_score = 95;
+                return ev;
+            }
+            return std::nullopt;
+        }
+    }
+
+    // Address is not in any mapped region
+    core::DetectionEvent ev;
+    ev.type = core::DetectionType::THREAD_PROVENANCE_ANOMALY;
+    ev.severity = core::Severity::HIGH;
+    ev.component = "MemoryScanner::ThreadProvenance";
+    std::ostringstream ss;
+    ss << "Thread TID " << tid << " points to unmapped user-space address 0x" << std::hex << code_address;
+    ev.details = ss.str();
+    ev.timestamp = static_cast<uint64_t>(std::time(nullptr));
+    ev.threat_score = 75;
+    return ev;
+}
+
+std::vector<ThreadExecutionInfo> MemoryScanner::QueryActiveThreads() {
+    std::vector<ThreadExecutionInfo> threads;
+    auto regions = QueryMemoryRegions();
+    const bool jitHost = IsJitRuntime(regions);
+
+#if defined(_WIN32)
+    DWORD selfPid = GetCurrentProcessId();
+    HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    if (hSnap == INVALID_HANDLE_VALUE) return threads;
+
+    using NtQueryInformationThreadFn = LONG(WINAPI*)(HANDLE, ULONG, PVOID, ULONG, PULONG);
+    static NtQueryInformationThreadFn fnNtQueryThread = []() -> NtQueryInformationThreadFn {
+        HMODULE hNtdll = GetModuleHandleW(L"ntdll.dll");
+        if (!hNtdll) return nullptr;
+        return reinterpret_cast<NtQueryInformationThreadFn>(GetProcAddress(hNtdll, "NtQueryInformationThread"));
+    }();
+    constexpr ULONG kThreadQuerySetWin32StartAddress = 9;
+
+    THREADENTRY32 te{};
+    te.dwSize = sizeof(te);
+    if (Thread32First(hSnap, &te)) {
+        do {
+            if (te.th32OwnerProcessID != selfPid) continue;
+            ThreadExecutionInfo info{};
+            info.tid = te.th32ThreadID;
+
+            HANDLE hThread = OpenThread(THREAD_QUERY_INFORMATION | THREAD_GET_CONTEXT, FALSE, te.th32ThreadID);
+            if (hThread) {
+                uintptr_t startAddr = 0;
+                if (fnNtQueryThread &&
+                    fnNtQueryThread(hThread, kThreadQuerySetWin32StartAddress, &startAddr, sizeof(startAddr), nullptr) == 0) {
+                    info.start_address = startAddr;
+                }
+                CONTEXT ctx{};
+                ctx.ContextFlags = CONTEXT_CONTROL;
+                if (GetThreadContext(hThread, &ctx)) {
+#if defined(_M_X64) || defined(__x86_64__)
+                    info.instruction_pointer = static_cast<uintptr_t>(ctx.Rip);
+                    info.stack_pointer = static_cast<uintptr_t>(ctx.Rsp);
+#elif defined(_M_IX86) || defined(__i386__)
+                    info.instruction_pointer = static_cast<uintptr_t>(ctx.Eip);
+                    info.stack_pointer = static_cast<uintptr_t>(ctx.Esp);
+#endif
+                }
+                CloseHandle(hThread);
+            }
+
+            uintptr_t checkAddr = (info.start_address != 0) ? info.start_address : info.instruction_pointer;
+            if (checkAddr >= 0x10000ULL) {
+                info.ip_in_backed_module = false;
+                for (const auto& r : regions) {
+                    if (checkAddr >= r.start && checkAddr < r.end) {
+                        info.module_path = r.pathname;
+                        info.ip_in_backed_module = (r.is_backed_by_file || jitHost) && r.executable;
+                        break;
+                    }
+                }
+            }
+            threads.push_back(std::move(info));
+        } while (Thread32Next(hSnap, &te));
+    }
+    CloseHandle(hSnap);
+#else
+    std::error_code ec;
+    for (const auto& entry : std::filesystem::directory_iterator("/proc/self/task", ec)) {
+        if (ec) break;
+        std::string tidStr = entry.path().filename().string();
+        uint32_t tid = 0;
+        try {
+            tid = static_cast<uint32_t>(std::stoul(tidStr));
+        } catch (...) {
+            continue;
+        }
+
+        ThreadExecutionInfo info{};
+        info.tid = tid;
+
+        // 1. Inspect /proc/self/task/<tid>/syscall for user-space RSP and RIP when in syscall
+        std::ifstream sysFile(entry.path() / "syscall");
+        if (sysFile.is_open()) {
+            std::string line;
+            if (std::getline(sysFile, line) && line.rfind("running", 0) != 0) {
+                std::istringstream iss(line);
+                std::vector<std::string> tokens;
+                std::string tok;
+                while (iss >> tok) tokens.push_back(tok);
+                if (tokens.size() >= 3) {
+                    try {
+                        info.stack_pointer = static_cast<uintptr_t>(std::stoull(tokens[tokens.size() - 2], nullptr, 0));
+                        info.instruction_pointer = static_cast<uintptr_t>(std::stoull(tokens.back(), nullptr, 0));
+                    } catch (...) {}
+                }
+            }
+        }
+
+        // 2. Check /proc/self/task/<tid>/stat for startstack (field 28) and kstkeip (field 30)
+        std::ifstream statFile(entry.path() / "stat");
+        if (statFile.is_open()) {
+            std::string statLine;
+            if (std::getline(statFile, statLine)) {
+                size_t closeParen = statLine.rfind(')');
+                if (closeParen != std::string::npos && closeParen + 2 < statLine.size()) {
+                    std::istringstream iss(statLine.substr(closeParen + 2));
+                    std::string tok;
+                    // Field 3 is state; field 28 is 26th token after ')'; field 30 is 28th token after ')'
+                    for (int idx = 3; idx <= 30 && (iss >> tok); ++idx) {
+                        if (idx == 28 && info.stack_pointer == 0) {
+                            try { info.stack_pointer = static_cast<uintptr_t>(std::stoull(tok)); } catch (...) {}
+                        } else if (idx == 30 && info.instruction_pointer == 0) {
+                            try { info.instruction_pointer = static_cast<uintptr_t>(std::stoull(tok)); } catch (...) {}
+                        }
+                    }
+                }
+            }
+        }
+
+        if (info.instruction_pointer >= 0x10000ULL && info.instruction_pointer < 0x0000800000000000ULL) {
+            info.ip_in_backed_module = false;
+            for (const auto& r : regions) {
+                if (info.instruction_pointer >= r.start && info.instruction_pointer < r.end) {
+                    info.module_path = r.pathname;
+                    bool isKernelProvided = (r.pathname == "[vdso]" || r.pathname == "[vsyscall]" || r.pathname.rfind("[vvar", 0) == 0);
+                    bool genuineFile = r.is_backed_by_file && !r.pathname.empty() && r.pathname[0] == '/' &&
+                                       r.pathname.find("(deleted)") == std::string::npos &&
+                                       r.pathname.rfind("/memfd:", 0) != 0;
+                    info.ip_in_backed_module = (genuineFile || isKernelProvided || jitHost) && r.executable;
+                    break;
+                }
+            }
+        } else {
+            info.ip_in_backed_module = true;
+        }
+        threads.push_back(std::move(info));
+    }
+#endif
+    return threads;
+}
+
+std::vector<core::DetectionEvent> MemoryScanner::AuditThreadProvenance() {
+    std::vector<core::DetectionEvent> events;
+    auto threads = QueryActiveThreads();
+    for (const auto& t : threads) {
+        uintptr_t checkAddr = (t.start_address != 0) ? t.start_address : t.instruction_pointer;
+        if (checkAddr >= 0x10000ULL) {
+            auto ev = InspectThreadAddress(t.tid, checkAddr);
+            if (ev.has_value()) {
+                events.push_back(*ev);
+            }
+        }
+    }
+    return events;
+}
+
+namespace {
+#if !defined(_WIN32)
+std::string ExtractElfBuildId(const std::string& filePath) {
+    std::ifstream f(filePath, std::ios::binary);
+    if (!f.is_open()) return "";
+
+    Elf64_Ehdr eh{};
+    f.read(reinterpret_cast<char*>(&eh), sizeof(eh));
+    if (f.gcount() != static_cast<std::streamsize>(sizeof(eh)) ||
+        std::memcmp(eh.e_ident, ELFMAG, SELFMAG) != 0 ||
+        eh.e_ident[EI_CLASS] != ELFCLASS64) {
+        return "";
+    }
+
+    if (eh.e_phentsize < sizeof(Elf64_Phdr) || eh.e_phnum > 512) return "";
+    for (uint16_t i = 0; i < eh.e_phnum; ++i) {
+        Elf64_Phdr ph{};
+        f.seekg(static_cast<std::streamoff>(eh.e_phoff + static_cast<uint64_t>(i) * eh.e_phentsize));
+        f.read(reinterpret_cast<char*>(&ph), sizeof(ph));
+        if (f.gcount() != static_cast<std::streamsize>(sizeof(ph))) break;
+        if (ph.p_type != PT_NOTE || ph.p_filesz == 0 || ph.p_filesz > 65536) continue;
+
+        std::vector<uint8_t> noteBuf(static_cast<size_t>(ph.p_filesz));
+        f.seekg(static_cast<std::streamoff>(ph.p_offset));
+        f.read(reinterpret_cast<char*>(noteBuf.data()), static_cast<std::streamsize>(noteBuf.size()));
+        if (static_cast<size_t>(f.gcount()) != noteBuf.size()) continue;
+
+        size_t off = 0;
+        while (off + sizeof(Elf64_Nhdr) <= noteBuf.size()) {
+            Elf64_Nhdr nh{};
+            std::memcpy(&nh, noteBuf.data() + off, sizeof(nh));
+            off += sizeof(Elf64_Nhdr);
+            size_t nameAligned = (nh.n_namesz + 3u) & ~3u;
+            size_t descAligned = (nh.n_descsz + 3u) & ~3u;
+            if (off + nameAligned + descAligned > noteBuf.size()) break;
+
+            if (nh.n_type == NT_GNU_BUILD_ID && nh.n_namesz == 4 &&
+                std::memcmp(noteBuf.data() + off, "GNU", 4) == 0 && nh.n_descsz > 0 && nh.n_descsz <= 64) {
+                return network::CryptoUtil::ToHex(noteBuf.data() + off + nameAligned, nh.n_descsz);
+            }
+            off += nameAligned + descAligned;
+        }
+    }
+    return "";
+}
+#else
+bool VerifyWindowsAuthenticode(const std::string& path) {
+    if (path.empty()) return false;
+    int wlen = MultiByteToWideChar(CP_UTF8, 0, path.c_str(), -1, nullptr, 0);
+    if (wlen <= 0) return false;
+    std::wstring wpath(static_cast<size_t>(wlen), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, path.c_str(), -1, wpath.data(), wlen);
+
+    WINTRUST_FILE_INFO fileInfo{};
+    fileInfo.cbStruct = sizeof(WINTRUST_FILE_INFO);
+    fileInfo.pcwszFilePath = wpath.c_str();
+
+    GUID policyGuid = WINTRUST_ACTION_GENERIC_VERIFY_V2;
+    WINTRUST_DATA trustData{};
+    trustData.cbStruct = sizeof(WINTRUST_DATA);
+    trustData.dwUIChoice = WTD_UI_NONE;
+    trustData.fdwRevocationChecks = WTD_REVOKE_NONE;
+    trustData.dwUnionChoice = WTD_CHOICE_FILE;
+    trustData.pFile = &fileInfo;
+    trustData.dwStateAction = WTD_STATEACTION_VERIFY;
+    trustData.dwProvFlags = WTD_CACHE_ONLY_URL_RETRIEVAL;
+
+    LONG status = WinVerifyTrust(nullptr, &policyGuid, &trustData);
+    trustData.dwStateAction = WTD_STATEACTION_CLOSE;
+    WinVerifyTrust(nullptr, &policyGuid, &trustData);
+    return status == ERROR_SUCCESS;
+}
+#endif
+} // namespace
+
+std::vector<ModuleProvenanceInfo> MemoryScanner::QueryModuleProvenance() {
+    std::vector<ModuleProvenanceInfo> modules;
+    auto regions = QueryMemoryRegions();
+
+    std::map<std::string, ModuleProvenanceInfo> byPath;
+    for (const auto& r : regions) {
+        if (!r.executable || r.pathname.empty()) continue;
+        if (r.pathname[0] == '[') continue; // [vdso], [vsyscall], etc.
+
+        auto& entry = byPath[r.pathname];
+        if (entry.path.empty()) {
+            entry.path = r.pathname;
+            entry.base_address = r.start;
+        } else {
+            entry.base_address = std::min(entry.base_address, r.start);
+        }
+        entry.executable_size += r.size;
+    }
+
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    for (auto& [path, info] : byPath) {
+        auto cachedIt = provenance_cache_.find(path);
+        if (cachedIt != provenance_cache_.end()) {
+            cachedIt->second.base_address = info.base_address;
+            cachedIt->second.executable_size = info.executable_size;
+            modules.push_back(cachedIt->second);
+            continue;
+        }
+
+#if defined(_WIN32)
+        info.sha256_disk_hash = network::CryptoUtil::Sha256File(path);
+        info.is_signed = VerifyWindowsAuthenticode(path);
+        std::string lower = path;
+        std::transform(lower.begin(), lower.end(), lower.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        info.is_suspicious_origin = (lower.find("\\appdata\\local\\temp\\") != std::string::npos ||
+                                     lower.find("\\windows\\temp\\") != std::string::npos);
+#else
+        bool isMemfdOrDeleted = (path.rfind("/memfd:", 0) == 0 ||
+                                 path.find("(deleted)") != std::string::npos);
+        bool isWorldTemp = (path.rfind("/dev/shm/", 0) == 0 ||
+                            path.rfind("/tmp/", 0) == 0 ||
+                            path.rfind("/var/tmp/", 0) == 0);
+        info.is_suspicious_origin = isMemfdOrDeleted || isWorldTemp;
+        if (!isMemfdOrDeleted && path[0] == '/') {
+            info.sha256_disk_hash = network::CryptoUtil::Sha256File(path);
+            info.elf_build_id = ExtractElfBuildId(path);
+            info.is_signed = !info.elf_build_id.empty();
+        }
+#endif
+        provenance_cache_[path] = info;
+        modules.push_back(std::move(info));
+    }
+
+    return modules;
+}
+
+std::vector<core::DetectionEvent> MemoryScanner::AuditModuleProvenance() {
+    std::vector<core::DetectionEvent> events;
+    auto modules = QueryModuleProvenance();
+    for (const auto& m : modules) {
+        if (m.is_suspicious_origin) {
+            core::DetectionEvent ev;
+            ev.type = core::DetectionType::MODULE_PROVENANCE_ANOMALY;
+            ev.severity = (m.path.rfind("/memfd:", 0) == 0 || m.path.find("(deleted)") != std::string::npos)
+                ? core::Severity::CRITICAL
+                : core::Severity::HIGH;
+            ev.component = "MemoryScanner::ModuleProvenance";
+            std::ostringstream ss;
+            ss << "Executable module loaded from suspicious/ephemeral origin: " << m.path
+               << " at base 0x" << std::hex << m.base_address;
+            if (!m.sha256_disk_hash.empty()) {
+                ss << " (SHA256: " << m.sha256_disk_hash.substr(0, 16) << "...)";
+            }
+            ev.details = ss.str();
+            ev.timestamp = static_cast<uint64_t>(std::time(nullptr));
+            ev.threat_score = (ev.severity == core::Severity::CRITICAL) ? 90 : 75;
+            events.push_back(ev);
+        }
+    }
+    return events;
+}
+
 std::vector<core::DetectionEvent> MemoryScanner::PerformAudit(const std::vector<CheatSignature>& signatures) {
     bool hadCache = IsCacheValid();
     if (!hadCache) {
@@ -978,6 +1401,10 @@ std::vector<core::DetectionEvent> MemoryScanner::PerformAudit(const std::vector<
     events.insert(events.end(), modEvents.begin(), modEvents.end());
     auto sleepEvents = DetectSleepingPayloads();
     events.insert(events.end(), sleepEvents.begin(), sleepEvents.end());
+    auto threadEvents = AuditThreadProvenance();
+    events.insert(events.end(), threadEvents.begin(), threadEvents.end());
+    auto provEvents = AuditModuleProvenance();
+    events.insert(events.end(), provEvents.begin(), provEvents.end());
     if (!hadCache) {
         ClearCache();
     }
@@ -996,6 +1423,10 @@ std::vector<core::DetectionEvent> MemoryScanner::PerformAudit(const std::vector<
     events.insert(events.end(), modEvents.begin(), modEvents.end());
     auto sleepEvents = DetectSleepingPayloads();
     events.insert(events.end(), sleepEvents.begin(), sleepEvents.end());
+    auto threadEvents = AuditThreadProvenance();
+    events.insert(events.end(), threadEvents.begin(), threadEvents.end());
+    auto provEvents = AuditModuleProvenance();
+    events.insert(events.end(), provEvents.begin(), provEvents.end());
     if (!hadCache) {
         ClearCache();
     }

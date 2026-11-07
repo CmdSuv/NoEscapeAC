@@ -118,10 +118,24 @@ struct TestRegistrar {
         } \
     } while (0)
 
+#define ASSERT_GE(a, b) \
+    do { \
+        if (!((a) >= (b))) { \
+            throw std::runtime_error("Assertion failed: " #a " >= " #b " at " __FILE__ ":" + std::to_string(__LINE__)); \
+        } \
+    } while (0)
+
 #define ASSERT_LT(a, b) \
     do { \
         if (!((a) < (b))) { \
             throw std::runtime_error("Assertion failed: " #a " < " #b " at " __FILE__ ":" + std::to_string(__LINE__)); \
+        } \
+    } while (0)
+
+#define ASSERT_LE(a, b) \
+    do { \
+        if (!((a) <= (b))) { \
+            throw std::runtime_error("Assertion failed: " #a " <= " #b " at " __FILE__ ":" + std::to_string(__LINE__)); \
         } \
     } while (0)
 

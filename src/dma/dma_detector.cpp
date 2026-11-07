@@ -389,11 +389,144 @@ bool DmaDetector::CheckLeechCoreArtifacts() {
 #endif
 }
 
+IommuStatusInfo DmaDetector::CheckIommuStatus() {
+    IommuStatusInfo status;
+#if defined(_WIN32)
+    status.source = "Windows Registry (DMAGuardPolicy / DeviceGuard)";
+    HKEY hKey;
+    if (RegOpenKeyExA(HKEY_LOCAL_MACHINE,
+                      "SYSTEM\\CurrentControlSet\\Control\\DmaSecurity\\AllowedBuses",
+                      0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+        status.iommu_present = true;
+        status.dma_remapping_enabled = true;
+        RegCloseKey(hKey);
+    }
+    if (RegOpenKeyExA(HKEY_LOCAL_MACHINE,
+                      "SOFTWARE\\Policies\\Microsoft\\Windows\\Kernel DMA Protection",
+                      0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+        DWORD policy = 0, size = sizeof(DWORD);
+        if (RegQueryValueExA(hKey, "DeviceEnumerationPolicy", nullptr, nullptr,
+                             reinterpret_cast<LPBYTE>(&policy), &size) == ERROR_SUCCESS) {
+            status.iommu_present = true;
+            status.dma_remapping_enabled = (policy == 0 || policy == 1);
+            status.dma_remapping_active = status.dma_remapping_enabled;
+            status.strict_mode = (policy == 0);
+        }
+        RegCloseKey(hKey);
+    }
+#else
+    status.source = "/sys/class/iommu & /sys/kernel/iommu_groups";
+    DIR* iommu_dir = opendir("/sys/class/iommu");
+    if (iommu_dir) {
+        struct dirent* entry;
+        while ((entry = readdir(iommu_dir)) != nullptr) {
+            if (entry->d_name[0] != '.') {
+                status.iommu_present = true;
+                break;
+            }
+        }
+        closedir(iommu_dir);
+    }
+    DIR* groups_dir = opendir("/sys/kernel/iommu_groups");
+    if (groups_dir) {
+        struct dirent* entry;
+        while ((entry = readdir(groups_dir)) != nullptr) {
+            if (entry->d_name[0] != '.') {
+                status.dma_remapping_enabled = true;
+                status.dma_remapping_active = true;
+                break;
+            }
+        }
+        closedir(groups_dir);
+    }
+    std::ifstream cmdline("/proc/cmdline");
+    if (cmdline.is_open()) {
+        std::string line;
+        std::getline(cmdline, line);
+        if (line.find("iommu.strict=1") != std::string::npos ||
+            line.find("intel_iommu=on") != std::string::npos ||
+            line.find("amd_iommu=on") != std::string::npos) {
+            status.strict_mode = (line.find("iommu.passthrough=1") == std::string::npos &&
+                                  line.find("iommu=pt") == std::string::npos);
+        }
+    }
+#endif
+    return status;
+}
+
+HardwareConfidenceLevel DmaDetector::EvaluateHardwareConfidence(
+    const PciDeviceInfo& dev,
+    bool has_leechcore_artifact,
+    bool has_bus_jitter_anomaly) const {
+    if (has_leechcore_artifact) {
+        return HardwareConfidenceLevel::CONFIRMED_TOOL_ARTIFACT;
+    }
+    // Check if the description explicitly names PCILeech / Screamer
+    std::string lower_desc = dev.description;
+    std::transform(lower_desc.begin(), lower_desc.end(), lower_desc.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (lower_desc.find("pcileech") != std::string::npos ||
+        lower_desc.find("screamer") != std::string::npos) {
+        return HardwareConfidenceLevel::KNOWN_CHEAT_HARDWARE;
+    }
+    if (dev.is_suspicious) {
+        if (has_bus_jitter_anomaly) {
+            return HardwareConfidenceLevel::KNOWN_CHEAT_HARDWARE;
+        }
+        return HardwareConfidenceLevel::SUSPICIOUS_BRIDGE_OR_FPGA;
+    }
+    return HardwareConfidenceLevel::BENIGN_DEV_HARDWARE;
+}
+
+HardwareConfidenceLevel DmaDetector::EvaluateHardwareConfidence(
+    const DmaProfile& jitter_profile,
+    const std::vector<PciDeviceInfo>& devices,
+    bool leechcore_present,
+    const IommuStatusInfo& /*iommu_status*/
+) const {
+    if (leechcore_present) {
+        return HardwareConfidenceLevel::CONFIRMED_TOOL_ARTIFACT;
+    }
+    bool any_known_cheat = false;
+    bool any_suspicious = false;
+    for (const auto& dev : devices) {
+        auto conf = EvaluateHardwareConfidence(dev, false, jitter_profile.anomalous);
+        if (conf == HardwareConfidenceLevel::KNOWN_CHEAT_HARDWARE) {
+            any_known_cheat = true;
+        } else if (conf == HardwareConfidenceLevel::SUSPICIOUS_BRIDGE_OR_FPGA) {
+            any_suspicious = true;
+        }
+    }
+    if (any_known_cheat) return HardwareConfidenceLevel::KNOWN_CHEAT_HARDWARE;
+    if (any_suspicious && jitter_profile.anomalous) return HardwareConfidenceLevel::CORROBORATED_DMA_EVIDENCE;
+    if (any_suspicious) return HardwareConfidenceLevel::SUSPICIOUS_CHARACTERISTICS;
+    if (jitter_profile.anomalous) return HardwareConfidenceLevel::TIMING_ANOMALY_ONLY;
+    return HardwareConfidenceLevel::KNOWN_LEGITIMATE;
+}
+
+const char* DmaDetector::ConfidenceLevelToString(HardwareConfidenceLevel level) {
+    switch (level) {
+        case HardwareConfidenceLevel::BENIGN_DEV_HARDWARE:
+            return "BENIGN_DEV_HARDWARE";
+        case HardwareConfidenceLevel::TIMING_ANOMALY_ONLY:
+            return "TIMING_ANOMALY_ONLY";
+        case HardwareConfidenceLevel::SUSPICIOUS_BRIDGE_OR_FPGA:
+            return "SUSPICIOUS_BRIDGE_OR_FPGA";
+        case HardwareConfidenceLevel::KNOWN_CHEAT_HARDWARE:
+            return "KNOWN_CHEAT_HARDWARE";
+        case HardwareConfidenceLevel::CONFIRMED_TOOL_ARTIFACT:
+            return "CONFIRMED_TOOL_ARTIFACT";
+        default:
+            return "UNKNOWN";
+    }
+}
+
 std::vector<core::DetectionEvent> DmaDetector::PerformAudit() {
     std::vector<core::DetectionEvent> events;
 
     // 1. Check for LeechCore interface presence
-    if (CheckLeechCoreArtifacts()) {
+    bool leechcore_found = CheckLeechCoreArtifacts();
+    if (leechcore_found) {
         core::DetectionEvent ev;
         ev.type = core::DetectionType::DMA_PCIE_LEECH_DEVICE;
         ev.severity = core::Severity::FATAL_BAN;
@@ -401,27 +534,11 @@ std::vector<core::DetectionEvent> DmaDetector::PerformAudit() {
         ev.details = "Active Direct Memory Access (DMA) LeechCore device handle identified";
         ev.timestamp = static_cast<uint64_t>(std::time(nullptr));
         ev.threat_score = 100;
+        ev.confidence = core::ConfidenceLevel::CONFIRMED;
         events.push_back(ev);
     }
 
-    // 2. Hardware device scan (PCIe / USB)
-    auto devices = ScanHardwareDevices();
-    for (const auto& dev : devices) {
-        if (dev.is_suspicious) {
-            core::DetectionEvent ev;
-            ev.type = core::DetectionType::DMA_PCIE_LEECH_DEVICE;
-            ev.severity = core::Severity::FATAL_BAN;
-            ev.component = "DmaDetector::PciScan";
-            ev.details = "DMA Hardware device discovered on bus: " + dev.description +
-                         " [VID: " + dev.vendor_id + " PID: " + dev.device_id + "]";
-            ev.timestamp = static_cast<uint64_t>(std::time(nullptr));
-            ev.severity = core::Severity::HIGH; // vendor ID alone is not proof of a DMA card
-            ev.threat_score = 60;
-            events.push_back(ev);
-        }
-    }
-
-    // 3. Memory bus contention / latency jitter profile
+    // 2. Memory bus contention / latency jitter profile
     auto profile = ProfileMemoryBusJitter(30);
     if (profile.anomalous) {
         core::DetectionEvent ev;
@@ -437,10 +554,41 @@ std::vector<core::DetectionEvent> DmaDetector::PerformAudit() {
         ev.details = ss.str();
         ev.timestamp = static_cast<uint64_t>(std::time(nullptr));
         ev.threat_score = 30;
+        ev.confidence = core::ConfidenceLevel::LOW;
         events.push_back(ev);
+    }
+
+    // 3. Hardware device scan (PCIe / USB) with explicit confidence classification
+    auto iommu = CheckIommuStatus();
+    auto devices = ScanHardwareDevices();
+    for (const auto& dev : devices) {
+        if (dev.is_suspicious) {
+            auto hw_conf = EvaluateHardwareConfidence(dev, leechcore_found, profile.anomalous);
+            core::DetectionEvent ev;
+            ev.type = core::DetectionType::DMA_PCIE_LEECH_DEVICE;
+            ev.component = "DmaDetector::PciScan";
+            ev.details = std::string("DMA/FPGA hardware discovered on bus (") +
+                         ConfidenceLevelToString(hw_conf) + ", IOMMU=" +
+                         (iommu.dma_remapping_enabled ? "ON" : "OFF") + "): " + dev.description +
+                         " [VID: " + dev.vendor_id + " PID: " + dev.device_id + "]";
+            ev.timestamp = static_cast<uint64_t>(std::time(nullptr));
+            if (hw_conf == HardwareConfidenceLevel::CONFIRMED_TOOL_ARTIFACT ||
+                hw_conf == HardwareConfidenceLevel::KNOWN_CHEAT_HARDWARE) {
+                ev.severity = core::Severity::HIGH;
+                ev.threat_score = 75;
+                ev.confidence = core::ConfidenceLevel::HIGH;
+            } else {
+                // Vendor ID alone (e.g., Xilinx FPGA / FTDI FIFO dev board) is never standalone proof of cheating
+                ev.severity = core::Severity::MEDIUM;
+                ev.threat_score = 40;
+                ev.confidence = core::ConfidenceLevel::MEDIUM;
+            }
+            events.push_back(ev);
+        }
     }
 
     return events;
 }
 
 } // namespace noescape::dma
+

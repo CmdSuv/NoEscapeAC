@@ -582,6 +582,16 @@ PanelClient::HttpResult PanelClient::Request(const ParsedUrl& target, const char
     return ParseHttpResponse(raw);
 }
 
+bool PanelClient::VerifyServerSignature(const std::string& message, const std::string& signature_hex) const {
+    if (!server_public_key_.empty()) {
+        // When an asymmetric server public key is configured, require a valid Ed25519 signature;
+        // a leaked symmetric client key cannot forge server challenges or ban status responses.
+        return CryptoUtil::VerifyAsymmetric(server_public_key_, message, signature_hex);
+    }
+    std::string expectedHmac = CryptoUtil::HmacSha256(secret_key_, message);
+    return CryptoUtil::ConstantTimeEquals(signature_hex, expectedHmac);
+}
+
 HeartbeatPacket PanelClient::ConstructHeartbeat(uint32_t current_threat_score, const std::string& status) {
     HeartbeatPacket pkt;
     pkt.hwid = hwid_;
@@ -610,11 +620,24 @@ HeartbeatResult PanelClient::Heartbeat(uint32_t current_threat_score, const std:
          << "\"timestamp\":" << pkt.timestamp << ","
          << "\"threat_score\":" << pkt.threat_score << ","
          << "\"status\":\"" << JsonEscape(pkt.status) << "\","
-         << "\"nonce\":\"" << pkt.nonce << "\""
+         << "\"nonce\":\"" << pkt.nonce << "\","
+         << "\"key_id\":\"" << JsonEscape(key_id_) << "\","
+         << "\"build_version\":\"" << JsonEscape(client_build_version_) << "\""
          << "}";
     auto res = Request(ParseUrl(base_url_ + "/heartbeat"), "POST", json.str(), 2000);
     out.ok = res.status >= 200 && res.status < 300;
     if (!out.ok) return out;
+
+    // Anti-rollback build version verification
+    std::string minVer = JsonString(res.body, "min_build_version", 0);
+    if (!minVer.empty()) {
+        out.required_min_version = minVer;
+        if (!CryptoUtil::IsVersionAtLeast(client_build_version_, minVer)) {
+            out.version_rejected = true;
+            out.ok = false;
+            return out;
+        }
+    }
 
     // Optional attestation challenge. It is only honoured when its signature (bound to our
     // HWID and this heartbeat's nonce) verifies - a forged challenge must not make us do work or
@@ -626,12 +649,23 @@ HeartbeatResult PanelClient::Heartbeat(uint32_t current_threat_score, const std:
         c.nonce = JsonString(res.body, "nonce", cp);
         std::string sig = JsonString(res.body, "sig", cp);
         bool nums = JsonNumber(res.body, "offset", cp, c.offset) && JsonNumber(res.body, "length", cp, c.length);
+        JsonNumber(res.body, "expires_at", cp, c.expires_at);
         c.present = true;
-        std::string expected = CryptoUtil::HmacSha256(
-            secret_key_, "challenge:" + hwid_ + ":" + pkt.nonce + ":" + c.id + ":" + c.nonce + ":" +
-                         std::to_string(c.offset) + ":" + std::to_string(c.length));
+
+        uint64_t nowSec = static_cast<uint64_t>(std::time(nullptr));
+        if (c.expires_at > 0 && nowSec > c.expires_at) {
+            c = AttestChallenge{};
+            c.present = true;
+            c.expired = true;
+            c.forged = true;
+            out.challenge = c;
+            return out;
+        }
+
+        std::string canonical = "challenge:" + hwid_ + ":" + pkt.nonce + ":" + c.id + ":" + c.nonce + ":" +
+                                std::to_string(c.offset) + ":" + std::to_string(c.length);
         if (!nums || !IsToken(c.id, 64) || !IsToken(c.nonce, 128) ||
-            !CryptoUtil::ConstantTimeEquals(sig, expected)) {
+            !VerifyServerSignature(canonical, sig)) {
             c = AttestChallenge{};
             c.present = true;
             c.forged = true;
@@ -642,14 +676,15 @@ HeartbeatResult PanelClient::Heartbeat(uint32_t current_threat_score, const std:
 }
 
 bool PanelClient::SendAttestation(const AttestChallenge& challenge, const std::string& answer_hex) {
-    if (!challenge.present || challenge.forged) return false;
+    if (!challenge.present || challenge.forged || challenge.expired) return false;
     std::ostringstream json;
     json << "{"
          << "\"hwid\":\"" << JsonEscape(hwid_) << "\","
          << "\"timestamp\":" << static_cast<uint64_t>(std::time(nullptr)) << ","
          << "\"nonce\":\"" << RandomNonce() << "\","
          << "\"challenge_id\":\"" << challenge.id << "\","
-         << "\"answer\":\"" << answer_hex << "\""
+         << "\"answer\":\"" << answer_hex << "\","
+         << "\"key_id\":\"" << JsonEscape(key_id_) << "\""
          << "}";
     auto res = Request(ParseUrl(base_url_ + "/attest"), "POST", json.str(), 2000);
     return res.status >= 200 && res.status < 300;
@@ -662,8 +697,11 @@ bool PanelClient::SendBanReport(const core::DetectionEvent& event, uint32_t curr
          << "\"hwid\":\"" << JsonEscape(hwid_) << "\","
          << "\"timestamp\":" << now << ","
          << "\"nonce\":\"" << RandomNonce() << "\","
+         << "\"key_id\":\"" << JsonEscape(key_id_) << "\","
          << "\"threat_score\":" << current_threat_score << ","
          << "\"type\":\"" << core::DetectionEvent::TypeToString(event.type) << "\","
+         << "\"category\":\"" << core::DetectionEvent::CategoryToString(event.category) << "\","
+         << "\"confidence\":\"" << core::DetectionEvent::ConfidenceToString(event.confidence) << "\","
          << "\"severity\":\"" << core::DetectionEvent::SeverityToString(event.severity) << "\","
          << "\"component\":\"" << JsonEscape(event.component) << "\","
          << "\"details\":\"" << JsonEscape(event.details) << "\""
@@ -706,10 +744,10 @@ BanCheckResult PanelClient::QueryBanStatus() {
         return result;
     }
     std::string serverSig = body.substr(sigPos + 13, sigEnd - (sigPos + 13));
-    std::string expectedSig = CryptoUtil::HmacSha256(secret_key_, hwid_ + ":" + (isBanned ? "1" : "0") + ":" + nonce);
-    if (!CryptoUtil::ConstantTimeEquals(serverSig, expectedSig)) {
+    std::string canonical = hwid_ + ":" + (isBanned ? "1" : "0") + ":" + nonce;
+    if (!VerifyServerSignature(canonical, serverSig)) {
         result.status = BanCheckStatus::SIGNATURE_INVALID;
-        result.reason = "Panel response HMAC signature validation failed (Tampered or MitM)";
+        result.reason = "Panel response signature validation failed (Tampered or MitM)";
         return result;
     }
 

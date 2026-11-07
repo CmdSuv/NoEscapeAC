@@ -223,14 +223,133 @@ std::vector<ProcessRecord> ProcessAnalyzer::EnumerateProcesses() {
     return records;
 }
 
+std::optional<core::DetectionEvent> ProcessAnalyzer::InspectExternalHandle(
+    uint32_t owner_pid,
+    const std::string& owner_name,
+    const std::string& owner_path,
+    uint32_t granted_access_mask
+) {
+    // Standard Windows process access flags:
+    // PROCESS_CREATE_THREAD = 0x0002, PROCESS_VM_OPERATION = 0x0008,
+    // PROCESS_VM_READ = 0x0010, PROCESS_VM_WRITE = 0x0020
+    constexpr uint32_t kInvasiveMask = 0x0002u | 0x0008u | 0x0010u | 0x0020u;
+    if ((granted_access_mask & kInvasiveMask) == 0) {
+        return std::nullopt;
+    }
+
+    std::string lowerName = ToLower(owner_name);
+    std::string lowerPath = ToLower(owner_path);
+    // Allowlist core OS system services (csrss, svchost, lsass, MsMpEng, werfault) when located in System32
+    bool inSystemDir = (lowerPath.find("\\windows\\system32\\") != std::string::npos ||
+                        lowerPath.find("\\programdata\\microsoft\\windows defender\\") != std::string::npos);
+    if (inSystemDir && (lowerName == "csrss.exe" || lowerName == "svchost.exe" ||
+                        lowerName == "lsass.exe" || lowerName == "msmpeng.exe" ||
+                        lowerName == "werfault.exe")) {
+        return std::nullopt;
+    }
+
+    bool hasWriteOrThread = (granted_access_mask & (0x0002u | 0x0008u | 0x0020u)) != 0;
+    core::DetectionEvent ev;
+    ev.type = core::DetectionType::SUSPICIOUS_PROCESS_DETECTED;
+    ev.severity = hasWriteOrThread ? core::Severity::CRITICAL : core::Severity::HIGH;
+    ev.component = "ProcessAnalyzer::ExternalHandleAudit";
+    std::ostringstream ss;
+    ss << "External process PID " << owner_pid << " (" << owner_name << " -> " << owner_path
+       << ") holds invasive handle to game process (GrantedAccess=0x" << std::hex << granted_access_mask << ")";
+    ev.details = ss.str();
+    ev.timestamp = static_cast<uint64_t>(std::time(nullptr));
+    ev.threat_score = hasWriteOrThread ? 95 : 80;
+    return ev;
+}
+
 std::vector<ProcessRecord> ProcessAnalyzer::DetectExternalMemoryReaders() {
     std::vector<ProcessRecord> readers;
 
-#if !defined(_WIN32)
+#if defined(_WIN32)
+    using NtQuerySystemInformationFn = LONG(WINAPI*)(ULONG, PVOID, ULONG, PULONG);
+    static NtQuerySystemInformationFn fnNtQuery = []() -> NtQuerySystemInformationFn {
+        HMODULE hNtdll = GetModuleHandleW(L"ntdll.dll");
+        if (!hNtdll) return nullptr;
+        return reinterpret_cast<NtQuerySystemInformationFn>(GetProcAddress(hNtdll, "NtQuerySystemInformation"));
+    }();
+    if (!fnNtQuery) return readers;
+
+    struct SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX {
+        PVOID Object;
+        ULONG_PTR UniqueProcessId;
+        ULONG_PTR HandleValue;
+        ULONG GrantedAccess;
+        USHORT CreatorBackTraceIndex;
+        USHORT ObjectTypeIndex;
+        ULONG HandleAttributes;
+        ULONG Reserved;
+    };
+    struct SYSTEM_HANDLE_INFORMATION_EX {
+        ULONG_PTR NumberOfHandles;
+        ULONG_PTR Reserved;
+        SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX Handles[1];
+    };
+
+    constexpr ULONG kSystemExtendedHandleInformation = 64;
+    constexpr LONG kStatusInfoLengthMismatch = static_cast<LONG>(0xC0000004L);
+
+    ULONG bufSize = 1024 * 1024;
+    std::vector<uint8_t> buffer;
+    LONG status = kStatusInfoLengthMismatch;
+    while (status == kStatusInfoLengthMismatch && bufSize <= 32 * 1024 * 1024) {
+        buffer.resize(bufSize);
+        ULONG retLen = 0;
+        status = fnNtQuery(kSystemExtendedHandleInformation, buffer.data(), bufSize, &retLen);
+        if (status == kStatusInfoLengthMismatch) {
+            bufSize = (retLen > bufSize) ? (retLen + 65536) : (bufSize * 2);
+        }
+    }
+    if (status != 0 || buffer.size() < sizeof(SYSTEM_HANDLE_INFORMATION_EX)) return readers;
+
+    DWORD selfPid = GetCurrentProcessId();
+    auto* info = reinterpret_cast<const SYSTEM_HANDLE_INFORMATION_EX*>(buffer.data());
+    size_t maxEntries = (buffer.size() - offsetof(SYSTEM_HANDLE_INFORMATION_EX, Handles)) /
+                        sizeof(SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX);
+    size_t count = std::min<size_t>(static_cast<size_t>(info->NumberOfHandles), maxEntries);
+
+    constexpr ULONG kInvasiveAccess = PROCESS_VM_READ | PROCESS_VM_WRITE | PROCESS_VM_OPERATION | PROCESS_CREATE_THREAD;
+    for (size_t i = 0; i < count; ++i) {
+        const auto& h = info->Handles[i];
+        DWORD ownerPid = static_cast<DWORD>(h.UniqueProcessId);
+        if (ownerPid <= 4 || ownerPid == selfPid) continue;
+        if ((h.GrantedAccess & kInvasiveAccess) == 0) continue;
+
+        HANDLE hOwner = OpenProcess(PROCESS_DUP_HANDLE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, ownerPid);
+        if (!hOwner) continue;
+
+        HANDLE hDup = nullptr;
+        if (DuplicateHandle(hOwner, reinterpret_cast<HANDLE>(h.HandleValue), GetCurrentProcess(),
+                            &hDup, PROCESS_QUERY_LIMITED_INFORMATION, FALSE, 0) && hDup) {
+            if (GetProcessId(hDup) == selfPid) {
+                char pathBuf[MAX_PATH * 2]{};
+                DWORD pathLen = sizeof(pathBuf);
+                QueryFullProcessImageNameA(hOwner, 0, pathBuf, &pathLen);
+                std::string fullPath = pathBuf;
+                std::string baseName = core::BaseName(fullPath);
+                if (InspectExternalHandle(ownerPid, baseName, fullPath, h.GrantedAccess).has_value()) {
+                    ProcessRecord rec;
+                    rec.pid = ownerPid;
+                    rec.name = baseName;
+                    rec.path = fullPath;
+                    rec.granted_access_mask = h.GrantedAccess;
+                    readers.push_back(std::move(rec));
+                }
+            }
+            CloseHandle(hDup);
+        }
+        CloseHandle(hOwner);
+    }
+#else
     pid_t selfPid = getpid();
     std::string selfPidStr = std::to_string(selfPid);
     std::string targetMem = "/proc/" + selfPidStr + "/mem";
     std::string targetPagemap = "/proc/" + selfPidStr + "/pagemap";
+    std::string targetMapFilesPrefix = "/proc/" + selfPidStr + "/map_files/";
 
     DIR* procDir = opendir(NOESCAPE_XOR("/proc"));
     if (!procDir) return readers;
@@ -255,7 +374,9 @@ std::vector<ProcessRecord> ProcessAnalyzer::DetectExternalMemoryReaders() {
             ssize_t len = readlink(fdLink.c_str(), linkBuf, sizeof(linkBuf) - 1);
             if (len > 0) {
                 linkBuf[len] = '\0';
-                if (targetMem == linkBuf || targetPagemap == linkBuf) {
+                std::string target(linkBuf);
+                if (target == targetMem || target == targetPagemap ||
+                    target.rfind(targetMapFilesPrefix, 0) == 0) {
                     matched = true;
                     break;
                 }
@@ -266,6 +387,7 @@ std::vector<ProcessRecord> ProcessAnalyzer::DetectExternalMemoryReaders() {
         if (matched) {
             ProcessRecord rec;
             rec.pid = static_cast<uint32_t>(pid);
+            rec.granted_access_mask = 0x0010u | 0x0020u;
             std::string commPath = std::string("/proc/") + entry->d_name + "/comm";
             std::ifstream commFile(commPath);
             if (commFile.is_open()) std::getline(commFile, rec.name);

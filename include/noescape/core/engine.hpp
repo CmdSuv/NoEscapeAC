@@ -9,6 +9,7 @@
 #include <set>
 #include <string>
 #include "noescape/core/types.hpp"
+#include "noescape/core/evidence_correlator.hpp"
 #include "noescape/core/thread_pool.hpp"
 #include "noescape/core/logger.hpp"
 #include "noescape/network/panel_client.hpp"
@@ -48,10 +49,17 @@ public:
     // Process a newly triggered detection event
     void ProcessDetection(const DetectionEvent& event);
 
-    // Queries current threat status
+    // Queries current threat & enforcement status
     uint32_t GetThreatScore() const { return threat_score_.load(); }
     bool IsBanned() const { return is_banned_.load(); }
+    bool IsShadowFlagged() const { return is_shadow_flagged_.load(); }
+    bool IsMatchRestricted() const { return is_match_restricted_.load(); }
+    bool IsSessionRejected() const { return is_session_rejected_.load(); }
     std::vector<DetectionEvent> GetDetectionHistory() const;
+    const EvidenceCorrelator& GetEvidenceCorrelator() const { return correlator_; }
+
+    // Audit cycle performance telemetry (microseconds)
+    uint64_t GetLastAuditDurationUs() const { return last_audit_duration_us_.load(std::memory_order_relaxed); }
 
     // Callbacks and configuration
     void SetBanCallback(BanCallback cb) { std::lock_guard<std::mutex> l(history_mutex_); ban_callback_ = std::move(cb); }
@@ -88,15 +96,21 @@ public:
         std::lock_guard<std::mutex> lock(heartbeat_mutex_);
         freeze_background_loop_for_testing_.store(freeze, std::memory_order_release);
     }
+    // Simulates OS-wide sleep/hibernate wake recovery on the watchdog
+    void SimulateSystemWakeRecoveryForTesting();
 
 private:
     EngineConfig config_;
     std::atomic<uint32_t> threat_score_{0};
     std::atomic<bool> is_banned_{false};
+    std::atomic<bool> is_shadow_flagged_{false};
+    std::atomic<bool> is_match_restricted_{false};
+    std::atomic<bool> is_session_rejected_{false};
     std::atomic<bool> running_{false};
     std::atomic<bool> stop_requested_{false};
     std::atomic<uint32_t> audit_cycle_counter_{0};
     std::atomic<uint64_t> last_dma_audit_ms_{0};
+    std::atomic<uint64_t> last_audit_duration_us_{0};
     std::set<std::string> scored_keys_;
     std::mutex audit_mutex_;
     std::atomic<std::thread::id> background_thread_id_{};
@@ -104,6 +118,7 @@ private:
     std::atomic<bool> freeze_background_loop_for_testing_{false};
     std::atomic<bool> freeze_watchdog_for_testing_{false};
 
+    EvidenceCorrelator correlator_;
     network::PanelClient panel_client_;
     kinematics::AimAnalyzer aim_analyzer_;
     kinematics::PhantomMonitor phantom_monitor_;

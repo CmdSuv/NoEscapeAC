@@ -7,6 +7,9 @@
 
 #if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
 #include <immintrin.h>
+#if defined(_MSC_VER)
+#include <intrin.h>
+#endif
 #define NOESCAPE_X86 1
 #endif
 
@@ -36,14 +39,17 @@ Pattern::Pattern(std::string_view ida_pattern, std::string name)
         }
     }
 
-    // Determine first non-wildcard byte
+    // Determine first and last non-wildcard bytes
     has_non_wildcard_ = false;
     for (size_t i = 0; i < bytes_.size(); ++i) {
         if (!bytes_[i].is_wildcard) {
-            first_byte_ = bytes_[i].value;
-            first_byte_offset_ = i;
-            has_non_wildcard_ = true;
-            break;
+            if (!has_non_wildcard_) {
+                first_byte_ = bytes_[i].value;
+                first_byte_offset_ = i;
+                has_non_wildcard_ = true;
+            }
+            last_byte_ = bytes_[i].value;
+            last_byte_offset_ = i;
         }
     }
 }
@@ -62,10 +68,13 @@ Pattern::Pattern(const uint8_t* bytes, const char* mask, std::string name)
     has_non_wildcard_ = false;
     for (size_t i = 0; i < bytes_.size(); ++i) {
         if (!bytes_[i].is_wildcard) {
-            first_byte_ = bytes_[i].value;
-            first_byte_offset_ = i;
-            has_non_wildcard_ = true;
-            break;
+            if (!has_non_wildcard_) {
+                first_byte_ = bytes_[i].value;
+                first_byte_offset_ = i;
+                has_non_wildcard_ = true;
+            }
+            last_byte_ = bytes_[i].value;
+            last_byte_offset_ = i;
         }
     }
 }
@@ -96,9 +105,13 @@ NOESCAPE_NO_SANITIZE const uint8_t* PatternScanner::ScanScalar(
 
     const uint8_t first = pattern.FirstByte();
     const size_t first_offset = pattern.FirstByteOffset();
+    const uint8_t last = pattern.LastByte();
+    const size_t last_offset = pattern.LastByteOffset();
 
     for (size_t i = 0; i <= max_scan; ++i) {
-        if (data[i + first_offset] == first && MatchAt(data + i, pattern)) {
+        if (data[i + first_offset] == first &&
+            data[i + last_offset] == last &&
+            MatchAt(data + i, pattern)) {
             return data + i;
         }
     }
@@ -125,27 +138,38 @@ NOESCAPE_NO_SANITIZE const uint8_t* ScanScalarFree(const uint8_t* data, size_t s
     const size_t max_scan = size - pattern.Length();
     const uint8_t first = pattern.FirstByte();
     const size_t off = pattern.FirstByteOffset();
+    const uint8_t last = pattern.LastByte();
+    const size_t last_off = pattern.LastByteOffset();
     for (size_t i = 0; i <= max_scan; ++i) {
-        if (data[i + off] == first && MatchAtFree(data + i, pattern)) return data + i;
+        if (data[i + off] == first && data[i + last_off] == last && MatchAtFree(data + i, pattern)) return data + i;
     }
     return nullptr;
 }
 
 #if defined(NOESCAPE_X86)
-// Shared SIMD driver parametrised on block width; each wrapper below is compiled for its ISA.
-#define NOESCAPE_SIMD_BODY(WIDTH, SET1, LOADU, CMPEQ, MOVEMASK, VEC)                                  \
+// Shared SIMD driver parametrised on block width; uses dual-anchor (first + last non-wildcard byte) filtering.
+#define NOESCAPE_SIMD_BODY(WIDTH, SET1, LOADU, CMPEQ, BITAND, MOVEMASK, VEC)                          \
     const size_t pattern_len = pattern.Length();                                                      \
     const size_t max_scan = size - pattern_len;                                                       \
     const uint8_t first = pattern.FirstByte();                                                        \
     const size_t first_offset = pattern.FirstByteOffset();                                            \
-    const VEC match_vec = SET1(static_cast<char>(first));                                             \
+    const uint8_t last = pattern.LastByte();                                                          \
+    const size_t last_offset = pattern.LastByteOffset();                                              \
+    const VEC first_vec = SET1(static_cast<char>(first));                                             \
+    const VEC last_vec = SET1(static_cast<char>(last));                                               \
+    const bool dual_anchor = (last_offset != first_offset);                                           \
     size_t i = 0;                                                                                     \
-    while (i + first_offset + WIDTH <= size && i <= max_scan) {                                       \
-        VEC block = LOADU(reinterpret_cast<const VEC*>(data + i + first_offset));                     \
-        uint32_t mask = static_cast<uint32_t>(MOVEMASK(CMPEQ(block, match_vec)));                     \
+    while (i + last_offset + WIDTH <= size && i <= max_scan) {                                        \
+        VEC block_first = LOADU(reinterpret_cast<const VEC*>(data + i + first_offset));               \
+        VEC eq = CMPEQ(block_first, first_vec);                                                       \
+        if (dual_anchor) {                                                                            \
+            VEC block_last = LOADU(reinterpret_cast<const VEC*>(data + i + last_offset));             \
+            eq = BITAND(eq, CMPEQ(block_last, last_vec));                                             \
+        }                                                                                             \
+        uint32_t mask = static_cast<uint32_t>(MOVEMASK(eq));                                          \
         while (mask != 0) {                                                                           \
             size_t cand = i + static_cast<size_t>(std::countr_zero(mask));                            \
-            if (cand <= max_scan && MatchAtFree(data + cand, pattern)) {            \
+            if (cand <= max_scan && MatchAtFree(data + cand, pattern)) {                              \
                 return data + cand;                                                                   \
             }                                                                                         \
             mask &= mask - 1;                                                                         \
@@ -153,7 +177,8 @@ NOESCAPE_NO_SANITIZE const uint8_t* ScanScalarFree(const uint8_t* data, size_t s
         i += WIDTH;                                                                                   \
     }                                                                                                 \
     if (i <= max_scan) {                                                                              \
-        return ScanScalarFree(data + i, size - i, pattern);                         \
+        const uint8_t* tail = ScanScalarFree(data + i, size - i, pattern);                            \
+        return tail;                                                                                  \
     }                                                                                                 \
     return nullptr;
 
@@ -161,23 +186,39 @@ NOESCAPE_NO_SANITIZE const uint8_t* ScanScalarFree(const uint8_t* data, size_t s
 __attribute__((target("avx2")))
 #endif
 NOESCAPE_NO_SANITIZE const uint8_t* ScanAvx2Impl(const uint8_t* data, size_t size, const Pattern& pattern) {
-#if defined(__AVX2__) || defined(NOESCAPE_RUNTIME_DISPATCH)
-    NOESCAPE_SIMD_BODY(32, _mm256_set1_epi8, _mm256_loadu_si256, _mm256_cmpeq_epi8, _mm256_movemask_epi8, __m256i)
+#if defined(__AVX2__) || defined(NOESCAPE_RUNTIME_DISPATCH) || defined(_MSC_VER)
+    NOESCAPE_SIMD_BODY(32, _mm256_set1_epi8, _mm256_loadu_si256, _mm256_cmpeq_epi8, _mm256_and_si256, _mm256_movemask_epi8, __m256i)
 #else
     return ScanScalarFree(data, size, pattern);
 #endif
 }
 
 NOESCAPE_NO_SANITIZE const uint8_t* ScanSse2Impl(const uint8_t* data, size_t size, const Pattern& pattern) {
-    NOESCAPE_SIMD_BODY(16, _mm_set1_epi8, _mm_loadu_si128, _mm_cmpeq_epi8, _mm_movemask_epi8, __m128i)
+    NOESCAPE_SIMD_BODY(16, _mm_set1_epi8, _mm_loadu_si128, _mm_cmpeq_epi8, _mm_and_si128, _mm_movemask_epi8, __m128i)
 }
 
 bool CpuHasAvx2() {
 #if defined(NOESCAPE_RUNTIME_DISPATCH)
     static const bool has = __builtin_cpu_supports("avx2");
     return has;
+#elif defined(_MSC_VER) && defined(NOESCAPE_X86)
+    static const bool has = []() {
+        int cpuInfo[4] = {0, 0, 0, 0};
+        __cpuid(cpuInfo, 0);
+        if (cpuInfo[0] < 7) return false;
+        __cpuid(cpuInfo, 1);
+        // Check OSXSAVE (ECX bit 27) and AVX (ECX bit 28)
+        if ((cpuInfo[2] & ((1 << 27) | (1 << 28))) != ((1 << 27) | (1 << 28))) return false;
+        // Verify OS has enabled XMM (bit 1) and YMM (bit 2) state saving via XGETBV(0)
+        unsigned long long xcrFeatureMask = _xgetbv(0);
+        if ((xcrFeatureMask & 0x6ULL) != 0x6ULL) return false;
+        __cpuidex(cpuInfo, 7, 0);
+        // Check AVX2 (EBX bit 5)
+        return (cpuInfo[1] & (1 << 5)) != 0;
+    }();
+    return has;
 #elif defined(__AVX2__)
-    return true; // MSVC /arch:AVX2 builds are AVX2-only by construction
+    return true;
 #else
     return false;
 #endif
@@ -267,7 +308,7 @@ NOESCAPE_NO_SANITIZE void ScanBucketAvx2Impl(
     size_t max_results,
     std::vector<BucketHit>& out_hits
 ) {
-#if defined(__AVX2__) || defined(NOESCAPE_RUNTIME_DISPATCH)
+#if defined(__AVX2__) || defined(NOESCAPE_RUNTIME_DISPATCH) || defined(_MSC_VER)
     NOESCAPE_SIMD_BUCKET_BODY(32, _mm256_set1_epi8, _mm256_loadu_si256, _mm256_cmpeq_epi8, _mm256_movemask_epi8, __m256i)
 #else
     ScanBucketScalarFree(data, size, first, first_offset, min_len, patterns, indices, count, base_address, max_results, out_hits);
@@ -385,6 +426,22 @@ void ScanPatternGroup(
 
 } // namespace
 
+bool PatternScanner::HasAvx2Support() {
+#if defined(NOESCAPE_X86)
+    return CpuHasAvx2();
+#else
+    return false;
+#endif
+}
+
+bool PatternScanner::HasSse2Support() {
+#if defined(NOESCAPE_X86)
+    return true;
+#else
+    return false;
+#endif
+}
+
 const uint8_t* PatternScanner::ScanSimd(
     const uint8_t* data, 
     size_t size, 
@@ -401,6 +458,50 @@ const uint8_t* PatternScanner::ScanSimd(
 #else
     return ScanScalar(data, size, pattern);
 #endif
+}
+
+std::optional<uintptr_t> PatternScanner::ScanWithIsa(
+    const uint8_t* data,
+    size_t size,
+    const Pattern& pattern,
+    SimdIsa isa,
+    uintptr_t base_address
+) {
+    if (!data || size == 0 || pattern.Empty() || size < pattern.Length()) return std::nullopt;
+    if (!pattern.HasNonWildcard()) return base_address;
+
+    const uint8_t* match = nullptr;
+    switch (isa) {
+        case SimdIsa::SCALAR:
+            match = ScanScalar(data, size, pattern);
+            break;
+        case SimdIsa::SSE2:
+#if defined(NOESCAPE_X86)
+            match = ScanSse2Impl(data, size, pattern);
+#else
+            match = ScanScalar(data, size, pattern);
+#endif
+            break;
+        case SimdIsa::AVX2:
+#if defined(NOESCAPE_X86)
+            if (CpuHasAvx2()) {
+                match = ScanAvx2Impl(data, size, pattern);
+            } else {
+                match = ScanSse2Impl(data, size, pattern);
+            }
+#else
+            match = ScanScalar(data, size, pattern);
+#endif
+            break;
+        case SimdIsa::AUTO:
+        default:
+            match = ScanSimd(data, size, pattern);
+            break;
+    }
+    if (match) {
+        return base_address + static_cast<uintptr_t>(match - data);
+    }
+    return std::nullopt;
 }
 
 std::optional<uintptr_t> PatternScanner::Scan(

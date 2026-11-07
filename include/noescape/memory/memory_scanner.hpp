@@ -28,6 +28,35 @@ struct MemoryRegion {
     std::string pathname;
 };
 
+struct ThreadExecutionInfo {
+    uint32_t tid{0};
+    uintptr_t instruction_pointer{0};
+    uintptr_t stack_pointer{0};
+    uintptr_t start_address{0};
+    bool ip_in_backed_module{true};
+    std::string module_path;
+};
+
+struct ModuleProvenanceInfo {
+    std::string path;
+    uintptr_t base_address{0};
+    size_t executable_size{0};
+    std::string sha256_disk_hash;
+    std::string elf_build_id;
+    bool is_signed{false};
+    bool is_suspicious_origin{false};
+};
+
+struct ScanTelemetry {
+    uint64_t total_scans_completed{0};
+    uint64_t regions_scanned{0};
+    uint64_t bytes_scanned{0};
+    uint64_t last_scan_duration_us{0};
+    uint64_t mean_scan_duration_us{0};
+    uint64_t p95_scan_duration_us{0};
+    uint64_t p99_scan_duration_us{0};
+};
+
 class MemoryScanner {
 public:
     static MemoryScanner& Instance();
@@ -50,12 +79,24 @@ public:
     std::vector<core::DetectionEvent> ScanSignatures(const std::vector<Pattern>& patterns);
 
     // Compares one file-backed executable mapping per call (round-robin) against its
-    // on-disk image; detects module stomping / in-memory patching. Linux/ELF only.
+    // on-disk image; detects module stomping / in-memory patching.
     std::vector<core::DetectionEvent> DetectModifiedModules();
 
     // Detects previously-executable regions that were later made inaccessible
     // (sleep-obfuscation style payloads hiding between audit cycles).
     std::vector<core::DetectionEvent> DetectSleepingPayloads();
+
+    // Thread execution provenance: inspects active thread start addresses and instruction pointers
+    std::vector<ThreadExecutionInfo> QueryActiveThreads();
+    std::optional<core::DetectionEvent> InspectThreadAddress(uint32_t tid, uintptr_t code_address);
+    std::vector<core::DetectionEvent> AuditThreadProvenance();
+
+    // Module provenance: SHA-256 disk identity, ELF NT_GNU_BUILD_ID, Windows Authenticode, origin validation
+    std::vector<ModuleProvenanceInfo> QueryModuleProvenance();
+    std::vector<core::DetectionEvent> AuditModuleProvenance();
+
+    // Performance & adaptive scanning telemetry
+    ScanTelemetry GetScanTelemetry() const;
 
     // Runs a full memory audit with custom cheat signatures
     std::vector<core::DetectionEvent> PerformAudit(const std::vector<CheatSignature>& signatures);
@@ -87,6 +128,7 @@ public:
 
 private:
     bool IsJitRuntime(const std::vector<MemoryRegion>& regions) const;
+    void RecordScanDurationUs(uint64_t duration_us, uint64_t regions_count, uint64_t bytes_count);
     std::function<void()> progress_cb_;
     std::atomic<bool> host_uses_jit_{false};
     int cache_users_{0};
@@ -98,11 +140,15 @@ private:
     std::vector<MemoryRegion> cached_regions_;
     bool cache_valid_{false};
 
-    std::mutex state_mutex_;
+    mutable std::mutex state_mutex_;
     size_t scan_budget_bytes_{0};
     uintptr_t scan_cursor_{0};
     std::map<uintptr_t, uintptr_t> seen_exec_regions_; // start -> end
     size_t module_cursor_{0};
+
+    std::map<std::string, ModuleProvenanceInfo> provenance_cache_;
+    std::vector<uint64_t> scan_durations_us_;
+    ScanTelemetry telemetry_{};
 };
 
 } // namespace noescape::memory

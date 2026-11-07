@@ -159,6 +159,36 @@ std::vector<uintptr_t> BlackboxDumper::CaptureBacktrace(size_t max_depth) {
     return addrs;
 }
 
+std::string BlackboxDumper::RedactSensitivePaths(const std::string& input) {
+    if (input.empty()) return input;
+    std::string out = input;
+
+    // Redact Linux /home/<user>/ and macOS /Users/<user>/
+    auto redactPrefix = [&out](const std::string& prefix) {
+        size_t pos = 0;
+        while ((pos = out.find(prefix, pos)) != std::string::npos) {
+            size_t userStart = pos + prefix.size();
+            size_t sep = out.find_first_of("/\\", userStart);
+            if (sep != std::string::npos && sep > userStart) {
+                std::string user = out.substr(userStart, sep - userStart);
+                if (user != "<REDACTED>") {
+                    out.replace(userStart, sep - userStart, "<REDACTED>");
+                }
+                pos = userStart + 10;
+            } else {
+                break;
+            }
+        }
+    };
+
+    redactPrefix("/home/");
+    redactPrefix("/Users/");
+    redactPrefix("C:\\Users\\");
+    redactPrefix("c:\\Users\\");
+    redactPrefix("C:/Users/");
+    return out;
+}
+
 std::vector<std::string> BlackboxDumper::SampleLoadedModules(size_t max_count) {
     std::vector<std::string> modules;
     std::set<std::string> uniquePaths;
@@ -172,8 +202,9 @@ std::vector<std::string> BlackboxDumper::SampleLoadedModules(size_t max_count) {
         for (size_t i = 0; i < count && modules.size() < max_count; ++i) {
             char szModName[MAX_PATH];
             if (GetModuleFileNameExA(hProcess, hMods[i], szModName, sizeof(szModName))) {
-                if (uniquePaths.insert(szModName).second) {
-                    modules.emplace_back(szModName);
+                std::string redacted = RedactSensitivePaths(szModName);
+                if (uniquePaths.insert(redacted).second) {
+                    modules.emplace_back(std::move(redacted));
                 }
             }
         }
@@ -185,9 +216,9 @@ std::vector<std::string> BlackboxDumper::SampleLoadedModules(size_t max_count) {
         while (std::getline(maps, line) && modules.size() < max_count) {
             size_t slashPos = line.find('/');
             if (slashPos != std::string::npos) {
-                std::string path = line.substr(slashPos);
+                std::string path = RedactSensitivePaths(line.substr(slashPos));
                 if (uniquePaths.insert(path).second) {
-                    modules.push_back(path);
+                    modules.push_back(std::move(path));
                 }
             }
         }
@@ -207,7 +238,7 @@ BlackboxRecord BlackboxDumper::CaptureSnapshot(
     rec.timestamp = static_cast<uint64_t>(std::time(nullptr));
     rec.hwid = network::CryptoUtil::GetMachineHWID();
     rec.violating_component = component;
-    rec.violation_reason = reason;
+    rec.violation_reason = RedactSensitivePaths(reason);
     rec.threat_score = score;
     rec.violation_type = violation_type;
 
@@ -255,13 +286,9 @@ std::vector<uint8_t> BlackboxDumper::SerializeAndEncrypt(
         PutString(plaintext, mod);
     }
 
-    // 2. Generate 16-byte IV
-    uint64_t nowNs = static_cast<uint64_t>(std::chrono::high_resolution_clock::now().time_since_epoch().count());
-    std::string ivSeed = network::CryptoUtil::Sha256(secret_key + ":" + std::to_string(nowNs) + ":" + record.hwid);
-    std::vector<uint8_t> iv = HexToBytes(ivSeed.substr(0, 32));
-    if (iv.size() < 16) {
-        iv.resize(16, 0xA5);
-    }
+    // 2. Generate 16-byte unpredictable random IV via OS CSPRNG
+    std::vector<uint8_t> iv(16, 0);
+    network::CryptoUtil::GenerateRandomBytes(iv.data(), iv.size());
 
     // 3. Keystream CTR encryption using SHA-256 blocks
     std::string ivStr(reinterpret_cast<const char*>(iv.data()), 16);

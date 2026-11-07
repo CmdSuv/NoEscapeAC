@@ -60,6 +60,16 @@
    - **Mutual Watchdog Thread Supervision**: The background audit loop and watchdog monitor each other's timestamps (`heartbeat_mutex_`). Freezing, suspending, or killing either thread immediately triggers tamper enforcement.
    - **Authenticated Blackbox Dumper**: Captures cryptographic crash/violation snapshots encrypted with CTR stream cipher and authenticated with HMAC-SHA256.
 
+10. **Evidence Correlation & Multi-Signal Verification (`EvidenceCorrelator`)**:
+   - Classifies findings across 5 confidence tiers (`OBSERVATION`, `SUSPICION`, `CORROBORATED_ANOMALY`, `HIGH_CONFIDENCE_VIOLATION`, `INDEPENDENTLY_VERIFIED`).
+   - Enforces heuristic dampening: single weak heuristics (DMA jitter alone, background process name match alone, overlay transparency, single RDTSC anomaly) can never trigger an automated ban.
+   - Tracks distinct detection categories and promotes multi-family corroborated evidence.
+
+11. **Server-Authoritative Gameplay Integration (`ServerEspFilter`)**:
+   - Server-side 3D AABB raycast occlusion culling (Slab method) that withholds occluded enemy coordinates from client replication streams to defeat client-side wallhacks and external/DMA ESP.
+   - Acoustic cue routing: transmits footsteps and gunshot cues when players are within hearing radius while keeping visual coordinates withheld.
+   - Authoritative speedhack, teleportation, and solid-wall engagement validation.
+
 ---
 
 ### 🚀 Build & Verification
@@ -74,7 +84,7 @@
 cmake -B build -DCMAKE_BUILD_TYPE=Release -DNOESCAPE_WERROR=ON
 cmake --build build -j$(nproc)
 
-# Run Comprehensive Unit Test Suite (126 test cases across all subsystems)
+# Run Comprehensive Unit Test Suite (133 test cases across all subsystems)
 ./build/noescape_tests
 
 # Run Preload Scenario B Verification Suite (6/6 tests)
@@ -86,6 +96,23 @@ cmake --build build -j$(nproc)
 # Run Standalone Anti-Cheat Engine (Single Audit)
 ./build/noescape_app --once
 ```
+
+---
+
+### 📚 Architectural Specifications & Documentation
+
+- [SECURITY_ARCHITECTURE.md](SECURITY_ARCHITECTURE.md) — Subsystem taxonomy, layered defense structure, anti-tamper, and telemetry pipeline.
+- [DETECTION_MATRIX.md](DETECTION_MATRIX.md) — Complete detection coverage matrix, bypass difficulty, and test references.
+- [FALSE_POSITIVE_STRATEGY.md](FALSE_POSITIVE_STRATEGY.md) — Heuristic dampening, confidence tiers, whitelisting, and dispute workflow.
+- [PERFORMANCE_BENCHMARKS.md](PERFORMANCE_BENCHMARKS.md) — AVX2 SIMD throughput (>9.4 GB/s), VMA page walks, and frame-time impact.
+- [PLATFORM_COMPATIBILITY.md](PLATFORM_COMPATIBILITY.md) — Windows x64, Linux x86_64, and Proton/Wine execution parity.
+- [TEST_STRATEGY.md](TEST_STRATEGY.md) — Unit test suite structure (133 tests), mock injection harnesses, and CI sanitizers.
+- [PRIVACY_AND_DATA_POLICY.md](PRIVACY_AND_DATA_POLICY.md) — Zero PII collection policy, one-way HWID hashing, and encrypted blackbox dumps.
+- [CHANGELOG.md](CHANGELOG.md) — Full release history from v1.0 through v1.3.
+- [CURRENT_PROJECT_STATE.md](CURRENT_PROJECT_STATE.md) — Active project state, build verification, and deployment handoff.
+- [AUDIT_REPORT.md](AUDIT_REPORT.md) — Comprehensive technical security audit report.
+- [RING3_THREAT_MODEL.md](RING3_THREAT_MODEL.md) — Ring-3 threat modeling, threat vectors, and architectural mitigations.
+- [DETECTION_GAP_ANALYSIS.md](DETECTION_GAP_ANALYSIS.md) — Gap analysis and technical countermeasure analysis.
 
 ---
 
@@ -126,13 +153,14 @@ NoEscapeAC/
 ├── include/
 │   ├── noescape_sdk.h        # Clean C-ABI & C++ SDK layer
 │   └── noescape/
-│       ├── core/             # Types, Logger, ThreadPool, Engine, Blackbox, Obfuscation
+│       ├── core/             # Types, Logger, ThreadPool, Engine, Blackbox, EvidenceCorrelator
 │       ├── security/         # AntiDebug, Self-Integrity, TSC Timing
-│       ├── memory/           # SIMD PatternScanner, MemoryScanner, Unhooker
+│       ├── memory/           # SIMD PatternScanner, MemoryScanner, Unhooker, CanaryMonitor
 │       ├── overlay/          # OverlayDetector (Window scanner & Swapchain validator)
 │       ├── forensics/        # ProcessAnalyzer, ArtifactAnalyzer
-│       ├── dma/              # DmaDetector (PCIe Leech & Latency Jitter)
-│       ├── kinematics/       # AimAnalyzer (Snap, Linearity, Smoothing)
+│       ├── dma/              # DmaDetector (PCIe Leech, Latency Jitter, IOMMU Status)
+│       ├── kinematics/       # AimAnalyzer (Snap, Linearity, Smoothing), PhantomMonitor
+│       ├── server/           # ServerEspFilter (Authoritative Occlusion Culling & Movement Validation)
 │       ├── network/          # CryptoUtil (SHA-256 / HMAC), PanelClient
 │       └── sdk/              # SDK forwarding header
 ├── src/                      # Subsystem implementations (Linux + Windows)
@@ -143,10 +171,11 @@ NoEscapeAC/
 │   ├── forensics/
 │   ├── dma/
 │   ├── kinematics/
+│   ├── server/
 │   ├── network/
 │   └── sdk/
 ├── demo/                     # Interactive demonstration program
-├── tests/                    # 126 unit & regression tests
+├── tests/                    # 133 unit & regression tests
 └── CMakeLists.txt            # Exports libnoescape.a, libnoescape.so, and executables
 ```
 

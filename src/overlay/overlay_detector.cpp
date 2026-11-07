@@ -99,6 +99,18 @@ void OverlayDetector::ClearRegisteredVTables() {
     registered_vtable_sizes_.clear();
 }
 
+void OverlayDetector::AllowlistOverlayTitle(const std::string& title_keyword) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!title_keyword.empty()) {
+        custom_allowlisted_titles_.push_back(ToLower(title_keyword));
+    }
+}
+
+void OverlayDetector::ClearCustomOverlayAllowlist() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    custom_allowlisted_titles_.clear();
+}
+
 std::vector<OverlayWindowInfo> OverlayDetector::EnumerateTopLevelWindows() {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!mock_windows_.empty()) {
@@ -397,6 +409,20 @@ bool OverlayDetector::IsSuspiciousOverlayWindow(const OverlayWindowInfo& win) co
                 return false;
             }
             // Title matched a whitelisted overlay, but the owning PID binary is forged or hijacked!
+            return true;
+        }
+    }
+
+    std::vector<std::string> customAllowlistCopy;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        customAllowlistCopy = custom_allowlisted_titles_;
+    }
+    for (const auto& white : customAllowlistCopy) {
+        if (lowerTitle.find(white) != std::string::npos || lowerClass.find(white) != std::string::npos) {
+            if (verifyOverlayProcessAuthentic(win.pid)) {
+                return false;
+            }
             return true;
         }
     }

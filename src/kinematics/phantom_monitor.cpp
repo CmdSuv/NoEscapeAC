@@ -12,9 +12,9 @@ constexpr float kDegToRad = 3.14159265358979323846f / 180.0f;
 constexpr float kRadToDeg = 180.0f / 3.14159265358979323846f;
 }
 
-void PhantomMonitor::AddPhantom(uint32_t id, float x, float y, float z) {
+void PhantomMonitor::AddPhantom(uint32_t id, float x, float y, float z, bool occluded) {
     std::lock_guard<std::mutex> lock(mutex_);
-    phantoms_.push_back({id, x, y, z});
+    phantoms_.push_back({id, x, y, z, false, false, occluded});
 }
 
 void PhantomMonitor::UpdatePhantom(uint32_t id, float x, float y, float z) {
@@ -29,11 +29,17 @@ void PhantomMonitor::Clear() {
     phantoms_.clear();
     tracked_id_ = 0;
     streak_ = 0;
+    total_detections_ = 0;
 }
 
 size_t PhantomMonitor::Count() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return phantoms_.size();
+}
+
+std::vector<PhantomEntity> PhantomMonitor::GetPhantoms() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return phantoms_;
 }
 
 void PhantomMonitor::GenerateAround(float cx, float cy, float cz, float radius, size_t count, uint64_t seed) {
@@ -45,7 +51,7 @@ void PhantomMonitor::GenerateAround(float cx, float cy, float cz, float radius, 
     uint32_t nextId = 0xF000u + static_cast<uint32_t>(phantoms_.size());
     for (size_t i = 0; i < count; ++i) {
         float a = ang(rng), r = rad(rng);
-        phantoms_.push_back({nextId++, cx + r * std::cos(a), cy + r * std::sin(a), cz + dz(rng)});
+        phantoms_.push_back({nextId++, cx + r * std::cos(a), cy + r * std::sin(a), cz + dz(rng), false, false, true});
     }
 }
 
@@ -84,16 +90,22 @@ std::optional<core::DetectionEvent> PhantomMonitor::PushView(float cx, float cy,
     if (++streak_ < required_samples_) return std::nullopt;
 
     streak_ = 0; // rearm: one event per sustained lock
+    ++total_detections_;
     core::DetectionEvent ev;
     ev.type = core::DetectionType::PHANTOM_ENTITY_TARGETED;
     ev.severity = core::Severity::HIGH;
     ev.component = "Kinematics::PhantomMonitor";
     std::ostringstream ss;
     ss << "Crosshair held on invisible decoy entity #" << best << " within " << bestAngle
-       << " deg for " << required_samples_ << " consecutive samples (entity table is being read)";
+       << " deg for " << required_samples_ << " consecutive samples (mode="
+       << (mode_ == DecoyMode::SERVER_INTEGRATED ? "SERVER_INTEGRATED" : "LOCAL_ANALYTICAL")
+       << ", locks=" << total_detections_ << ")";
     ev.details = ss.str();
     ev.timestamp = static_cast<uint64_t>(std::time(nullptr));
-    ev.threat_score = 60;
+    ev.threat_score = (mode_ == DecoyMode::SERVER_INTEGRATED && total_detections_ >= 2) ? 85 : 60;
+    ev.confidence = (mode_ == DecoyMode::SERVER_INTEGRATED && total_detections_ >= 2)
+                        ? core::ConfidenceLevel::CONFIRMED
+                        : core::ConfidenceLevel::MEDIUM;
     return ev;
 }
 
