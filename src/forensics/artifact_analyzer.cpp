@@ -6,10 +6,12 @@
 #include <fstream>
 #include <sstream>
 #include <ctime>
+#include <unordered_set>
 
 #if defined(_WIN32)
 #include <windows.h>
 #include <psapi.h>
+#include <winternl.h>
 #else
 #include <dirent.h>
 #include <unistd.h>
@@ -173,6 +175,108 @@ std::vector<ArtifactRecord> ArtifactAnalyzer::ScanKernelDrivers(const std::vecto
     return findings;
 }
 
+std::vector<ArtifactRecord> ArtifactAnalyzer::CheckKernelEnvironmentIntegrity() {
+    std::vector<ArtifactRecord> findings;
+
+#if defined(_WIN32)
+    using NtQuerySysInfoFn = NTSTATUS(NTAPI*)(ULONG, PVOID, ULONG, PULONG);
+    HMODULE hNtdll = GetModuleHandleA(NOESCAPE_XOR("ntdll.dll"));
+    if (hNtdll) {
+        auto pNtQuerySys = reinterpret_cast<NtQuerySysInfoFn>(
+            reinterpret_cast<void*>(GetProcAddress(hNtdll, NOESCAPE_XOR("NtQuerySystemInformation")))
+        );
+        if (pNtQuerySys) {
+            // 1. SystemKernelDebuggerInformation (0x23)
+            struct KernelDebuggerInfo {
+                BOOLEAN KernelDebuggerEnabled;
+                BOOLEAN KernelDebuggerNotPresent;
+            } kdInfo{};
+            if (pNtQuerySys(0x23, &kdInfo, sizeof(kdInfo), nullptr) == 0) {
+                if (kdInfo.KernelDebuggerEnabled && !kdInfo.KernelDebuggerNotPresent) {
+                    findings.push_back({"SystemKernelDebugger", "Ring0KernelDebugger", "KernelIntegrity"});
+                }
+            }
+
+            // 2. SystemCodeIntegrityInformation (0x67): detect TestSigning (0x02) or DebugMode (0x80)
+            struct CodeIntegrityInfo {
+                ULONG Length;
+                ULONG CodeIntegrityOptions;
+            } ciInfo{sizeof(CodeIntegrityInfo), 0};
+            if (pNtQuerySys(0x67, &ciInfo, sizeof(ciInfo), nullptr) == 0) {
+                constexpr ULONG kTestSignFlag = 0x00000002;
+                constexpr ULONG kDebugModeFlag = 0x00000080;
+                if ((ciInfo.CodeIntegrityOptions & (kTestSignFlag | kDebugModeFlag)) != 0) {
+                    findings.push_back({"BCD::CodeIntegrity", "DSE_TestSigningOrDebugMode", "KernelIntegrity"});
+                }
+            }
+        }
+    }
+#else
+    // 1. Build set of visible modules in /proc/modules
+    std::unordered_set<std::string> visibleModules;
+    bool procModulesReadable = false;
+    {
+        std::ifstream modFile(NOESCAPE_XOR("/proc/modules"));
+        if (modFile.is_open()) {
+            procModulesReadable = true;
+            std::string line;
+            while (std::getline(modFile, line)) {
+                std::istringstream iss(line);
+                std::string modName;
+                if (iss >> modName) {
+                    visibleModules.insert(modName);
+                }
+            }
+        }
+    }
+
+    // 2. Inspect /sys/module for hidden LKM rootkits (initstate=="live" but unlinked from /proc/modules)
+    //    and forced-load ('F') tainted modules
+    if (procModulesReadable && !visibleModules.empty()) {
+        DIR* sysModDir = opendir(NOESCAPE_XOR("/sys/module"));
+        if (sysModDir) {
+            struct dirent* entry = nullptr;
+            while ((entry = readdir(sysModDir)) != nullptr) {
+                if (entry->d_name[0] == '.') continue;
+                std::string modName = entry->d_name;
+                std::string modBase = std::string("/sys/module/") + modName;
+
+                // Only dynamically loadable modules have an 'initstate' attribute (built-in modules do not)
+                std::ifstream initFile(modBase + "/initstate");
+                std::string initState;
+                if (initFile >> initState) {
+                    if (initState == "live" && visibleModules.find(modName) == visibleModules.end()) {
+                        findings.push_back({modBase, "HiddenLKMRootkit:" + modName, "KernelIntegrity"});
+                    }
+                }
+
+                std::ifstream taintFile(modBase + "/taint");
+                std::string taintFlags;
+                if (taintFile >> taintFlags) {
+                    if (taintFlags.find('F') != std::string::npos) {
+                        findings.push_back({modBase, "ForcedVerMagicTaint:" + modName, "KernelIntegrity"});
+                    }
+                }
+            }
+            closedir(sysModDir);
+        }
+    }
+
+    // 3. Check for known Ring-0 cheat memory R/W character devices in /dev
+    static const char* kCheatDevs[] = {
+        "/dev/vmread", "/dev/kmrw", "/dev/apex_mem", "/dev/physmem", "/dev/kmem_rw"
+    };
+    for (const char* devPath : kCheatDevs) {
+        struct stat st{};
+        if (stat(devPath, &st) == 0) {
+            findings.push_back({devPath, devPath, "KernelCheatDevice"});
+        }
+    }
+#endif
+
+    return findings;
+}
+
 std::vector<core::DetectionEvent> ArtifactAnalyzer::PerformAudit(
     const std::vector<std::string>& blacklisted_names,
     const std::vector<std::string>& blacklisted_drivers
@@ -214,6 +318,21 @@ std::vector<core::DetectionEvent> ArtifactAnalyzer::PerformAudit(
         ev.details = "Dangerous/vulnerable kernel driver active: " + drv.path + " (matched: " + drv.matched_signature + ")";
         ev.timestamp = static_cast<uint64_t>(std::time(nullptr));
         ev.threat_score = 100;
+        events.push_back(ev);
+    }
+
+    // Check Ring-0 kernel environment integrity (DSE TestSigning, Hidden LKM Rootkits, Cheat /dev nodes)
+    auto kernelIntegrity = CheckKernelEnvironmentIntegrity();
+    for (const auto& ki : kernelIntegrity) {
+        core::DetectionEvent ev;
+        ev.type = core::DetectionType::ENVIRONMENT_TAMPERING;
+        ev.severity = (ki.artifact_type == "KernelCheatDevice" || ki.matched_signature.rfind("HiddenLKMRootkit:", 0) == 0)
+                          ? core::Severity::FATAL_BAN
+                          : core::Severity::CRITICAL;
+        ev.component = "ArtifactAnalyzer::KernelIntegrity";
+        ev.details = "Ring-0 kernel integrity anomaly detected: " + ki.path + " (" + ki.matched_signature + ")";
+        ev.timestamp = static_cast<uint64_t>(std::time(nullptr));
+        ev.threat_score = (ev.severity == core::Severity::FATAL_BAN) ? 100 : 85;
         events.push_back(ev);
     }
 

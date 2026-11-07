@@ -332,9 +332,72 @@ bool OverlayDetector::IsSuspiciousOverlayWindow(const OverlayWindowInfo& win) co
         "discord overlay", "obs", "nvidia share", "geforce experience"
     };
 
+    static const std::vector<std::string> suspiciousBinaryMarkers = {
+        "/tmp/", "/dev/shm/", "/var/tmp/", "memfd:", "\\temp\\",
+        "cheat", "inject", "esp", "wallhack", "aimbot", "spoof", "hijack", "loader"
+    };
+
+    auto verifyOverlayProcessAuthentic = [&](uint32_t pid) -> bool {
+        if (pid == 0) return true;
+#if defined(_WIN32)
+        HANDLE hProc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+        if (!hProc) return true;
+        char exePath[MAX_PATH]{};
+        DWORD sz = MAX_PATH;
+        bool ok = true;
+        if (QueryFullProcessImageNameA(hProc, 0, exePath, &sz)) {
+            std::string lowerExe = ToLower(exePath);
+            for (const auto& marker : suspiciousBinaryMarkers) {
+                if (lowerExe.find(marker) != std::string::npos) {
+                    ok = false;
+                    break;
+                }
+            }
+        }
+        CloseHandle(hProc);
+        return ok;
+#else
+        std::string exeLink = "/proc/" + std::to_string(pid) + "/exe";
+        char linkBuf[512]{};
+        ssize_t len = readlink(exeLink.c_str(), linkBuf, sizeof(linkBuf) - 1);
+        if (len > 0) {
+            linkBuf[len] = '\0';
+            std::string lowerExe = ToLower(linkBuf);
+            for (const auto& marker : suspiciousBinaryMarkers) {
+                if (lowerExe.find(marker) != std::string::npos) {
+                    return false; // Spoofed overlay title from volatile/cheat executable!
+                }
+            }
+        }
+
+        // Also check if a legitimate overlay process has been hijacked via volatile .so injection
+        std::string mapsPath = "/proc/" + std::to_string(pid) + "/maps";
+        std::ifstream mapsFile(mapsPath);
+        if (mapsFile.is_open()) {
+            std::string line;
+            while (std::getline(mapsFile, line)) {
+                if (line.find("x") == std::string::npos) continue;
+                std::string lowerLine = ToLower(line);
+                if (lowerLine.find("/dev/shm/") != std::string::npos ||
+                    lowerLine.find("/tmp/") != std::string::npos ||
+                    lowerLine.find("inject.so") != std::string::npos ||
+                    lowerLine.find("cheat") != std::string::npos ||
+                    lowerLine.find("esp_overlay") != std::string::npos) {
+                    return false; // Legitimate overlay process hijacked!
+                }
+            }
+        }
+        return true;
+#endif
+    };
+
     for (const auto& white : whitelistedTitles) {
         if (lowerTitle.find(white) != std::string::npos || lowerClass.find(white) != std::string::npos) {
-            return false;
+            if (verifyOverlayProcessAuthentic(win.pid)) {
+                return false;
+            }
+            // Title matched a whitelisted overlay, but the owning PID binary is forged or hijacked!
+            return true;
         }
     }
 

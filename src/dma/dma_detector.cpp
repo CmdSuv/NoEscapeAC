@@ -208,7 +208,7 @@ std::vector<PciDeviceInfo> DmaDetector::ScanHardwareDevices() {
             std::string keyUpper = subKeyName;
             for (auto& c : keyUpper) c = static_cast<char>(std::toupper(c));
 
-            // Check for FTDI FT601 (VID_0403&PID_601F) or standard LeechCore bridges
+            // Check for FTDI FT601 (VID_0403&PID_601F), standard LeechCore bridges, or KMBox hardware aimbot bridges
             if (keyUpper.find("VID_0403&PID_601F") != std::string::npos ||
                 keyUpper.find("VID_0403&PID_601E") != std::string::npos) {
                 PciDeviceInfo info;
@@ -217,12 +217,21 @@ std::vector<PciDeviceInfo> DmaDetector::ScanHardwareDevices() {
                 info.description = "FTDI SuperSpeed USB3 DMA Bridge (PCIeLeech hardware carrier)";
                 info.is_suspicious = true;
                 detected.push_back(info);
+            } else if (keyUpper.find("VID_1A86&PID_55D3") != std::string::npos ||
+                       keyUpper.find("VID_8888&PID_") != std::string::npos) {
+                PciDeviceInfo info;
+                info.device_id = subKeyName;
+                info.vendor_id = "KMBOX";
+                info.description = "Hardware KMBox / HID Aimbot Injection Controller";
+                info.is_suspicious = true;
+                detected.push_back(info);
             }
         }
         RegCloseKey(hUsbKey);
     }
 
-    // Windows: Check PCIe Bus for Xilinx Artix-7 (VEN_10EE) or Altera (VEN_1172) FPGA endpoints
+    // Windows: Check PCIe Bus for Xilinx Artix-7 (VEN_10EE), Altera (VEN_1172) FPGA endpoints,
+    // or Spoofed DMA firmware that forged VEN_xxxx but leaked SUBSYS_xxxx10EE / SUBSYS_xxxx1172
     HKEY hPciKey = nullptr;
     if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, "SYSTEM\\CurrentControlSet\\Enum\\PCI", 0, KEY_READ, &hPciKey) == ERROR_SUCCESS) {
         char subKeyName[256]{};
@@ -248,13 +257,26 @@ std::vector<PciDeviceInfo> DmaDetector::ScanHardwareDevices() {
                 info.description = "Altera FPGA PCIe Endpoint (DMA Hardware Carrier)";
                 info.is_suspicious = true;
                 detected.push_back(info);
+            } else {
+                size_t subPos = keyUpper.find("SUBSYS_");
+                if (subPos != std::string::npos && keyUpper.size() >= subPos + 15) {
+                    std::string subsysVendor = keyUpper.substr(subPos + 11, 4);
+                    if (subsysVendor == "10EE" || subsysVendor == "1172") {
+                        PciDeviceInfo info;
+                        info.device_id = subKeyName;
+                        info.vendor_id = subsysVendor;
+                        info.description = "Spoofed PCIe DMA Card (Forged Vendor ID with Xilinx/Altera FPGA Subsystem ID)";
+                        info.is_suspicious = true;
+                        detected.push_back(info);
+                    }
+                }
             }
         }
         RegCloseKey(hPciKey);
     }
 
 #else
-    // Linux: Inspect /sys/bus/pci/devices
+    // Linux: Inspect /sys/bus/pci/devices for stock FPGA VIDs and Spoofed DMA firmware anomalies
     DIR* pciDir = opendir(NOESCAPE_XOR("/sys/bus/pci/devices"));
     if (pciDir) {
         struct dirent* entry = nullptr;
@@ -264,15 +286,27 @@ std::vector<PciDeviceInfo> DmaDetector::ScanHardwareDevices() {
             std::string pciPath = std::string("/sys/bus/pci/devices/") + entry->d_name;
             std::ifstream vendorFile(pciPath + "/vendor");
             std::ifstream deviceFile(pciPath + "/device");
+            std::ifstream subVendorFile(pciPath + "/subsystem_vendor");
 
-            std::string vid, did;
+            std::string vid, did, subVid;
             if (vendorFile >> vid && deviceFile >> did) {
-                // Xilinx Artix-7 / Spartan FPGA default PCIe vendor ID is 0x10ee
-                if (vid == "0x10ee") {
+                subVendorFile >> subVid;
+                // 1. Stock Xilinx (0x10ee) or Altera (0x1172) FPGA PCIe endpoint
+                if (vid == "0x10ee" || vid == "0x1172") {
                     PciDeviceInfo dev;
                     dev.device_id = did;
                     dev.vendor_id = vid;
-                    dev.description = "Xilinx FPGA PCIe Endpoint (Known LeechCore DMA hardware)";
+                    dev.description = "FPGA PCIe Endpoint (Known LeechCore DMA hardware)";
+                    dev.is_suspicious = true;
+                    detected.push_back(dev);
+                }
+                // 2. Spoofed DMA Firmware: Cloned primary Vendor ID (e.g. Realtek/Intel) but leaked
+                //    Xilinx (0x10ee) or Altera (0x1172) Subsystem Vendor ID in PCI config space
+                else if (subVid == "0x10ee" || subVid == "0x1172") {
+                    PciDeviceInfo dev;
+                    dev.device_id = did;
+                    dev.vendor_id = vid + "/sub:" + subVid;
+                    dev.description = "Spoofed PCIe DMA Card (Forged Vendor ID with FPGA Subsystem ID)";
                     dev.is_suspicious = true;
                     detected.push_back(dev);
                 }
@@ -281,7 +315,7 @@ std::vector<PciDeviceInfo> DmaDetector::ScanHardwareDevices() {
         closedir(pciDir);
     }
 
-    // Inspect /sys/bus/usb/devices for FTDI FT601 bridge
+    // Inspect /sys/bus/usb/devices for FTDI FT601 bridge and KMBox / MAKCU hardware aimbot controllers
     DIR* usbDir = opendir(NOESCAPE_XOR("/sys/bus/usb/devices"));
     if (usbDir) {
         struct dirent* entry = nullptr;
@@ -291,16 +325,32 @@ std::vector<PciDeviceInfo> DmaDetector::ScanHardwareDevices() {
             std::string usbPath = std::string("/sys/bus/usb/devices/") + entry->d_name;
             std::ifstream vendorFile(usbPath + "/idVendor");
             std::ifstream prodFile(usbPath + "/idProduct");
+            std::ifstream prodStrFile(usbPath + "/product");
 
-            std::string vid, pid;
+            std::string vid, pid, prodName;
             if (vendorFile >> vid && prodFile >> pid) {
-                // FTDI FT601 USB 3.0 bridge VID: 0403, PID: 601f
-                // Only FT600/FT601 (601e/601f). 6010/6014 are FT2232H/FT232H, ubiquitous USB-serial adapters.
+                std::getline(prodStrFile, prodName);
+                std::string lowerProd = prodName;
+                std::transform(lowerProd.begin(), lowerProd.end(), lowerProd.begin(), [](unsigned char c) {
+                    return static_cast<char>(std::tolower(c));
+                });
+
+                // FTDI FT601 USB 3.0 bridge VID: 0403, PID: 601f/601e
                 if (vid == "0403" && (pid == "601f" || pid == "601e")) {
                     PciDeviceInfo dev;
                     dev.device_id = pid;
                     dev.vendor_id = vid;
                     dev.description = "FTDI SuperSpeed FIFO Bridge (PCIeLeech DMA interface)";
+                    dev.is_suspicious = true;
+                    detected.push_back(dev);
+                } else if ((vid == "1a86" && pid == "55d3") ||
+                           lowerProd.find("kmbox") != std::string::npos ||
+                           lowerProd.find("makcu") != std::string::npos ||
+                           lowerProd.find("pcileech") != std::string::npos) {
+                    PciDeviceInfo dev;
+                    dev.device_id = pid;
+                    dev.vendor_id = vid;
+                    dev.description = "Hardware Aimbot / DMA Controller (" + (prodName.empty() ? "KMBox" : prodName) + ")";
                     dev.is_suspicious = true;
                     detected.push_back(dev);
                 }

@@ -34,6 +34,10 @@ public:
     // Check if the current process itself has LD_PRELOAD or injected environment
     bool CheckCurrentProcessEnvironment();
 
+    // Detect external processes holding open file descriptors / handles to our process memory
+    // (/proc/<self>/mem or /proc/<self>/pagemap on Linux)
+    std::vector<ProcessRecord> DetectExternalMemoryReaders();
+
 private:
     ProcessAnalyzer() = default;
 };

@@ -4,6 +4,9 @@
 #include "noescape/core/engine.hpp"
 #include "noescape/core/blackbox.hpp"
 #include "noescape/core/envutil.hpp"
+#include "noescape/core/obfuscation.hpp"
+#include "noescape/forensics/artifact_analyzer.hpp"
+#include "noescape/forensics/process_analyzer.hpp"
 #include "noescape/kinematics/aim_analyzer.hpp"
 #include "noescape/memory/memory_scanner.hpp"
 #include "noescape/memory/unhooker.hpp"
@@ -724,4 +727,70 @@ TEST(Regression, UnhookerAndOverlayDetectCetEndbr64OffsetHooks) {
     }
 #endif
 }
+
+TEST(Regression, ObfuscatedValueRollingKeyAndOpaquePredicate) {
+    ASSERT_TRUE(core::OpaqueTrue());
+
+    core::ObfuscatedValue<uint64_t> encryptedScore(1337ULL);
+    ASSERT_EQ(encryptedScore.load(), 1337ULL);
+    uint64_t cipher1 = encryptedScore.raw_ciphertext();
+    ASSERT_NE(cipher1, 1337ULL);
+
+    // Storing the exact same value rotates the nonce and produces a completely different ciphertext
+    encryptedScore.store(1337ULL);
+    uint64_t cipher2 = encryptedScore.raw_ciphertext();
+    ASSERT_EQ(encryptedScore.load(), 1337ULL);
+    ASSERT_NE(cipher1, cipher2);
+    ASSERT_NE(cipher2, 1337ULL);
+
+    core::ObfuscatedValue<float> encryptedHealth(100.0f);
+    ASSERT_NEAR(encryptedHealth.load(), 100.0f, 1e-5f);
+    encryptedHealth = 42.5f;
+    ASSERT_NEAR(static_cast<float>(encryptedHealth), 42.5f, 1e-5f);
+}
+
+TEST(Regression, OverlayTitleSpoofingCaughtByPidVerification) {
+#if !defined(_WIN32)
+    auto& detector = overlay::OverlayDetector::Instance();
+    detector.ClearMockWindows();
+    detector.SetGameViewport(0, 0, 1920, 1080);
+
+    // Simulate a hijacked overlay process by mapping a temporary executable region backed by /tmp
+    char tmpPath[] = "/tmp/noescape_inject_XXXXXX";
+    int fd = mkstemp(tmpPath);
+    ASSERT_TRUE(fd >= 0);
+    unlink(tmpPath);
+    ASSERT_EQ(ftruncate(fd, 4096), 0);
+    void* hijackedMap = mmap(nullptr, 4096, PROT_READ | PROT_EXEC, MAP_PRIVATE, fd, 0);
+    close(fd);
+    ASSERT_TRUE(hijackedMap != MAP_FAILED);
+
+    overlay::OverlayWindowInfo spoofedWin;
+    spoofedWin.title = "Discord Overlay";
+    spoofedWin.class_name = "DiscordOverlayClass";
+    spoofedWin.pid = static_cast<uint32_t>(getpid());
+    spoofedWin.handle = 0x7777;
+    spoofedWin.rect = {0, 0, 1920, 1080};
+    spoofedWin.is_layered = true;
+    spoofedWin.is_transparent = true;
+    spoofedWin.is_topmost = true;
+    detector.AddMockWindow(spoofedWin);
+
+    auto alerts = detector.DetectSuspiciousWindows();
+    detector.ClearMockWindows();
+    munmap(hijackedMap, 4096);
+
+    ASSERT_EQ(alerts.size(), 1u);
+    ASSERT_EQ(alerts[0].type, core::DetectionType::OVERLAY_HIJACK_DETECTED);
+#endif
+}
+
+TEST(Regression, KernelIntegrityAndExternalHandleAuditCleanOnHealthyHost) {
+    auto kernelAnomalies = forensics::ArtifactAnalyzer::Instance().CheckKernelEnvironmentIntegrity();
+    ASSERT_EQ(kernelAnomalies.size(), 0u);
+
+    auto extReaders = forensics::ProcessAnalyzer::Instance().DetectExternalMemoryReaders();
+    ASSERT_EQ(extReaders.size(), 0u);
+}
+
 

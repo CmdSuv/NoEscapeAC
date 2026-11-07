@@ -2,8 +2,11 @@
 
 #include <cstdint>
 #include <cstddef>
+#include <cstring>
 #include <string>
 #include <array>
+#include <atomic>
+#include <type_traits>
 #include <utility>
 
 namespace noescape::core {
@@ -117,5 +120,68 @@ public:
 }())
 
 #define NOESCAPE_HASH(s) (::noescape::core::HashFnv1a(s))
+
+// ============================================================================
+// Runtime Rolling-Key Value Encryption (Anti-DMA / Anti-CheatEngine)
+// Encrypts 1/2/4/8-byte trivially copyable values in RAM using SplitMix64
+// keyed by the object's address and a rotating per-write nonce.
+// ============================================================================
+template <typename T>
+class ObfuscatedValue {
+    static_assert(std::is_trivially_copyable_v<T> && sizeof(T) <= sizeof(uint64_t),
+                  "ObfuscatedValue requires a trivially copyable type up to 64 bits");
+
+    uint64_t ciphertext_{0};
+    uint64_t nonce_{0};
+
+    uint64_t DeriveMask(uint64_t nonce) const noexcept {
+        uintptr_t selfAddr = reinterpret_cast<uintptr_t>(this);
+        return CompileTimeMix64(nonce ^ (static_cast<uint64_t>(selfAddr) * 0x9E3779B97F4A7C15ULL) ^
+                                0xD6E8FEB86659FD93ULL);
+    }
+
+public:
+    ObfuscatedValue() noexcept { store(T{}); }
+    explicit ObfuscatedValue(T initial) noexcept { store(initial); }
+
+    ObfuscatedValue(const ObfuscatedValue& other) noexcept { store(other.load()); }
+    ObfuscatedValue& operator=(const ObfuscatedValue& other) noexcept {
+        if (this != &other) store(other.load());
+        return *this;
+    }
+
+    void store(T val) noexcept {
+        nonce_ = CompileTimeMix64(nonce_ + 0x9E3779B97F4A7C15ULL);
+        uint64_t raw = 0;
+        std::memcpy(&raw, &val, sizeof(T));
+        ciphertext_ = raw ^ DeriveMask(nonce_);
+    }
+
+    T load() const noexcept {
+        uint64_t raw = ciphertext_ ^ DeriveMask(nonce_);
+        T val{};
+        std::memcpy(&val, &raw, sizeof(T));
+        return val;
+    }
+
+    uint64_t raw_ciphertext() const noexcept { return ciphertext_; }
+
+    operator T() const noexcept { return load(); }
+    ObfuscatedValue& operator=(T val) noexcept {
+        store(val);
+        return *this;
+    }
+};
+
+// ============================================================================
+// Compiler-Opaque Predicates (Anti-Decompiler / Control-Flow Hardening)
+// Prevents static constant propagation in IDA / Ghidra while always evaluating
+// deterministically at runtime.
+// ============================================================================
+inline bool OpaqueTrue(uint64_t seed = 0x7F4A7C159E3779B9ULL) noexcept {
+    volatile uint64_t x = seed | 1ULL;
+    // Odd square mod 8 is always 1 (x^2 ≡ 1 mod 8 for all odd integers x)
+    return ((x * x) & 7ULL) == 1ULL;
+}
 
 } // namespace noescape::core

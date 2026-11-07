@@ -256,7 +256,14 @@ std::vector<DetectionEvent> AntiCheatEngine::AuditCycle() {
         cycleEvents.insert(cycleEvents.end(), procEvents.begin(), procEvents.end());
         if (stop_requested_.load(std::memory_order_acquire)) return cycleEvents;
 
-        std::vector<std::string> driverBlacklist = {"dbk64", "winring0", "ksdumper", "leechcore"};
+        std::vector<std::string> driverBlacklist = {
+            "dbk64", "dbk32", "winring0", "ksdumper", "leechcore",
+            "iqvw64e", "capcom", "gdrv", "rtc64", "dbutil_2_3",
+            "atillk64", "msio64", "ene.sys", "glckio2", "asio64",
+            "naldrv", "physmem", "mhyprot2", "inpoutx64", "speedfan",
+            "kdmapper", "efi_mapper", "vmread", "kmrw", "diamorphine",
+            "reptile", "suterusu"
+        };
         auto artEvents = forensics::ArtifactAnalyzer::Instance().PerformAudit(
             config_.blacklistedArtifacts,
             driverBlacklist

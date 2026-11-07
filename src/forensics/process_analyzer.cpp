@@ -223,6 +223,69 @@ std::vector<ProcessRecord> ProcessAnalyzer::EnumerateProcesses() {
     return records;
 }
 
+std::vector<ProcessRecord> ProcessAnalyzer::DetectExternalMemoryReaders() {
+    std::vector<ProcessRecord> readers;
+
+#if !defined(_WIN32)
+    pid_t selfPid = getpid();
+    std::string selfPidStr = std::to_string(selfPid);
+    std::string targetMem = "/proc/" + selfPidStr + "/mem";
+    std::string targetPagemap = "/proc/" + selfPidStr + "/pagemap";
+
+    DIR* procDir = opendir(NOESCAPE_XOR("/proc"));
+    if (!procDir) return readers;
+
+    struct dirent* entry = nullptr;
+    while ((entry = readdir(procDir)) != nullptr) {
+        if (entry->d_type != DT_DIR && entry->d_type != DT_UNKNOWN) continue;
+        char* endPtr = nullptr;
+        long pid = std::strtol(entry->d_name, &endPtr, 10);
+        if (pid <= 0 || *endPtr != '\0' || static_cast<pid_t>(pid) == selfPid) continue;
+
+        std::string fdDirPath = std::string("/proc/") + entry->d_name + "/fd";
+        DIR* fdDir = opendir(fdDirPath.c_str());
+        if (!fdDir) continue;
+
+        bool matched = false;
+        struct dirent* fdEntry = nullptr;
+        while ((fdEntry = readdir(fdDir)) != nullptr) {
+            if (fdEntry->d_name[0] == '.') continue;
+            std::string fdLink = fdDirPath + "/" + fdEntry->d_name;
+            char linkBuf[512]{};
+            ssize_t len = readlink(fdLink.c_str(), linkBuf, sizeof(linkBuf) - 1);
+            if (len > 0) {
+                linkBuf[len] = '\0';
+                if (targetMem == linkBuf || targetPagemap == linkBuf) {
+                    matched = true;
+                    break;
+                }
+            }
+        }
+        closedir(fdDir);
+
+        if (matched) {
+            ProcessRecord rec;
+            rec.pid = static_cast<uint32_t>(pid);
+            std::string commPath = std::string("/proc/") + entry->d_name + "/comm";
+            std::ifstream commFile(commPath);
+            if (commFile.is_open()) std::getline(commFile, rec.name);
+
+            std::string exeLink = std::string("/proc/") + entry->d_name + "/exe";
+            char exeBuf[512]{};
+            ssize_t exeLen = readlink(exeLink.c_str(), exeBuf, sizeof(exeBuf) - 1);
+            if (exeLen > 0) {
+                exeBuf[exeLen] = '\0';
+                rec.path = exeBuf;
+            }
+            readers.push_back(rec);
+        }
+    }
+    closedir(procDir);
+#endif
+
+    return readers;
+}
+
 std::vector<core::DetectionEvent> ProcessAnalyzer::AuditProcesses(
     const std::vector<std::string>& blacklist,
     const std::vector<std::string>& cmdline_blacklist
@@ -332,6 +395,20 @@ std::vector<core::DetectionEvent> ProcessAnalyzer::AuditProcesses(
                 events.push_back(ev);
             }
         }
+    }
+
+    // 5. External processes holding open file descriptors to our /proc/<self>/mem or /proc/<self>/pagemap
+    auto extReaders = DetectExternalMemoryReaders();
+    for (const auto& reader : extReaders) {
+        core::DetectionEvent ev;
+        ev.type = core::DetectionType::SUSPICIOUS_PROCESS_DETECTED;
+        ev.severity = core::Severity::CRITICAL;
+        ev.component = "ProcessAnalyzer::ExternalHandleAudit";
+        ev.details = "External process holding open handle to protected game memory (/proc/self/mem): PID " +
+                     std::to_string(reader.pid) + " (" + reader.name + " -> " + reader.path + ")";
+        ev.timestamp = static_cast<uint64_t>(std::time(nullptr));
+        ev.threat_score = 95;
+        events.push_back(ev);
     }
 
     return events;

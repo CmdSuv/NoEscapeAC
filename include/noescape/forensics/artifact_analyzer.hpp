@@ -26,6 +26,10 @@ public:
     // Checks for system-wide injection hooks (e.g. /etc/ld.so.preload or AppInit_DLLs)
     bool CheckSystemWidePreload();
 
+    // Audits Ring-0 / kernel environment integrity from Ring-3 (DSE/TestSigning, Kernel Debugger,
+    // hidden LKM modules in /sys/module missing from /proc/modules, forced-load taint, cheat /dev nodes)
+    std::vector<ArtifactRecord> CheckKernelEnvironmentIntegrity();
+
     // Runs a comprehensive forensics audit
     std::vector<core::DetectionEvent> PerformAudit(
         const std::vector<std::string>& blacklisted_names,
