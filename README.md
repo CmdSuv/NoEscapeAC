@@ -1,66 +1,64 @@
-# 🛡️ NoEscape Anti-Cheat Engine (v7.0 / Release 1.2)
+# 🛡️ NoEscape Anti-Cheat Engine (v7.0 / Release 1.3)
 
-[![GitHub Release](https://img.shields.io/badge/Release-NoEscapeAC%201.2-red?style=for-the-badge&logo=github)](https://github.com/CmdSuv/NoEscapeAC/releases/tag/v1.2)
-[![Download Zip](https://img.shields.io/badge/Download-Source%20Code%20(.zip)-darkred?style=for-the-badge&logo=github)](https://github.com/CmdSuv/NoEscapeAC/archive/refs/tags/v1.2.zip)
+[![GitHub Release](https://img.shields.io/badge/Release-NoEscapeAC%201.3-red?style=for-the-badge&logo=github)](https://github.com/CmdSuv/NoEscapeAC/releases/tag/v1.3)
+[![Download Zip](https://img.shields.io/badge/Download-Source%20Code%20(.zip)-darkred?style=for-the-badge&logo=github)](https://github.com/CmdSuv/NoEscapeAC/archive/refs/tags/v1.3.zip)
 [![License: Non-Commercial Share-Alike](https://img.shields.io/badge/License-Non--Commercial%20Share--Alike-blue?style=for-the-badge)](LICENSE)
 
-**NoEscape Anti-Cheat (NoEscapeAC)** is a modern, lightweight, and unified user-mode (Ring-3) anti-cheat and runtime integrity framework engineered in **C++20** for Linux and Windows. Designed to safeguard competitive multiplayer games and custom game launchers without intrusive kernel drivers, NoEscapeAC delivers defense-in-depth security: AVX2 SIMD byte pattern scanning, unbacked memory forensics with JVM/JIT HotSpot awareness, automatic inline API unhooking, PCIe DMA anomaly detection, statistical mouse kinematics (silent-aim / instant-snap heuristics), ESP fake-window overlay interception, and a standalone crimson security ban enforcement UI.
+**NoEscape Anti-Cheat (NoEscapeAC)** is a modern, lightweight, and unified user-mode (Ring-3) anti-cheat and runtime integrity framework engineered in **C++20** for Linux and Windows. Designed to safeguard competitive multiplayer games and custom game launchers without intrusive kernel drivers, NoEscapeAC delivers defense-in-depth security: 20+ GB/s AVX2 SIMD byte pattern scanning, unbacked memory forensics with JVM/JIT HotSpot awareness, automatic inline API unhooking (with Intel CET `endbr64` +4 offset support), PCIe DMA anomaly & hardware controller detection, statistical mouse kinematics (silent-aim / instant-snap heuristics), ESP fake-window overlay interception, runtime rolling-key memory value obfuscation, and a standalone crimson security ban enforcement UI.
 
 ---
 
-### 📦 Latest Release: NoEscapeAC 1.2
-> **[Direct Download: NoEscapeAC 1.2 Source Code (.zip)](https://github.com/CmdSuv/NoEscapeAC/archive/refs/tags/v1.2.zip)**  
-> **Release Tag**: `v1.2` | **Changelog & Release Notes**: [View on GitHub Releases](https://github.com/CmdSuv/NoEscapeAC/releases/tag/v1.2)
+### 📦 Latest Release: NoEscapeAC 1.3
+> **[Direct Download: NoEscapeAC 1.3 Source Code (.zip)](https://github.com/CmdSuv/NoEscapeAC/archive/refs/tags/v1.3.zip)**  
+> **Release Tag**: `v1.3` | **Changelog & Release Notes**: [View on GitHub Releases](https://github.com/CmdSuv/NoEscapeAC/releases/tag/v1.3)
 
 ---
 
 ### ✨ Key Subsystems & Features
 
 1. **Cross-Platform Architecture (Linux & Windows Ring-3)**:
-   - Linux: `/proc` subsystem audit, `/proc/self/maps` page analysis, `dl_iterate_phdr` ELF parsing, and `mprotect` inline unhooking.
-   - Windows: Win32/NTAPI direct PEB inspection, `NtQueryInformationProcess`, `Toolhelp32`, and `VirtualQueryEx`.
-   - Compile-time XOR string obfuscation (`NOESCAPE_XOR`) and FNV-1a hashing (`NOESCAPE_HASH`).
+   - Linux: `/proc` subsystem audit, `/proc/self/maps` page analysis, `dl_iterate_phdr` ELF parsing, ELF relocation masking (`.rela.dyn`, `.rela.plt`), direct raw `syscall` invocation, and `mprotect` inline unhooking.
+   - Windows: Win32/NTAPI direct PEB inspection, `NtQueryInformationProcess`, `Toolhelp32`, `VirtualQueryEx`, PE base relocation masking (`IMAGE_DIRECTORY_ENTRY_BASERELOC`), and cross-compilation support via `llvm-mingw` (`-DNOESCAPE_WERROR=ON`).
+   - Compile-time CBC stream cipher XOR string obfuscation (`NOESCAPE_XOR`) and 64-bit FNV-1a hashing (`NOESCAPE_HASH`).
 
-2. **SIMD Pattern Scanner (AVX2 / SSE2 / Scalar)**:
-   - High-throughput byte signature search utilizing AVX2 256-bit vector registers with automatic runtime CPU dispatch (AVX2 → SSE2 → scalar; the library loads on CPUs without AVX2).
+2. **SIMD Pattern Scanner (AVX2 / SSE2 / Grouped First-Byte Buckets)**:
+   - High-throughput byte signature search utilizing AVX2 256-bit vector registers with automatic runtime CPU dispatch (>20 GB/s throughput).
+   - Grouped first-byte SIMD indexing: searches all active signatures in a single vectorized pass rather than looping linearly.
    - Supports IDA-style wildcard patterns (`48 B8 ? ? ? ? ? ? ? ? FF E0`) and batch scanning in a single pass.
 
 3. **Memory & Injection Analysis**:
    - **Unbacked Executable Memory Scanner**: Detects anonymous `RX`/`RWX` pages, reflective DLL / SO injection, deleted binary execution (`/proc/<pid>/exe (deleted)`), and memory-ghosted modules.
-   - **Inline Hook Detector & Unhooker**: Identifies `0xE9` (JMP rel32), `0xEB` (JMP rel8), `0xFF 0x25` (JMP indirect), `MOV RAX; JMP RAX`, `PUSH/RET`, and `0xCC` (INT3) hooks on core system APIs and automatically restores clean instructions into memory.
+   - **Inline Hook Detector & Self-Healing Unhooker**: Identifies `0xE9` (JMP rel32), `0xEB` (JMP rel8), `0xFF 0x25` (JMP indirect), `MOV RAX; JMP RAX`, `PUSH/RET`, `0xCC` (INT3), and **Intel CET `endbr64` (`F3 0F 1E FA`) offset +4** hooks on core system APIs and automatically restores clean instructions from pristine disk binaries into memory.
 
-4. **Overlay & ESP/Wallhack Detector (Rendering Hook & Fake Window Scanner)**:
-   - **Fake Window Hijack Scanner**: Detects transparent/layered top-most fake windows (`WS_EX_LAYERED`, `WS_EX_TRANSPARENT`, `WS_EX_TOPMOST`) matching the game viewport bounding rect.
+4. **Overlay & ESP/Wallhack Defense**:
+   - **Fake Window Hijack Scanner**: Detects transparent/layered top-most fake windows (`WS_EX_LAYERED`, `WS_EX_TRANSPARENT`, `WS_EX_TOPMOST`) matching or enclosing the game viewport bounding rect.
+   - **Title Spoofing & Owning PID Verification**: Verifies whether processes claiming to be whitelisted overlays (e.g. Discord, Steam, MangoHud) originate from legitimate binaries or volatile/cheat paths (`/tmp`, `/dev/shm`, `Temp`), and detects DLL hijacking inside legitimate overlay hosts.
    - **Rendering Pipeline Integrity**: Inspects DirectX / Vulkan / OpenGL `Present`, `SwapBuffers`, and dynamic swapchain vtables to ensure function pointers reside strictly within loaded module address spaces and have not been redirected to unbacked trampolines or inline-hooked.
-   - Linux overlay process detection across X11/Wayland display environments.
 
-5. **Blackbox Crash/Violation Dumper**:
-   - When a fatal security event occurs or threat score exceeds threshold, captures a compact, authenticated diagnostic snapshot:
-     - Real-time timestamp & Hardware ID fingerprint.
-     - Violating component & reason.
-     - Stack backtrace return addresses (`backtrace()` on Linux / `CaptureStackBackTrace` on Windows).
-     - Recent input kinematics circular trail buffer.
-     - Sample of loaded executable modules.
-   - Encrypted with AES/SHA-256 CTR stream cipher and authenticated with HMAC-SHA256 signature for tamper-evident offline diagnostics and backend telemetry.
+5. **Ring-0 Environment, BYOVD & External Handle Forensics**:
+   - **Kernel Integrity Audit**: Queries `NtQuerySystemInformation` on Windows for `SystemCodeIntegrityInformation` (catches `TestSigning` / DSE bypass) and `SystemKernelDebuggerInformation`. On Linux, correlates `/sys/module` with `/proc/modules` to catch hidden LKM rootkits and forced-load (`F`) tainted modules.
+   - **Expanded BYOVD Driver Watch**: Active blacklist of 27 vulnerable/exploit drivers (`iqvw64e`, `capcom`, `gdrv`, `rtc64`, `dbutil_2_3`, `mhyprot2`, `dbk64`, `winring0`, `ksdumper`, `leechcore`, `diamorphine`, `reptile`, etc.).
+   - **External Memory Handle Audit**: Scans open file descriptors in `/proc/*/fd` to detect any external user-mode processes holding read/write handles to protected game memory (`/proc/<self>/mem` or `/proc/<self>/pagemap`).
 
-6. **Industry-Standard C-API & Game Engine SDK (`noescape_sdk.h`)**:
-   - Clean C-compatible ABI (`extern "C"`) enabling 2-line integration in Unity (P/Invoke), Unreal Engine, and custom C/C++ game engines:
-     - `NoEscape_Init(const NoEscapeConfig* config)`
-     - `NoEscape_Shutdown()`
-     - `NoEscape_Tick()`
-     - `NoEscape_PushMouseEvent(float delta_yaw, float delta_pitch, uint64_t timestamp_ms)`
-     - `NoEscape_GetThreatScore()`
-     - `NoEscape_SetViolationCallback(void (*cb)(int type, int score, const char* details))`
-   - Exports both static (`libnoescape.a` / `noescape_static.lib`) and dynamic shared (`libnoescape.so` / `noescape.dll`) libraries.
+6. **Runtime Value Encryption (Anti-DMA & Anti-CheatEngine)**:
+   - **`ObfuscatedValue<T>`**: In-memory rolling-key cipher using SplitMix64 keyed by variable memory address and rotating per-write nonces. Prevents Cheat Engine scans, memory freezing, and DMA memory-dump analysis from locating plaintext values.
+   - **Opaque Predicates (`OpaqueTrue`)**: Hardens execution flow against static decompilation in IDA Pro and Ghidra.
 
-7. **PCIe DMA Hardware & Bus Latency Detection**:
-   - Micro-architectural cache eviction & memory bus contention latency jitter profiling (`rdtsc`, `clflushopt`, `mfence`) to detect external FPGA DMA cards (e.g., Screamer, CaptainDMA, Enigma X1).
-   - Direct bus enumeration for known FTDI FT601 USB3 FIFO bridges and Xilinx Artix-7 PCIe VID/PID signatures.
+7. **PCIe DMA Hardware, Spoofed Firmware & KMBox Detection**:
+   - Micro-architectural cache eviction & memory bus contention latency jitter profiling (`rdtsc`, `clflush`, `mfence`) to detect external FPGA DMA cards.
+   - Direct bus enumeration for known FTDI FT601 USB3 FIFO bridges and Xilinx/Altera FPGA endpoints.
+   - **Spoofed Firmware Subsystem Audit**: Catches spoofed DMA firmware that forged primary vendor IDs but left underlying Xilinx (`0x10ee`) or Altera (`0x1172`) Subsystem Vendor IDs in PCI configuration space.
+   - **Hardware Aimbot Controller Detection**: Flags USB hardware aimbot devices including KMBox (`1A86:55D3`, `VID_8888`) and MAKCU controllers.
 
 8. **Input Kinematics & Aimbot Trajectory Analysis**:
    - Biomechanical mouse movement heuristics: computes angular velocity ($\omega$), acceleration ($\alpha$), and jerk ($j$).
    - **Instant Snap Detection**: Identifies 1-tick silent-aim flick shots ($\ge 20^\circ$ in $\le 35\text{ms}$) followed by immediate dead stops.
    - **Linearity & Smoothing Analysis**: Detects sub-millidegree robotic linear interpolation ($R^2 \approx 1.0$) and constant-velocity aimbot smoothing without natural physiological tremors.
+   - **Phantom Entity Decoy Monitor**: Populates invisible decoy entities into the world table; flags players whose crosshairs lock onto or track phantom coordinates.
+
+9. **Mutual Watchdog Supervision & Blackbox Diagnostics**:
+   - **Mutual Watchdog Thread Supervision**: The background audit loop and watchdog monitor each other's timestamps (`heartbeat_mutex_`). Freezing, suspending, or killing either thread immediately triggers tamper enforcement.
+   - **Authenticated Blackbox Dumper**: Captures cryptographic crash/violation snapshots encrypted with CTR stream cipher and authenticated with HMAC-SHA256.
 
 ---
 
@@ -68,16 +66,19 @@
 
 #### Prerequisites
 - **Linux**: GCC 11+ or Clang 13+ with C++20 support, CMake 3.20+, `make`/`ninja`.
-- **Windows**: MSVC v143+ (Visual Studio 2022) with C++20 standard `/std:c++20`.
+- **Windows**: MSVC v143+ (Visual Studio 2022) with C++20 standard `/std:c++20`, or `llvm-mingw` (`x86_64-w64-mingw32-clang++`).
 
 #### Build Commands
 ```bash
-# Configure and build
-cmake -B build -DCMAKE_BUILD_TYPE=Release
+# Configure and build (Linux)
+cmake -B build -DCMAKE_BUILD_TYPE=Release -DNOESCAPE_WERROR=ON
 cmake --build build -j$(nproc)
 
-# Run Comprehensive Unit Test Suite (123 test cases across all subsystems)
+# Run Comprehensive Unit Test Suite (126 test cases across all subsystems)
 ./build/noescape_tests
+
+# Run Preload Scenario B Verification Suite (6/6 tests)
+./tools/verify_preload.sh ./build
 
 # Run Interactive Subsystem Demo
 ./build/noescape_demo
@@ -145,7 +146,7 @@ NoEscapeAC/
 │   ├── network/
 │   └── sdk/
 ├── demo/                     # Interactive demonstration program
-├── tests/                    # 123 unit & regression tests
+├── tests/                    # 126 unit & regression tests
 └── CMakeLists.txt            # Exports libnoescape.a, libnoescape.so, and executables
 ```
 
