@@ -290,7 +290,8 @@ std::vector<core::DetectionEvent> ArtifactAnalyzer::PerformAudit(
         ev.severity = core::Severity::HIGH; // some AV/EDR and accessibility software legitimately use these
         ev.component = "ArtifactAnalyzer::SystemHook";
         ev.details = "System-wide persistent dynamic hook installed (/etc/ld.so.preload or AppInit_DLLs)";
-        ev.timestamp = static_cast<uint64_t>(std::time(nullptr));
+        ev.timestamp = core::DetectionEvent::NowMonotonicMs();
+        ev.timestamp_utc_ms = core::DetectionEvent::NowUtcMs();
         ev.threat_score = 50;
         events.push_back(ev);
     }
@@ -303,7 +304,8 @@ std::vector<core::DetectionEvent> ArtifactAnalyzer::PerformAudit(
         ev.severity = core::Severity::MEDIUM; // /tmp is world-writable: a dropped file proves little
         ev.component = "ArtifactAnalyzer::Filesystem";
         ev.details = "Cheat binary or payload artifact found on disk: " + art.path + " (matched: " + art.matched_signature + ")";
-        ev.timestamp = static_cast<uint64_t>(std::time(nullptr));
+        ev.timestamp = core::DetectionEvent::NowMonotonicMs();
+        ev.timestamp_utc_ms = core::DetectionEvent::NowUtcMs();
         ev.threat_score = 40;
         events.push_back(ev);
     }
@@ -336,7 +338,8 @@ std::vector<core::DetectionEvent> ArtifactAnalyzer::PerformAudit(
             ev.details = "Vulnerable OEM or third-party kernel driver active (BYOVD risk posture): " + drv.path + " (matched: " + drv.matched_signature + ")";
         }
         ev.component = "ArtifactAnalyzer::DriverWatch";
-        ev.timestamp = static_cast<uint64_t>(std::time(nullptr));
+        ev.timestamp = core::DetectionEvent::NowMonotonicMs();
+        ev.timestamp_utc_ms = core::DetectionEvent::NowUtcMs();
         events.push_back(ev);
     }
 
@@ -349,7 +352,8 @@ std::vector<core::DetectionEvent> ArtifactAnalyzer::PerformAudit(
         ev.severity = isDirectCheatNode ? core::Severity::CRITICAL : core::Severity::HIGH;
         ev.component = "ArtifactAnalyzer::KernelIntegrity";
         ev.details = "Ring-0 kernel integrity anomaly detected: " + ki.path + " (" + ki.matched_signature + ")";
-        ev.timestamp = static_cast<uint64_t>(std::time(nullptr));
+        ev.timestamp = core::DetectionEvent::NowMonotonicMs();
+        ev.timestamp_utc_ms = core::DetectionEvent::NowUtcMs();
         ev.threat_score = isDirectCheatNode ? 90 : 75;
         events.push_back(ev);
     }

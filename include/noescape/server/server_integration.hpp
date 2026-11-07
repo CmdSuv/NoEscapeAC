@@ -4,6 +4,7 @@
 #include <vector>
 #include <optional>
 #include <mutex>
+#include <memory>
 #include "noescape/core/types.hpp"
 
 namespace noescape::server {
@@ -35,18 +36,39 @@ struct ReplicationDecision {
     bool replicate_acoustic_cue_only{false};
     bool culled_by_occlusion{false};
     bool culled_by_distance{false};
+    bool occlusion_unconfigured{false}; // Explicitly flagged when no occluder boxes or adapter are configured
 };
 
-// Server-side ESP/Radar countermeasure & authoritative gameplay validation engine.
-// Prevents wallhacks and external/DMA ESP by withholding occluded entity coordinates
-// from the client network stream until line-of-sight or acoustic proximity is established.
+// Abstract adapter contract for integrating game engine authoritative collision & visibility systems
+// (e.g. Unreal Engine UWorld::LineTraceSingleByChannel, PhysX scene queries, Unity Physics.Raycast).
+class IAuthoritativeVisibilityAdapter {
+public:
+    virtual ~IAuthoritativeVisibilityAdapter() = default;
+
+    // Returns true if ray from (x0, y0, z0) to (x1, y1, z1) is occluded by authoritative world geometry.
+    // If check_penetrable is true, returns true only if occluded by non-penetrable geometry.
+    virtual bool LineOfSightBlocked(
+        float x0, float y0, float z0,
+        float x1, float y1, float z1,
+        bool check_penetrable = false) const = 0;
+};
+
+// Server-side ESP/Radar countermeasure & authoritative gameplay validation helper.
+// NOTE: ServerEspFilter is a server-side helper library and does not automatically attach to
+// your game server's networking loop. It must be explicitly driven in the game server's
+// replication / packet dispatch tick and hooked into authoritative engine physics via
+// IAuthoritativeVisibilityAdapter or static OccluderBox registration.
 class ServerEspFilter {
 public:
     ServerEspFilter() = default;
 
+    void SetVisibilityAdapter(std::shared_ptr<IAuthoritativeVisibilityAdapter> adapter);
+    std::shared_ptr<IAuthoritativeVisibilityAdapter> GetVisibilityAdapter() const;
+
     void AddOccluder(const OccluderBox& box);
     void ClearOccluders();
     size_t GetOccluderCount() const;
+    bool HasOcclusionData() const;
 
     void SetMaxReplicationDistance(float dist) { max_replication_distance_ = dist; }
     void SetCloseProximityRadius(float radius) { close_proximity_radius_ = radius; }
@@ -81,6 +103,7 @@ public:
 private:
     mutable std::mutex mutex_;
     std::vector<OccluderBox> occluders_;
+    std::shared_ptr<IAuthoritativeVisibilityAdapter> visibility_adapter_;
     float max_replication_distance_{150.0f};
     float close_proximity_radius_{6.0f};
 };

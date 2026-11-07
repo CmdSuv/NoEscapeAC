@@ -2,6 +2,41 @@
 
 All notable technical changes to the NoEscape Anti-Cheat system are documented in this file.
 
+## [Release 1.4.1 / v1.4 Critical Remediation Patch] — 2026-11-08
+
+### Fixed & Remediated
+- **P0-1: Timestamp Normalization across Detection Subsystems (`types.hpp`, all producers):**
+  - Standardized detection event timestamps across all 15 detection producers using `DetectionEvent::NowMonotonicMs()` for monotonic time-window calculations (`timestamp`) and `DetectionEvent::NowUtcMs()` for human logging and backend telemetry records (`timestamp_utc_ms`).
+  - Fixed severe bug where event producers passed `std::time(nullptr)` (seconds ~1.73e9) into a 60,000-millisecond sliding window (`time_window_ms_ = 60000`), effectively inflating the active window to 60,000 seconds (16.6 hours).
+  - Added deterministic tests proving the 60-second temporal correlation window is strictly 60,000 milliseconds across all detection subsystems.
+- **P0-2: Centralized Enforcement Policy & Multi-Signal Corroboration Bypass Fix (`evidence_correlator.cpp`, `engine.cpp`):**
+  - Centralized enforcement decisions within `EvidenceCorrelator::Evaluate` across all enforcement modes (`REPORT_ONLY`, `SHADOW`, `MATCH_RESTRICTION`, `SERVER_SESSION_REJECT`, `ENFORCE`).
+  - Closed bypass in `AntiCheatEngine::ProcessDetection` where a single client-side heuristic with `CRITICAL` or `FATAL_BAN` severity bypassed multi-signal corroboration in `strict_corroboration_mode`.
+  - Single uncorroborated client-side heuristics are now clamped to telemetry reporting only and cannot trigger automated bans, shadow bans, match restrictions, or session rejections unless corroborated by independent detection categories or server verification.
+- **P0-3: Strict RFC 8032 Ed25519 Canonical Scalar & Point Encoding Validation (`ed25519.cpp`):**
+  - Implemented complete canonical scalar verification checking all 256 bits for $S < L$ ($L = 2^{252} + 27742317777372353535851937790883648493$), replacing incomplete upper-3-bit check.
+  - Implemented canonical field element verification enforcing $y < 2^{255}-19$ on decoded point coordinates for $R$ and $A$.
+  - Hardened curve point decompression (`unpackneg`) to reject non-canonical field elements and negative zero ($x = 0$ with sign bit = 1).
+  - Integrated OpenSSL `EVP_DigestVerify` as the primary audited cryptographic provider when available, with mathematically equivalent zero-dependency pure software fallback.
+  - Added comprehensive negative test suite verifying rejection of non-canonical scalars ($S \ge L$), corrupted signatures, and invalid point encodings.
+- **P1-1: Safe Match and Session Lifecycle SDK APIs (`noescape_sdk.h`, `noescape_sdk.cpp`, `engine.cpp`):**
+  - Exposed C-linkage APIs `NoEscape_BeginSession`, `NoEscape_EndSession`, `NoEscape_BeginMatch`, `NoEscape_EndMatch` and C++ SDK methods in `noescape::sdk::Client`.
+  - Wired lifecycle APIs directly to `AntiCheatEngine` and `EvidenceCorrelator::SetSessionId` / `SetMatchId`, guaranteeing that evidence from prior matches or sessions cannot affect decisions in a new match.
+- **P1-2: Bounded Engine History & Scored Keys State Retention (`engine.hpp`, `engine.cpp`):**
+  - Bounded `history_` ring buffer using `std::deque` with a default cap of 512 events and `scored_keys_` using FIFO order eviction tracking.
+  - Added `SetMaxHistoryCapacity`, `GetMaxHistoryCapacity`, and explicit `PruneHistory` lifecycle APIs, mathematically bounding memory usage during long-running sessions.
+- **P1-3: Production SDK Configuration Validation (`noescape_sdk.h`, `noescape_sdk.cpp`):**
+  - Removed insecure hardcoded default secrets (`NoEscape_Secret_Key_v2.0`) and loopback URLs from `NoEscape_GetProfileConfig`.
+  - Added explicit configuration validation via `NoEscape_ValidateConfig`, preventing production deployments from silently initializing with empty backend URLs, missing secrets, or missing server verification keys.
+- **P1-4: Server Authoritative Visibility Adapter Contract (`server_integration.hpp`, `server_integration.cpp`):**
+  - Documented that `ServerEspFilter` is a server-side helper library requiring explicit integration into the host game server's network replication tick.
+  - Introduced `IAuthoritativeVisibilityAdapter` abstract interface allowing game servers to integrate native authoritative physics and raycast queries (PhysX, Havok, Chaos, Unreal LineTrace).
+  - Added explicit `occlusion_unconfigured` flag in `ReplicationDecision` when no occluder boxes or adapter are configured, eliminating silent false-positive visibility assumptions.
+- **P1-5: Cryptographic Randomness Audit & CSPRNG Error Propagation (`crypto_util.cpp`, `panel_client.cpp`):**
+  - Hardened `CryptoUtil::GenerateRandomBytes` to use direct OS cryptographic random APIs (`getrandom(2)` syscall on Linux with `/dev/urandom` fallback, `BCryptGenRandom` on Windows).
+  - Completely eliminated insecure fallback to timestamps / `std::random_device` on entropy failure.
+  - Propagated RNG failure booleans and exceptions throughout `GenerateRandomHex`, `GenerateAsymmetricKeyPair`, `BlackboxDumper`, and `PanelClient::RandomNonce`.
+
 ---
 
 ## [Release 1.4.0 / Architecture v2.0] — 2026-11-07 (Ultimate Ring-3 Anti-Cheat Architecture Reengineering)

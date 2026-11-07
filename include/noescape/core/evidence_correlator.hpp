@@ -16,9 +16,11 @@ struct CorrelationDecision {
     EvidenceState evidence_state{EvidenceState::OBSERVED};
     size_t independent_category_count{0};
     bool is_weak_single_signal{false};
-    bool eligible_for_permanent_ban{false};
+    bool eligible_for_report_only{true};
+    bool eligible_for_shadow{false};
     bool eligible_for_match_restriction{false};
     bool eligible_for_session_reject{false};
+    bool eligible_for_permanent_ban{false};
 };
 
 class EvidenceCorrelator {
@@ -53,7 +55,7 @@ public:
     size_t GetActiveCategoryCount(uint64_t now_ms = 0) const;
 
     // Prunes expired events and enforces bounded capacity.
-    void PruneExpired(uint64_t now_ms);
+    void PruneExpired(uint64_t now_ms = 0);
 
     // Returns all aggregated evidence records with occurrence counts and states.
     std::vector<DetectionEvent> GetAggregatedEvidence() const;

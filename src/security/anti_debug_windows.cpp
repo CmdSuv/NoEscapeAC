@@ -191,7 +191,8 @@ std::vector<core::DetectionEvent> AntiDebug::PerformAudit(const std::vector<std:
         ev.severity = core::Severity::CRITICAL;
         ev.component = "AntiDebug::WindowsDebugger";
         ev.details = "Active debugger detected via PEB / RemoteDebugger / ProcessDebugPort";
-        ev.timestamp = static_cast<uint64_t>(std::time(nullptr));
+        ev.timestamp = core::DetectionEvent::NowMonotonicMs();
+        ev.timestamp_utc_ms = core::DetectionEvent::NowUtcMs();
         ev.threat_score = 60;
         events.push_back(ev);
     }
@@ -202,7 +203,8 @@ std::vector<core::DetectionEvent> AntiDebug::PerformAudit(const std::vector<std:
         ev.severity = core::Severity::CRITICAL;
         ev.component = "AntiDebug::HardwareRegisters";
         ev.details = "Hardware breakpoint detected in CPU debug registers (DR0-DR7)";
-        ev.timestamp = static_cast<uint64_t>(std::time(nullptr));
+        ev.timestamp = core::DetectionEvent::NowMonotonicMs();
+        ev.timestamp_utc_ms = core::DetectionEvent::NowUtcMs();
         ev.threat_score = 90;
         events.push_back(ev);
     }
@@ -214,7 +216,8 @@ std::vector<core::DetectionEvent> AntiDebug::PerformAudit(const std::vector<std:
         ev.severity = core::Severity::HIGH;
         ev.component = "AntiDebug::ProcessScanner";
         ev.details = "Known debugger / memory dumper running: " + detectedTool;
-        ev.timestamp = static_cast<uint64_t>(std::time(nullptr));
+        ev.timestamp = core::DetectionEvent::NowMonotonicMs();
+        ev.timestamp_utc_ms = core::DetectionEvent::NowUtcMs();
         ev.threat_score = 20; // also scored by ProcessAnalyzer
         events.push_back(ev);
     }

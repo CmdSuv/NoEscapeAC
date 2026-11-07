@@ -31,6 +31,14 @@
 | **SEC-18** | Linux `PR_SET_DUMPABLE` Reset Disabling Anti-Debug Protection | **MEDIUM** | **RESOLVED** | `src/memory/unhooker.cpp:260` | Ensured all unhooker restoration routines restore `PR_SET_DUMPABLE=0` immediately upon completion. |
 | **SEC-19** | Grouped SIMD Pattern Scanner Boundary Overread Risk | **LOW** | **RESOLVED** | `src/memory/pattern_scanner.cpp:180` | Added explicit tail boundary clipping before issuing 256-bit AVX2 vector loads. |
 | **SEC-20** | Engine Thread Pool Starvation Under Burst Memory Scans | **LOW** | **RESOLVED** | `src/core/engine.cpp:310` | Isolated memory scanning passes from latency-sensitive input processing queues. |
+| **SEC-21** | Inconsistent Timestamp Bases (Monotonic ms vs Wall-Clock Seconds) | **CRITICAL** | **RESOLVED** | `include/noescape/core/types.hpp`, all producers | Standardized on monotonic ms for correlation and separate UTC ms for logs. |
+| **SEC-22** | Single Client Heuristic Corroboration Bypass in Engine Enforcement | **CRITICAL** | **RESOLVED** | `src/core/engine.cpp`, `evidence_correlator.cpp` | Centralized enforcement decisions; prohibited single client heuristics from auto-bans. |
+| **SEC-23** | Ed25519 Non-Canonical Scalar Malleability & Point Encoding Vulnerabilities | **CRITICAL** | **RESOLVED** | `src/network/ed25519.cpp` | Implemented strict 256-bit $S < L$ check, canonical $y < 2^{255}-19$, negative zero check, and OpenSSL EVP integration. |
+| **SEC-24** | Match / Session Lifecycle State Bleed | **HIGH** | **RESOLVED** | `src/core/engine.cpp`, `noescape_sdk.cpp` | Exposed safe lifecycle APIs (`BeginSession`/`BeginMatch`) isolating evidence across matches. |
+| **SEC-25** | Unbounded History & Scored Keys Engine Memory Retention | **HIGH** | **RESOLVED** | `src/core/engine.cpp` | Capped history deque at 512 and added FIFO eviction to scored keys map with `PruneHistory`. |
+| **SEC-26** | Production Profile Hardcoded Secrets & Missing Configuration Validation | **HIGH** | **RESOLVED** | `src/sdk/noescape_sdk.cpp` | Stripped default hardcoded credentials; added `NoEscape_ValidateConfig` enforcing explicit endpoints. |
+| **SEC-27** | Server ESP Filter Unconfigured Occlusion Silent Pass & Missing Adapter | **HIGH** | **RESOLVED** | `src/server/server_integration.cpp` | Added `IAuthoritativeVisibilityAdapter`, documented helper status, and added `occlusion_unconfigured` flag. |
+| **SEC-28** | Insecure Timestamp Fallback in Cryptographic Random Number Generation | **HIGH** | **RESOLVED** | `src/network/crypto_util.cpp` | Hardened CSPRNG to direct OS calls (`getrandom`/`BCryptGenRandom`) and eliminated timestamp fallback. |
 
 ---
 
@@ -132,4 +140,60 @@
 - **Root Cause:** Missing fail-closed guard when keys are unprovisioned.
 - **Remediation:** Added `if (secret_key_.empty()) return false;` to ensure signature verification fails closed when keys are absent.
 - **Verification:** Verified via `TEST(NetworkV2, EmptySecretKeyRefusesHmacVerification)`.
+
+### Finding SEC-21: Inconsistent Timestamp Bases (Monotonic ms vs Wall-Clock Seconds)
+- **Vulnerability Description:** Multiple `DetectionEvent` producers throughout `src/security/`, `src/memory/`, `src/forensics/`, `src/dma/`, and `src/kinematics/` populated event timestamps using `static_cast<uint64_t>(std::time(nullptr))`, yielding Unix epoch seconds (~1.73e9), whereas `EvidenceCorrelator` evaluated temporal decay against a sliding window expressed in milliseconds (`time_window_ms_ = 60000`). When subtracting 60,000 from seconds-based timestamps, the window arithmetic was completely broken, allowing events to remain active for ~60,000 seconds (16.6 hours) rather than 60 seconds.
+- **Root Cause:** Conflation of wall-clock seconds (`time(nullptr)`) and steady monotonic millisecond clocks.
+- **Remediation:** Standardized `DetectionEvent` with two explicit timestamp fields: `timestamp` (steady monotonic milliseconds via `std::chrono::steady_clock` for all temporal correlation logic) and `timestamp_utc_ms` (Unix UTC milliseconds via `std::chrono::system_clock` for audit logs and remote reporting). Updated all 15 detection producers to use `DetectionEvent::NowMonotonicMs()` and `DetectionEvent::NowUtcMs()`.
+- **Verification:** Verified via `TEST(RemediationV1_4, SixtySecondWindowStrict60000MsAcrossSubsystems)` proving events older than 60,000 milliseconds are strictly expired while events within 60,000 milliseconds correlate properly.
+
+### Finding SEC-22: Single Client Heuristic Corroboration Bypass in Engine Enforcement
+- **Vulnerability Description:** `AntiCheatEngine::ProcessDetection` directly triggered permanent client bans (`is_banned_ = true`, `config_.banScreenCallback()`) if an incoming event carried `FATAL_BAN` severity or if cumulative threat score exceeded the threshold, completely bypassing `EvidenceCorrelator::Evaluate` and its multi-signal corroboration rules. This allowed single false-positive client-side heuristics (such as debugging tools or memory anomalies) to trigger automated bans without corroborating signals from other subsystems.
+- **Root Cause:** Decentralized enforcement branches in `AntiCheatEngine` that short-circuited correlator evaluation.
+- **Remediation:** Centralized enforcement policy into `EvidenceCorrelator::Evaluate` and updated `AntiCheatEngine::ProcessDetection` to strictly respect `decision.action`, `decision.eligible_for_report_only`, and `decision.eligible_for_shadow`. When `strict_corroboration_mode` is active, a single client-side heuristic (even with `FATAL_BAN` or `CRITICAL` severity) is clamped to report-only telemetry and forbidden from executing automated bans, shadow bans, match restrictions, or session rejections unless corroborated by independent detection families or server verification.
+- **Verification:** Verified via `TEST(RemediationV1_4, SingleFatalClientHeuristicCannotBypassMultiSignalInStrictProduction)`.
+
+### Finding SEC-23: Ed25519 Non-Canonical Scalar Malleability & Point Encoding Vulnerabilities
+- **Vulnerability Description:** The pure software Ed25519 verification implementation in `src/network/ed25519.cpp` checked only that `(signature[63] & 224) == 0`. It did not verify that the full 256-bit scalar $S$ is strictly smaller than the group order $L$ ($L = 2^{252} + 27742317777372353535851937790883648493$). Furthermore, it did not verify that the encoded coordinates $y$ of points $R$ and $A$ are canonical field elements ($y < 2^{255}-19$), and failed to reject negative zero ($x = 0$ with the sign bit set to 1). This permitted signature malleability and non-canonical signature forgery attacks violating RFC 8032 strict verification rules.
+- **Root Cause:** Incomplete boundary checks in custom Ed25519 arithmetic routines.
+- **Remediation:** 
+  1. Implemented complete 256-bit little-endian comparison `IsCanonicalScalar` verifying $S < L$.
+  2. Implemented `IsCanonicalFieldElement` enforcing $y < 2^{255}-19$ on decoded point coordinates.
+  3. Hardened `unpackneg` to reject non-canonical field elements and negative zero ($x = 0$ with sign bit = 1).
+  4. Wired OpenSSL's audited `EVP_DigestVerify` as the primary verification engine when available, with mathematically identical software fallback.
+- **Verification:** Verified via `TEST(RemediationV1_4, Ed25519CanonicalScalarAndMalformedSignaturesRejected)` and official RFC 8032 test vectors.
+
+### Finding SEC-24: Match / Session Lifecycle State Bleed
+- **Vulnerability Description:** When games transitioned between competitive matches or user login sessions, accumulated detection events and threat scores from the prior match remained active in `AntiCheatEngine` and `EvidenceCorrelator`. A player could enter a brand-new match and immediately suffer match restrictions or bans triggered by lingering telemetry from hours earlier.
+- **Root Cause:** Absence of public match and session boundary lifecycle APIs in the SDK and engine.
+- **Remediation:** Exposed public SDK APIs `NoEscape_BeginSession`, `NoEscape_EndSession`, `NoEscape_BeginMatch`, and `NoEscape_EndMatch` (with corresponding methods in `noescape::sdk::Client` and `AntiCheatEngine`). These APIs reset threat scores, clear active kinematics tracking, advance session/match IDs, and flush outdated evidence, guaranteeing complete forensic isolation between matches.
+- **Verification:** Verified via `TEST(RemediationV1_4, MatchAndSessionLifecycleIsolatesEvidence)`.
+
+### Finding SEC-25: Unbounded History & Scored Keys Engine Memory Retention
+- **Vulnerability Description:** In `AntiCheatEngine`, `history_` was stored in an unbounded `std::vector<DetectionEvent>` that grew continuously over the lifetime of the process. In addition, `scored_keys_` retained deduplication hashes indefinitely. In long-running game sessions with thousands of audit passes, this caused unbounded memory growth and memory fragmentation.
+- **Root Cause:** Lack of capacity capping and FIFO eviction on engine event history and scored keys.
+- **Remediation:** Migrated `history_` to a bounded `std::deque<DetectionEvent>` capped at 512 entries (configurable via `SetMaxHistoryCapacity`). Added FIFO eviction tracking to `scored_keys_` via `scored_keys_order_` (capped at 512 entries) and exposed `PruneHistory` for explicit memory reclamation.
+- **Verification:** Verified via `TEST(RemediationV1_4, BoundedEngineHistoryAndScoredKeysMemoryRetention)`.
+
+### Finding SEC-26: Production Profile Hardcoded Secrets & Missing Configuration Validation
+- **Vulnerability Description:** `NoEscape_GetProfileConfig` populated production profile configurations with a hardcoded static shared secret (`"NoEscape_Secret_Key_v2.0"`) and a loopback URL (`"http://127.0.0.1:8080/api/ac"`). A developer using default profile presets in production would deploy vulnerable binaries that sent telemetry to loopback or accepted signatures signed by known keys.
+- **Root Cause:** Insecure convenience defaults in public profile factories.
+- **Remediation:** Removed hardcoded secrets and default URLs from `NoEscape_GetProfileConfig`. Added explicit validation via `NoEscape_ValidateConfig` which enforces that production and shadow-production deployments provide non-empty, non-loopback backend URLs, distinct production secrets, and valid 32-byte Ed25519 server public keys. `NoEscape_Init` now fails closed if configuration validation fails.
+- **Verification:** Verified via `TEST(RemediationV1_4, ProductionProfileHasNoHardcodedSecretsAndValidatesExplicitBackend)`.
+
+### Finding SEC-27: Server ESP Filter Unconfigured Occlusion Silent Pass & Missing Adapter
+- **Vulnerability Description:** `ServerEspFilter` is a standalone server-side analytical helper library, but was easily mistaken for an automated networking interceptor. When no occlusion geometry was registered, `EvaluateEntityReplication` returned `replicate_full_transform = true` without warning, giving server operators false confidence that ESP culling was active when it was doing nothing. Furthermore, game servers lacked a clean contract to plug in their native physics engines (Unreal, PhysX, Havok).
+- **Root Cause:** Undocumented library scope, silent pass-through behavior on unconfigured state, and missing engine physics adapter.
+- **Remediation:** 
+  1. Explicitly documented `ServerEspFilter` as a server-side helper library requiring integration into the game replication loop.
+  2. Added `IAuthoritativeVisibilityAdapter` abstract interface allowing game servers to delegate raycasts to native game engines.
+  3. Added explicit `occlusion_unconfigured` flag in `ReplicationDecision` when neither occluders nor an adapter are present.
+- **Verification:** Verified via `TEST(RemediationV1_4, ServerEspFilterAuthoritativeVisibilityAdapter)`.
+
+### Finding SEC-28: Insecure Timestamp Fallback in Cryptographic Random Number Generation
+- **Vulnerability Description:** In `src/network/crypto_util.cpp`, `GenerateRandomBytes` fell back to `std::random_device` mixed with high-resolution clock timestamps if `/dev/urandom` failed to open on Linux. Timestamp-derived seeds have low entropy and can be reconstructed or brute-forced by adversaries to predict challenge nonces, session tokens, or blackbox AEAD initialization vectors.
+- **Root Cause:** Insecure fallback designed to prevent crashes rather than failing securely.
+- **Remediation:** Re-implemented `CryptoUtil::GenerateRandomBytes` to use direct OS CSPRNG primitives: the `getrandom(2)` system call on Linux (with fallback only to `/dev/urandom`), and `BCryptGenRandom` on Windows. Completely removed timestamp fallbacks and updated the signature to return `bool` status, propagating errors to callers. Updated `PanelClient::RandomNonce` to throw a clear error if the OS CSPRNG fails.
+- **Verification:** Verified via `TEST(RemediationV1_4, CryptoUtilAndPanelClientUseOsCsprngWithoutCollision)`.
+
 

@@ -93,7 +93,7 @@ add_library(noescape_core STATIC ${CORE_SOURCES})
 target_compile_definitions(noescape_core PUBLIC NOESCAPE_STATIC)
 if(WIN32)
     set_target_properties(noescape_core PROPERTIES OUTPUT_NAME "noescape_static")
-    target_link_libraries(noescape_core PUBLIC ws2_32 psapi advapi32 wintrust crypt32 winhttp)
+    target_link_libraries(noescape_core PUBLIC ws2_32 psapi advapi32 wintrust crypt32 winhttp bcrypt)
 else()
     set_target_properties(noescape_core PROPERTIES OUTPUT_NAME "noescape")
     target_link_libraries(noescape_core PUBLIC pthread dl ${NOESCAPE_TLS_LIBS})
@@ -104,7 +104,7 @@ add_library(noescape_shared SHARED ${CORE_SOURCES})
 set_target_properties(noescape_shared PROPERTIES OUTPUT_NAME "noescape")
 target_compile_definitions(noescape_shared PRIVATE NOESCAPE_EXPORTS NOESCAPE_BUILD_SHARED)
 if(WIN32)
-    target_link_libraries(noescape_shared PUBLIC ws2_32 psapi advapi32 wintrust crypt32 winhttp)
+    target_link_libraries(noescape_shared PUBLIC ws2_32 psapi advapi32 wintrust crypt32 winhttp bcrypt)
 else()
     target_link_libraries(noescape_shared PUBLIC pthread dl ${NOESCAPE_TLS_LIBS})
 endif()
@@ -154,6 +154,7 @@ set(TEST_SOURCES
     tests/test_regressions.cpp
     tests/test_server_and_correlation.cpp
     tests/test_audit_v2_reengineering.cpp
+    tests/test_remediation_v1_4.cpp
 )
 
 add_executable(noescape_tests ${TEST_SOURCES})

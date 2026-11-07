@@ -2,6 +2,10 @@
 #include <cstring>
 #include <vector>
 
+#if defined(NOESCAPE_HAS_OPENSSL)
+#include <openssl/evp.h>
+#endif
+
 namespace noescape::network::ed25519 {
 
 namespace {
@@ -305,6 +309,29 @@ static const u64 L_order[32] = {
     0, 0, 0, 0, 0, 0, 0, 0x10
 };
 
+inline bool IsCanonicalScalar(const u8 s[32]) {
+    for (int i = 31; i >= 0; --i) {
+        u8 s_byte = s[i];
+        u8 l_byte = static_cast<u8>(L_order[i]);
+        if (s_byte < l_byte) return true;
+        if (s_byte > l_byte) return false;
+    }
+    return false; // s == L is not strictly less than L
+}
+
+inline bool IsCanonicalFieldElement(const u8 p[32]) {
+    // Coordinate y is in bits 0..254, bit 255 is sign.
+    // In little-endian, 2^255 - 19 is:
+    // byte 31 & 0x7F = 0x7F
+    // bytes 30..1 = 0xFF
+    // byte 0 = 0xED
+    if ((p[31] & 0x7F) < 0x7F) return true;
+    for (int i = 30; i >= 1; --i) {
+        if (p[i] < 0xFF) return true;
+    }
+    return p[0] < 0xED;
+}
+
 inline void modL(u8 *r, i64 x[64]) {
     i64 carry;
     for (int i = 63; i >= 32; --i) {
@@ -338,6 +365,8 @@ inline void reduce(u8 *r) {
 }
 
 inline int unpackneg(gf r[4], const u8 p[32]) {
+    if (!IsCanonicalFieldElement(p)) return -1;
+
     gf t, chk, num, den, den2, den4, den6;
     set25519(r[2], gf1);
     unpack25519(r[1], p);
@@ -365,6 +394,11 @@ inline int unpackneg(gf r[4], const u8 p[32]) {
     S(chk, r[0]);
     M(chk, chk, den);
     if (neq25519(chk, num) != 0) return -1;
+
+    // Check for negative zero: x == 0 with sign bit set is non-canonical
+    if (neq25519(r[0], gf0) == 0 && (p[31] >> 7) != 0) {
+        return -1;
+    }
 
     if (par25519(r[0]) == (p[31] >> 7)) Z(r[0], gf0, r[0]);
 
@@ -446,17 +480,27 @@ bool Sign(const uint8_t* private_key, size_t private_key_len,
     return true;
 }
 
-bool Verify(const uint8_t* public_key,
-            const uint8_t* message, size_t message_len,
-            const uint8_t* signature) {
+bool VerifySoftware(const uint8_t* public_key,
+                    const uint8_t* message, size_t message_len,
+                    const uint8_t* signature) {
     if (!public_key || !signature) return false;
 
-    // Check S < L (signature[32..63] top bit check)
-    if ((signature[63] & 224) != 0) return false;
+    // 1. Strict canonical scalar check: S < L across all 256 bits (not merely upper 3 bits)
+    if (!IsCanonicalScalar(signature + 32)) return false;
 
+    // 2. Strict canonical field element checks (y < 2^255 - 19)
+    if (!IsCanonicalFieldElement(public_key)) return false;
+    if (!IsCanonicalFieldElement(signature)) return false;
+
+    // 3. Point encoding and curve membership validation for public key A
     gf q[4];
     if (unpackneg(q, public_key) != 0) return false;
 
+    // 4. Point encoding and curve membership validation for signature commitment R
+    gf r_pt[4];
+    if (unpackneg(r_pt, signature) != 0) return false;
+
+    // Deterministic portable pure C++ curve equation verification
     std::vector<u8> m(64 + message_len);
     std::memcpy(m.data(), signature, 32);
     std::memcpy(m.data() + 32, public_key, 32);
@@ -478,6 +522,48 @@ bool Verify(const uint8_t* public_key,
     pack(t, p);
 
     return crypto_verify_32(signature, t) == 0;
+}
+
+bool Verify(const uint8_t* public_key,
+            const uint8_t* message, size_t message_len,
+            const uint8_t* signature) {
+    if (!public_key || !signature) return false;
+
+    // 1. Strict canonical scalar check: S < L across all 256 bits (not merely upper 3 bits)
+    if (!IsCanonicalScalar(signature + 32)) return false;
+
+    // 2. Strict canonical field element checks (y < 2^255 - 19)
+    if (!IsCanonicalFieldElement(public_key)) return false;
+    if (!IsCanonicalFieldElement(signature)) return false;
+
+    // 3. Point encoding and curve membership validation for public key A
+    gf q[4];
+    if (unpackneg(q, public_key) != 0) return false;
+
+    // 4. Point encoding and curve membership validation for signature commitment R
+    gf r_pt[4];
+    if (unpackneg(r_pt, signature) != 0) return false;
+
+#if defined(NOESCAPE_HAS_OPENSSL)
+    // Primary audited cryptographic provider verification when OpenSSL is available
+    EVP_PKEY* pkey = EVP_PKEY_new_raw_public_key(EVP_PKEY_ED25519, nullptr, public_key, 32);
+    if (pkey) {
+        EVP_MD_CTX* mctx = EVP_MD_CTX_new();
+        bool verified = false;
+        if (mctx) {
+            if (EVP_DigestVerifyInit(mctx, nullptr, nullptr, nullptr, pkey) == 1 &&
+                EVP_DigestVerify(mctx, signature, 64, message, message_len) == 1) {
+                verified = true;
+            }
+            EVP_MD_CTX_free(mctx);
+        }
+        EVP_PKEY_free(pkey);
+        return verified;
+    }
+#endif
+
+    // Deterministic portable pure C++ curve equation verification fallback
+    return VerifySoftware(public_key, message, message_len, signature);
 }
 
 } // namespace noescape::network::ed25519

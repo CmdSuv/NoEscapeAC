@@ -137,7 +137,19 @@ In the v2.0 Reengineering cycle, all 20 critical and major security findings wer
 
 ### 5.2 Verification Metrics
 - **Compilation:** `-DNOESCAPE_WERROR=ON` with zero compiler warnings under GCC 16 C++20.
-- **Unit & Integration Test Suite:** **157 / 157 Tests Passed (100% Green)**.
+- **Unit & Integration Test Suite:** **169 / 169 Tests Passed (100% Green)**.
 - **Preload Verification:** `tools/verify_preload.sh` **6 / 6 Passed (100% Green)**.
 - **Interactive Demonstration:** `demo/noescape_demo` runs all 8 live subsystem scenarios flawlessly.
 - **System Integrity:** Verified zero AI attribution artifacts; strictly Omar Yiğitcan Mengü (`@CmdSuv`) and OnlyCosmos (`@OnlyCosmos`).
+
+### 5.3 Release 1.4 Critical Remediation Patch Outcomes
+Following the initial v1.4 audit, an exhaustive critical remediation patch resolved 8 priority findings across cryptography, temporal correlation, enforcement policies, SDK lifecycles, and backend contracts:
+1. **P0-1: Timestamp Normalization across Detection Subsystems (`types.hpp`, all producers):** Standardized event timing to monotonic milliseconds (`timestamp` via `DetectionEvent::NowMonotonicMs()`) for sliding window evaluations and UTC milliseconds (`timestamp_utc_ms` via `DetectionEvent::NowUtcMs()`) for logging/telemetry, resolving a critical defect where seconds-based timestamps expanded the 60s window to 16.6 hours.
+2. **P0-2: Centralized Enforcement & Multi-Signal Corroboration Bypass Fix (`evidence_correlator.cpp`, `engine.cpp`):** Unified decision policies in `EvidenceCorrelator::Evaluate` across all enforcement modes. Single client-side heuristics are strictly forbidden from triggering bans, shadow bans, match restrictions, or session rejections without independent corroboration.
+3. **P0-3: Strict RFC 8032 Ed25519 Canonical Scalar & Point Encoding Validation (`ed25519.cpp`):** Implemented complete 256-bit $S < L$ canonical scalar comparison, canonical coordinate validation ($y < 2^{255}-19$), rejection of negative zeros ($x = 0$ with sign bit = 1), and wired OpenSSL's audited `EVP_DigestVerify` as the primary provider with software fallback.
+4. **P1-1: Match & Session Lifecycle Isolation (`noescape_sdk.h`, `engine.cpp`):** Exposed `NoEscape_BeginSession`, `NoEscape_EndSession`, `NoEscape_BeginMatch`, and `NoEscape_EndMatch` ensuring state and evidence from previous matches cannot bleed into subsequent matches.
+5. **P1-2: Bounded Engine Memory Retention (`engine.hpp`, `engine.cpp`):** Replaced unbounded history storage with a capacity-capped deque (512 entries) and added FIFO eviction tracking for scored deduplication keys.
+6. **P1-3: Production SDK Configuration Validation (`noescape_sdk.h`, `noescape_sdk.cpp`):** Removed hardcoded default secrets and loopback URLs from profile presets; added `NoEscape_ValidateConfig` enforcing explicit production configurations.
+7. **P1-4: Server Authoritative Visibility Adapter (`server_integration.hpp`, `server_integration.cpp`):** Clarified helper library status, added `IAuthoritativeVisibilityAdapter` for native engine integration, and added explicit `occlusion_unconfigured` flag.
+8. **P1-5: Cryptographic Randomness Audit & CSPRNG Error Propagation (`crypto_util.cpp`, `panel_client.cpp`):** Bound entropy generation to OS CSPRNG (`getrandom`/`BCryptGenRandom`), eliminated timestamp fallbacks, and propagated error states to callers.
+

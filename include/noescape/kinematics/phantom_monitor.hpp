@@ -36,6 +36,7 @@ public:
     void AddPhantom(uint32_t id, float x, float y, float z, bool occluded = true);
     void UpdatePhantom(uint32_t id, float x, float y, float z);
     void Clear();
+    void Reset();
     size_t Count() const;
     std::vector<PhantomEntity> GetPhantoms() const;
     uint32_t GetTotalLockDetections() const { return total_detections_; }

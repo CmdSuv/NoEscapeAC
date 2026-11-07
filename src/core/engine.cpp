@@ -11,6 +11,7 @@
 #include "noescape/overlay/overlay_detector.hpp"
 #include "noescape/core/blackbox.hpp"
 #include "noescape/core/envutil.hpp"
+#include "noescape/network/crypto_util.hpp"
 
 #include <chrono>
 #include <thread>
@@ -147,7 +148,8 @@ std::vector<DetectionEvent> AntiCheatEngine::VerifyPanelStatus() {
         ev.severity = Severity::FATAL_BAN;
         ev.component = "PanelClient::GlobalBanList";
         ev.details = res.reason;
-        ev.timestamp = static_cast<uint64_t>(time(nullptr));
+        ev.timestamp = DetectionEvent::NowMonotonicMs();
+        ev.timestamp_utc_ms = DetectionEvent::NowUtcMs();
         ev.threat_score = 100;
         events.push_back(ev);
         panel_failures_.store(0, std::memory_order_relaxed);
@@ -163,7 +165,8 @@ std::vector<DetectionEvent> AntiCheatEngine::VerifyPanelStatus() {
             ev.severity = forged ? Severity::HIGH : Severity::MEDIUM;
             ev.component = "PanelClient::Verification";
             ev.details = res.reason + " (consecutive failures: " + std::to_string(failures) + ")";
-            ev.timestamp = static_cast<uint64_t>(time(nullptr));
+            ev.timestamp = DetectionEvent::NowMonotonicMs();
+            ev.timestamp_utc_ms = DetectionEvent::NowUtcMs();
             ev.threat_score = forged ? 60 : 20;
             events.push_back(ev);
             if (!forged) panel_failures_.store(0, std::memory_order_relaxed); // re-arm: at most one scored event per 5 failed checks
@@ -415,14 +418,23 @@ void AntiCheatEngine::ProcessDetection(const DetectionEvent& event) {
 
     {
         std::lock_guard<std::mutex> lock(history_mutex_);
-        firstSighting = scored_keys_.insert(DetectionKey(enriched)).second;
+        std::string key = DetectionKey(enriched);
+        firstSighting = scored_keys_.insert(key).second;
         if (firstSighting) {
             history_.push_back(enriched);
+            scored_keys_order_.push_back(key);
+
+            while (history_.size() > max_history_capacity_) {
+                history_.pop_front();
+            }
+            while (scored_keys_order_.size() > max_history_capacity_ * 2) {
+                scored_keys_.erase(scored_keys_order_.front());
+                scored_keys_order_.pop_front();
+            }
         }
     }
 
     // A persistent condition is scored once; repeats must not snowball into a ban.
-    // Fatal events still enforce on every sighting.
     if (firstSighting) {
         threat_score_.fetch_add(decision.effective_score_delta);
         Logger::Instance().SecurityAlert(enriched);
@@ -431,46 +443,41 @@ void AntiCheatEngine::ProcessDetection(const DetectionEvent& event) {
         if (cb) cb(enriched);
     }
 
-    if (decision.eligible_for_match_restriction) {
-        is_match_restricted_.store(true, std::memory_order_release);
-    }
-    if (decision.eligible_for_session_reject) {
-        is_session_rejected_.store(true, std::memory_order_release);
-    }
+    // Centralized enforcement policy: strictly honor configured EnforcementMode
+    switch (config_.enforcementMode) {
+        case EnforcementMode::REPORT_ONLY:
+            // Report only: do not set shadow, match restriction, session reject, or ban
+            break;
 
-    // Apply configured enforcement mode
-    if (config_.enforcementMode == EnforcementMode::REPORT_ONLY) {
-        return;
-    }
-    if (config_.enforcementMode == EnforcementMode::SHADOW) {
-        uint32_t cur = threat_score_.load();
-        if ((cur >= config_.banScoreThreshold && cur > 0) || enriched.severity == Severity::FATAL_BAN) {
-            is_shadow_flagged_.store(true, std::memory_order_release);
-        }
-        return;
-    }
-    if (config_.enforcementMode == EnforcementMode::MATCH_RESTRICTION) {
-        uint32_t cur = threat_score_.load();
-        if ((cur >= config_.banScoreThreshold && cur > 0) || enriched.severity == Severity::FATAL_BAN) {
-            is_match_restricted_.store(true, std::memory_order_release);
-        }
-        return;
-    }
-    if (config_.enforcementMode == EnforcementMode::SERVER_SESSION_REJECT) {
-        uint32_t cur = threat_score_.load();
-        if ((cur >= config_.banScoreThreshold && cur > 0) || enriched.severity == Severity::FATAL_BAN) {
-            is_session_rejected_.store(true, std::memory_order_release);
-        }
-        return;
-    }
+        case EnforcementMode::SHADOW:
+            if (decision.eligible_for_shadow) {
+                is_shadow_flagged_.store(true, std::memory_order_release);
+            }
+            break;
 
-    if (config_.enforceBanOnViolation) {
-        uint32_t cur = threat_score_.load();
-        bool thresholdExceeded = (cur >= config_.banScoreThreshold && cur > 0) ||
-                                 (enriched.severity == Severity::FATAL_BAN);
-        if (thresholdExceeded && decision.eligible_for_permanent_ban) {
-            TriggerBan(enriched.details, enriched.type, enriched.component);
-        }
+        case EnforcementMode::MATCH_RESTRICTION:
+            if (decision.eligible_for_match_restriction) {
+                is_match_restricted_.store(true, std::memory_order_release);
+            }
+            break;
+
+        case EnforcementMode::SERVER_SESSION_REJECT:
+            if (decision.eligible_for_session_reject) {
+                is_session_rejected_.store(true, std::memory_order_release);
+            }
+            break;
+
+        case EnforcementMode::ENFORCE:
+            if (decision.eligible_for_match_restriction) {
+                is_match_restricted_.store(true, std::memory_order_release);
+            }
+            if (decision.eligible_for_session_reject) {
+                is_session_rejected_.store(true, std::memory_order_release);
+            }
+            if (config_.enforceBanOnViolation && decision.eligible_for_permanent_ban) {
+                TriggerBan(enriched.details, enriched.type, enriched.component);
+            }
+            break;
     }
 }
 
@@ -503,8 +510,11 @@ void AntiCheatEngine::TriggerBan(const std::string& reason, DetectionType type, 
             Severity::FATAL_BAN,
             component.empty() ? "AntiCheatEngine::Enforcement" : component,
             reason,
-            static_cast<uint64_t>(time(nullptr)),
-            finalScore
+            DetectionEvent::NowMonotonicMs(),
+            finalScore,
+            DetectionCategory::UNKNOWN,
+            ConfidenceLevel::HIGH,
+            DetectionEvent::NowUtcMs()
         },
         finalScore
     );
@@ -658,7 +668,80 @@ void AntiCheatEngine::SpawnBanScreen(const std::string& reason,
 
 std::vector<DetectionEvent> AntiCheatEngine::GetDetectionHistory() const {
     std::lock_guard<std::mutex> lock(history_mutex_);
-    return history_;
+    return std::vector<DetectionEvent>(history_.begin(), history_.end());
+}
+
+void AntiCheatEngine::BeginSession(const std::string& session_id) {
+    std::string sid = session_id.empty() ? ("session_" + network::CryptoUtil::GenerateRandomHex(8)) : session_id;
+    correlator_.SetSessionId(sid);
+    std::lock_guard<std::mutex> lock(history_mutex_);
+    history_.clear();
+    scored_keys_.clear();
+    scored_keys_order_.clear();
+    threat_score_.store(0, std::memory_order_release);
+    is_shadow_flagged_.store(false, std::memory_order_release);
+    is_match_restricted_.store(false, std::memory_order_release);
+    is_session_rejected_.store(false, std::memory_order_release);
+    ResetInput();
+    phantom_monitor_.Reset();
+}
+
+void AntiCheatEngine::EndSession() {
+    correlator_.SetSessionId("session_ended");
+    std::lock_guard<std::mutex> lock(history_mutex_);
+    history_.clear();
+    scored_keys_.clear();
+    scored_keys_order_.clear();
+    threat_score_.store(0, std::memory_order_release);
+}
+
+void AntiCheatEngine::BeginMatch(const std::string& match_id) {
+    std::string mid = match_id.empty() ? ("match_" + network::CryptoUtil::GenerateRandomHex(8)) : match_id;
+    correlator_.SetMatchId(mid);
+    std::lock_guard<std::mutex> lock(history_mutex_);
+    history_.clear();
+    scored_keys_.clear();
+    scored_keys_order_.clear();
+    threat_score_.store(0, std::memory_order_release);
+    is_match_restricted_.store(false, std::memory_order_release);
+    ResetInput();
+    phantom_monitor_.Reset();
+}
+
+void AntiCheatEngine::EndMatch() {
+    correlator_.SetMatchId("match_ended");
+    std::lock_guard<std::mutex> lock(history_mutex_);
+    history_.clear();
+    scored_keys_.clear();
+    scored_keys_order_.clear();
+    threat_score_.store(0, std::memory_order_release);
+}
+
+void AntiCheatEngine::SetMaxHistoryCapacity(size_t max_capacity) {
+    std::lock_guard<std::mutex> lock(history_mutex_);
+    max_history_capacity_ = (max_capacity >= 16) ? max_capacity : 16;
+    while (history_.size() > max_history_capacity_) {
+        history_.pop_front();
+    }
+    while (scored_keys_order_.size() > max_history_capacity_ * 2) {
+        scored_keys_.erase(scored_keys_order_.front());
+        scored_keys_order_.pop_front();
+    }
+}
+
+size_t AntiCheatEngine::GetMaxHistoryCapacity() const {
+    std::lock_guard<std::mutex> lock(history_mutex_);
+    return max_history_capacity_;
+}
+
+void AntiCheatEngine::PruneHistory(uint64_t max_age_ms) {
+    uint64_t now = GetSteadyNowMs();
+    correlator_.PruneExpired(now);
+    std::lock_guard<std::mutex> lock(history_mutex_);
+    uint64_t cutoff = (now > max_age_ms) ? (now - max_age_ms) : 0;
+    while (!history_.empty() && history_.front().timestamp < cutoff) {
+        history_.pop_front();
+    }
 }
 
 void AntiCheatEngine::Start() {
@@ -742,8 +825,8 @@ void AntiCheatEngine::HandleAttestation(const network::HeartbeatResult& hb) {
         ev.type = DetectionType::HEARTBEAT_TAMPERING;
         ev.severity = Severity::HIGH;
         ev.component = "PanelClient::Attestation";
-        ev.details = "Attestation challenge with an invalid signature (fake panel or MitM)";
-        ev.timestamp = static_cast<uint64_t>(time(nullptr));
+        ev.timestamp = DetectionEvent::NowMonotonicMs();
+        ev.timestamp_utc_ms = DetectionEvent::NowUtcMs();
         ev.threat_score = 60;
         ProcessDetection(ev);
         return;
@@ -845,7 +928,8 @@ void AntiCheatEngine::WatchdogLoop() {
             ev.severity = Severity::CRITICAL;
             ev.component = "AntiCheatEngine::Watchdog";
             ev.details = "Watchdog heartbeat timeout: background audit loop delayed or suspended (> 3000ms)";
-            ev.timestamp = static_cast<uint64_t>(std::time(nullptr));
+            ev.timestamp = DetectionEvent::NowMonotonicMs();
+            ev.timestamp_utc_ms = DetectionEvent::NowUtcMs();
             ev.threat_score = 100;
             ProcessDetection(ev);
             last_audit_heartbeat_ms_.store(now, std::memory_order_release);
@@ -868,7 +952,8 @@ void AntiCheatEngine::CheckWatchdogHealth() {
         ev.severity = Severity::CRITICAL;
         ev.component = "AntiCheatEngine::WatchdogSupervisor";
         ev.details = "Watchdog thread stopped responding (killed, suspended or hooked): audit loop supervision lost";
-        ev.timestamp = static_cast<uint64_t>(std::time(nullptr));
+        ev.timestamp = DetectionEvent::NowMonotonicMs();
+        ev.timestamp_utc_ms = DetectionEvent::NowUtcMs();
         ev.threat_score = 100;
         ProcessDetection(ev);
     }

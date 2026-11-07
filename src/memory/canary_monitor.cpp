@@ -204,7 +204,8 @@ std::vector<core::DetectionEvent> CanaryMonitor::Check() {
            << (contentChanged ? "content modified" : "page write-tracking flagged")
            << ") - external process memory write suspected";
         ev.details = ss.str();
-        ev.timestamp = static_cast<uint64_t>(std::time(nullptr));
+        ev.timestamp = core::DetectionEvent::NowMonotonicMs();
+        ev.timestamp_utc_ms = core::DetectionEvent::NowUtcMs();
         ev.threat_score = 90;
         events.push_back(ev);
 
@@ -223,7 +224,8 @@ std::vector<core::DetectionEvent> CanaryMonitor::Check() {
         ev.component = "CanaryMonitor";
         ev.details = "Write to tripwire memory that no legitimate code touches (content modified) - "
                      "external process memory write suspected";
-        ev.timestamp = static_cast<uint64_t>(std::time(nullptr));
+        ev.timestamp = core::DetectionEvent::NowMonotonicMs();
+        ev.timestamp_utc_ms = core::DetectionEvent::NowUtcMs();
         ev.threat_score = 90;
         events.push_back(ev);
         std::memcpy(base_, expected_.data(), size_);

@@ -12,9 +12,13 @@
 
 #if defined(_WIN32)
 #include <windows.h>
+#include <bcrypt.h>
 #else
 #include <unistd.h>
 #include <sys/types.h>
+#include <sys/random.h>
+#include <fcntl.h>
+#include <cerrno>
 #endif
 
 #if defined(NOESCAPE_HAS_OPENSSL)
@@ -307,31 +311,62 @@ std::string CryptoUtil::Sha256File(const std::string& file_path) {
     return ToHex(digest, 32);
 }
 
-void CryptoUtil::GenerateRandomBytes(uint8_t* out, size_t length) {
-    if (!out || length == 0) return;
-#if !defined(_WIN32)
-    std::ifstream urandom("/dev/urandom", std::ios::binary);
-    if (urandom.is_open()) {
-        urandom.read(reinterpret_cast<char*>(out), static_cast<std::streamsize>(length));
-        if (static_cast<size_t>(urandom.gcount()) == length) {
-            return;
-        }
-    }
-#endif
-    std::random_device rd;
-    uint64_t seedNs = static_cast<uint64_t>(
-        std::chrono::high_resolution_clock::now().time_since_epoch().count()
+bool CryptoUtil::GenerateRandomBytes(uint8_t* out, size_t length) {
+    if (!out) return false;
+    if (length == 0) return true;
+
+#if defined(_WIN32)
+    NTSTATUS status = BCryptGenRandom(
+        nullptr,
+        out,
+        static_cast<ULONG>(length),
+        BCRYPT_USE_SYSTEM_PREFERRED_RNG
     );
-    for (size_t i = 0; i < length; ++i) {
-        uint32_t r = rd();
-        seedNs ^= (seedNs << 13) ^ (seedNs >> 7) ^ static_cast<uint64_t>(r);
-        out[i] = static_cast<uint8_t>((r ^ (seedNs >> ((i % 8) * 8))) & 0xFF);
+    return status == 0;
+#else
+    size_t total = 0;
+    // 1. Explicit getrandom(2) syscall (Linux CSPRNG)
+    while (total < length) {
+        ssize_t ret = getrandom(out + total, length - total, 0);
+        if (ret < 0) {
+            if (errno == EINTR) continue;
+            break; // Failed or unsupported, fallback to /dev/urandom
+        }
+        total += static_cast<size_t>(ret);
     }
+    if (total == length) {
+        return true;
+    }
+
+    // 2. Direct POSIX /dev/urandom fallback (no timestamp fallback)
+    int fd = open("/dev/urandom", O_RDONLY | O_CLOEXEC);
+    if (fd >= 0) {
+        while (total < length) {
+            ssize_t ret = read(fd, out + total, length - total);
+            if (ret < 0) {
+                if (errno == EINTR) continue;
+                close(fd);
+                return false;
+            }
+            if (ret == 0) {
+                close(fd);
+                return false;
+            }
+            total += static_cast<size_t>(ret);
+        }
+        close(fd);
+        return total == length;
+    }
+    return false;
+#endif
 }
 
 std::string CryptoUtil::GenerateRandomHex(size_t byte_length) {
+    if (byte_length == 0) return "";
     std::vector<uint8_t> bytes(byte_length);
-    GenerateRandomBytes(bytes.data(), byte_length);
+    if (!GenerateRandomBytes(bytes.data(), byte_length)) {
+        return "";
+    }
     return ToHex(bytes.data(), bytes.size());
 }
 
@@ -372,7 +407,9 @@ CryptoUtil::AsymmetricKeyPair CryptoUtil::GenerateAsymmetricKeyPair() {
 #endif
     // Genuine RFC 8032 Ed25519 portable provider
     uint8_t seed[32]{};
-    GenerateRandomBytes(seed, sizeof(seed));
+    if (!GenerateRandomBytes(seed, sizeof(seed))) {
+        return kp;
+    }
     uint8_t pubKey[32]{};
     uint8_t privKey[64]{};
     if (ed25519::CreateKeyPair(seed, pubKey, privKey)) {

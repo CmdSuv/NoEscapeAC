@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <stddef.h>
 
 #if defined(NOESCAPE_STATIC)
     #define NOESCAPE_API
@@ -118,6 +119,15 @@ NOESCAPE_API uint32_t NoEscape_GetThreatScore(void);
 // Returns true if the session/client has been banned
 NOESCAPE_API bool NoEscape_IsBanned(void);
 
+// Returns true if the session/client is flagged for shadow ban
+NOESCAPE_API bool NoEscape_IsShadowFlagged(void);
+
+// Returns true if the session/client is restricted from match participation
+NOESCAPE_API bool NoEscape_IsMatchRestricted(void);
+
+// Returns true if the server session has been rejected
+NOESCAPE_API bool NoEscape_IsSessionRejected(void);
+
 // Registers a callback for security violations and ban enforcement
 NOESCAPE_API void NoEscape_SetViolationCallback(NoEscapeViolationCallback callback);
 
@@ -139,6 +149,16 @@ NOESCAPE_API void NoEscape_UpdatePhantom(uint32_t id, float x, float y, float z)
 
 // Feeds camera position and view angles (degrees) for phantom analysis
 NOESCAPE_API void NoEscape_PushView(float x, float y, float z, float pitch, float yaw, uint64_t timestamp_ms);
+
+// Session and Match Lifecycle Isolation (Release 1.4)
+NOESCAPE_API void NoEscape_BeginSession(const char* session_id);
+NOESCAPE_API void NoEscape_EndSession(void);
+NOESCAPE_API void NoEscape_BeginMatch(const char* match_id);
+NOESCAPE_API void NoEscape_EndMatch(void);
+
+// Production Configuration Validation (Release 1.4)
+// Validates an anti-cheat configuration. Returns 0 if valid, non-zero error code if invalid.
+NOESCAPE_API int NoEscape_ValidateConfig(const NoEscapeConfig* config, char* error_buf, size_t error_buf_size);
 
 #ifdef __cplusplus
 } // extern "C"
@@ -183,6 +203,18 @@ public:
 
     static bool IsBanned() {
         return NoEscape_IsBanned();
+    }
+
+    static bool IsShadowFlagged() {
+        return NoEscape_IsShadowFlagged();
+    }
+
+    static bool IsMatchRestricted() {
+        return NoEscape_IsMatchRestricted();
+    }
+
+    static bool IsSessionRejected() {
+        return NoEscape_IsSessionRejected();
     }
 
     static void SetViolationCallback(NoEscapeViolationCallback cb) {
@@ -231,6 +263,29 @@ public:
 
     static void PushView(float x, float y, float z, float pitch, float yaw, uint64_t timestamp_ms) {
         NoEscape_PushView(x, y, z, pitch, yaw, timestamp_ms);
+    }
+
+    static void BeginSession(const std::string& session_id = "") {
+        NoEscape_BeginSession(session_id.empty() ? nullptr : session_id.c_str());
+    }
+
+    static void EndSession() {
+        NoEscape_EndSession();
+    }
+
+    static void BeginMatch(const std::string& match_id = "") {
+        NoEscape_BeginMatch(match_id.empty() ? nullptr : match_id.c_str());
+    }
+
+    static void EndMatch() {
+        NoEscape_EndMatch();
+    }
+
+    static int ValidateConfig(const NoEscapeConfig* config, std::string* error_msg = nullptr) {
+        char errBuf[256]{};
+        int rc = NoEscape_ValidateConfig(config, errBuf, sizeof(errBuf));
+        if (error_msg) *error_msg = errBuf;
+        return rc;
     }
 };
 

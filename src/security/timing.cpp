@@ -78,7 +78,8 @@ std::optional<core::DetectionEvent> TimingIntegrity::CheckSpeedhack() {
         ev.severity = core::Severity::HIGH;
         ev.component = "TimingIntegrity::TSC";
         ev.details = "Hardware TSC jumped backwards (possible Anti-Tick / Rewind exploit)";
-        ev.timestamp = static_cast<uint64_t>(time(nullptr));
+        ev.timestamp = core::DetectionEvent::NowMonotonicMs();
+        ev.timestamp_utc_ms = core::DetectionEvent::NowUtcMs();
         ev.threat_score = 40;
         return ev;
     }
@@ -102,7 +103,8 @@ std::optional<core::DetectionEvent> TimingIntegrity::CheckSpeedhack() {
             ev.component = "TimingIntegrity::ClockRatio";
             ev.details = "Clock frequency deviation: ratio=" + std::to_string(ratio) +
                          " (elapsed_ms=" + std::to_string(elapsedMs) + ")";
-            ev.timestamp = static_cast<uint64_t>(time(nullptr));
+            ev.timestamp = core::DetectionEvent::NowMonotonicMs();
+            ev.timestamp_utc_ms = core::DetectionEvent::NowUtcMs();
             ev.threat_score = 75;
             return ev;
         }

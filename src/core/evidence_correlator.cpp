@@ -8,11 +8,7 @@ namespace noescape::core {
 
 namespace {
 uint64_t NowEpochMs() {
-    return static_cast<uint64_t>(
-        std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::system_clock::now().time_since_epoch()
-        ).count()
-    );
+    return GetMonotonicTimeMs();
 }
 } // namespace
 
@@ -23,12 +19,10 @@ EvidenceCorrelator::EvidenceCorrelator() {
 
 void EvidenceCorrelator::SetSessionId(const std::string& session_id) {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (session_id_ != session_id) {
-        // Enforce strict session isolation: retire previous session records
-        aggregated_by_key_.clear();
-        category_timeline_.clear();
-        session_id_ = session_id;
-    }
+    // Enforce strict session isolation: retire previous session records
+    aggregated_by_key_.clear();
+    category_timeline_.clear();
+    session_id_ = session_id;
 }
 
 std::string EvidenceCorrelator::GetSessionId() const {
@@ -38,12 +32,10 @@ std::string EvidenceCorrelator::GetSessionId() const {
 
 void EvidenceCorrelator::SetMatchId(const std::string& match_id) {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (match_id_ != match_id) {
-        // Enforce strict match isolation: retire prior match records
-        aggregated_by_key_.clear();
-        category_timeline_.clear();
-        match_id_ = match_id;
-    }
+    // Enforce strict match isolation: retire prior match records
+    aggregated_by_key_.clear();
+    category_timeline_.clear();
+    match_id_ = match_id;
 }
 
 std::string EvidenceCorrelator::GetMatchId() const {
@@ -177,7 +169,8 @@ ConfidenceLevel EvidenceCorrelator::InferBaseConfidence(const DetectionEvent& ev
 }
 
 void EvidenceCorrelator::PruneExpired(uint64_t now_ms) {
-    uint64_t cutoff = (now_ms > time_window_ms_) ? (now_ms - time_window_ms_) : 0;
+    uint64_t effective_now = (now_ms != 0) ? now_ms : GetMonotonicTimeMs();
+    uint64_t cutoff = (effective_now > time_window_ms_) ? (effective_now - time_window_ms_) : 0;
 
     // Prune category timeline entries older than sliding temporal window
     for (auto it = category_timeline_.begin(); it != category_timeline_.end(); ) {
@@ -263,8 +256,11 @@ CorrelationDecision EvidenceCorrelator::Evaluate(
     CorrelationDecision decision{};
     DetectionEvent ev = raw_event;
 
-    uint64_t now = (ev.timestamp != 0) ? ev.timestamp : NowEpochMs();
+    uint64_t now = (ev.timestamp != 0) ? ev.timestamp : GetMonotonicTimeMs();
     ev.timestamp = now;
+    if (ev.timestamp_utc_ms == 0) {
+        ev.timestamp_utc_ms = GetUtcTimeMs();
+    }
     if (ev.event_id == 0) {
         ev.event_id = next_event_id_++;
     }
@@ -373,31 +369,31 @@ CorrelationDecision EvidenceCorrelator::Evaluate(
     decision.is_weak_single_signal = weakSingle;
 
     uint32_t projectedScore = current_total_score + ev.threat_score;
-    decision.eligible_for_match_restriction =
-        (ev.type == DetectionType::ENVIRONMENT_TAMPERING) ||
-        (ev.type == DetectionType::DMA_PCIE_LEECH_DEVICE) ||
-        (projectedScore >= (ban_threshold / 2) && ban_threshold > 0);
-
-    decision.eligible_for_session_reject =
-        (ev.severity >= Severity::CRITICAL) ||
-        (ev.type == DetectionType::ANTI_DEBUG_TRACER) ||
-        (ev.type == DetectionType::SELF_INTEGRITY_VIOLATION) ||
-        (projectedScore >= ban_threshold && ban_threshold > 0);
-
     bool scoreReached = (ban_threshold > 0 && projectedScore >= ban_threshold);
     bool fatalSeverity = (ev.severity == Severity::FATAL_BAN);
+    bool criticalOrAbove = (ev.severity >= Severity::CRITICAL);
+    bool hasMultiSignalCorroboration = (independentCategories >= 2 && distinctRootCauses.size() >= 2);
+    bool corroboratedOrVerified = hasMultiSignalCorroboration || ev.server_verified;
+
+    decision.eligible_for_report_only = true;
 
     if (strict_corroboration_mode) {
         // Under strict multi-signal corroboration mode (Production / Shadow Production):
-        // 1. Permanent bans REQUIRE multi-signal corroboration: at least 2 independent detection
-        //    categories with distinct root causes, OR authoritative server verification.
+        // 1. Permanent bans, session rejects, shadow flags, and match restrictions REQUIRE multi-signal corroboration:
+        //    at least 2 independent detection categories with distinct root causes, OR authoritative server verification.
         // 2. An event's severity alone (even FATAL_BAN or CRITICAL) does NOT establish evidence independence.
-        // 3. A single client-side heuristic or condition cannot trigger a permanent ban without corroboration.
-        bool hasMultiSignalCorroboration = (independentCategories >= 2 && distinctRootCauses.size() >= 2);
-        if (ev.server_verified || hasMultiSignalCorroboration) {
+        // 3. A single client-side heuristic or condition cannot trigger enforcement without corroboration.
+        if (corroboratedOrVerified) {
             decision.eligible_for_permanent_ban = scoreReached || fatalSeverity;
+            decision.eligible_for_session_reject = criticalOrAbove || scoreReached;
+            decision.eligible_for_shadow = criticalOrAbove || scoreReached || fatalSeverity;
+            decision.eligible_for_match_restriction = (projectedScore >= (ban_threshold / 2) && ban_threshold > 0) || criticalOrAbove;
         } else {
             decision.eligible_for_permanent_ban = false;
+            decision.eligible_for_session_reject = false;
+            decision.eligible_for_shadow = false;
+            decision.eligible_for_match_restriction = false;
+
             // Cap score just below threshold so uncorroborated single signals cannot accumulate to an irreversible ban
             if (ban_threshold > 0 && projectedScore >= ban_threshold) {
                 decision.effective_score_delta = (current_total_score + 1 < ban_threshold)
@@ -406,6 +402,18 @@ CorrelationDecision EvidenceCorrelator::Evaluate(
             }
         }
     } else {
+        decision.eligible_for_match_restriction =
+            (ev.type == DetectionType::ENVIRONMENT_TAMPERING) ||
+            (ev.type == DetectionType::DMA_PCIE_LEECH_DEVICE) ||
+            (projectedScore >= (ban_threshold / 2) && ban_threshold > 0);
+
+        decision.eligible_for_session_reject =
+            criticalOrAbove ||
+            (ev.type == DetectionType::ANTI_DEBUG_TRACER) ||
+            (ev.type == DetectionType::SELF_INTEGRITY_VIOLATION) ||
+            scoreReached;
+
+        decision.eligible_for_shadow = scoreReached || fatalSeverity || criticalOrAbove;
         decision.eligible_for_permanent_ban = scoreReached || fatalSeverity;
     }
 

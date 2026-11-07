@@ -448,7 +448,8 @@ std::vector<core::DetectionEvent> Unhooker::AuditSystemHooks() {
             ev.component = "Unhooker::SymbolInterposition";
             ev.details = std::string("Libc routine '") + fn + "' is interposed by " +
                          (mod.empty() ? std::string("anonymous memory") : BaseNameOf(mod));
-            ev.timestamp = static_cast<uint64_t>(std::time(nullptr));
+            ev.timestamp = core::DetectionEvent::NowMonotonicMs();
+            ev.timestamp_utc_ms = core::DetectionEvent::NowUtcMs();
             ev.threat_score = mod.empty() ? 90 : 60;
             events.push_back(ev);
         }
@@ -506,7 +507,8 @@ std::vector<core::DetectionEvent> Unhooker::AuditSystemHooks() {
         core::DetectionEvent ev;
         ev.type = core::DetectionType::INLINE_HOOK_DETECTED;
         ev.component = "Unhooker::InlineInterceptor";
-        ev.timestamp = static_cast<uint64_t>(std::time(nullptr));
+        ev.timestamp = core::DetectionEvent::NowMonotonicMs();
+        ev.timestamp_utc_ms = core::DetectionEvent::NowUtcMs();
         if (!disk.valid || intoExternalModule) {
             // unconfirmed (no on-disk reference) or a detour into another installed module
             ev.severity = core::Severity::MEDIUM;
@@ -576,7 +578,8 @@ std::optional<core::DetectionEvent> Unhooker::InspectTableEntry(
                 ss << table_type << " slot for '" << symbol_name << "' [" << Hex(slot_address)
                    << "] redirects to non-executable region " << Hex(resolved_target);
                 ev.details = ss.str();
-                ev.timestamp = static_cast<uint64_t>(std::time(nullptr));
+                ev.timestamp = core::DetectionEvent::NowMonotonicMs();
+                ev.timestamp_utc_ms = core::DetectionEvent::NowUtcMs();
                 ev.threat_score = 95;
                 return ev;
             }
@@ -589,7 +592,8 @@ std::optional<core::DetectionEvent> Unhooker::InspectTableEntry(
                 ss << table_type << " slot for '" << symbol_name << "' [" << Hex(slot_address)
                    << "] hijacked to unbacked anonymous executable memory " << Hex(resolved_target);
                 ev.details = ss.str();
-                ev.timestamp = static_cast<uint64_t>(std::time(nullptr));
+                ev.timestamp = core::DetectionEvent::NowMonotonicMs();
+                ev.timestamp_utc_ms = core::DetectionEvent::NowUtcMs();
                 ev.threat_score = 95;
                 return ev;
             }
@@ -605,7 +609,8 @@ std::optional<core::DetectionEvent> Unhooker::InspectTableEntry(
     ss << table_type << " slot for '" << symbol_name << "' [" << Hex(slot_address)
        << "] points to unmapped address " << Hex(resolved_target);
     ev.details = ss.str();
-    ev.timestamp = static_cast<uint64_t>(std::time(nullptr));
+    ev.timestamp = core::DetectionEvent::NowMonotonicMs();
+    ev.timestamp_utc_ms = core::DetectionEvent::NowUtcMs();
     ev.threat_score = 80;
     return ev;
 }

@@ -86,6 +86,52 @@ int main() {
 }
 ```
 
+### 2.3 Production Configuration Validation
+To prevent silent runtime deployment misconfigurations (such as unconfigured backend endpoints or missing verification keys), validate the configuration before calling `Init`:
+```cpp
+char err_msg[256];
+if (!NoEscape_ValidateConfig(&config, err_msg, sizeof(err_msg))) {
+    std::cerr << "Configuration Validation Failed: " << err_msg << std::endl;
+    return 1;
+}
+```
+
+### 2.4 Session & Match Lifecycle Management
+To guarantee forensic isolation and prevent evidence, kinematics histories, or threat scores from a prior match or user session from affecting a new match:
+```cpp
+// When a player authenticates / enters lobby:
+noescape::sdk::Client::BeginSession("sess_usr_98234_alpha");
+
+// When entering a competitive match / round:
+noescape::sdk::Client::BeginMatch("match_ranked_eu_5521");
+
+// During the match:
+// Input, kinematics, and memory audits run normally...
+
+// When the match concludes:
+noescape::sdk::Client::EndMatch();
+
+// When the player logs out / session closes:
+noescape::sdk::Client::EndSession();
+```
+Calling `BeginMatch` resets active threat scores, clears recent input deltas, and isolates the Evidence Correlator timeline to the new match ID.
+
+### 2.5 Querying Enforcement Status
+In addition to `IsBanned()`, the SDK exposes real-time queries for all centralized enforcement states:
+```cpp
+// Check if player has been banned (local HWID ban or backend attestation ban)
+bool banned = noescape::sdk::Client::IsBanned();
+
+// Check if player has been flagged for shadow-ban (subtle telemetry isolation)
+bool shadow = noescape::sdk::Client::IsShadowFlagged();
+
+// Check if player is restricted from competitive matchmaking
+bool restricted = noescape::sdk::Client::IsMatchRestricted();
+
+// Check if server session was rejected
+bool rejected = noescape::sdk::Client::IsSessionRejected();
+```
+
 ---
 
 ## 3. High-Frequency Telemetry Ingestion

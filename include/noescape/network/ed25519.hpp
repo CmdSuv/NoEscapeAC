@@ -21,4 +21,9 @@ bool Verify(const uint8_t* public_key,
             const uint8_t* message, size_t message_len,
             const uint8_t* signature);
 
+// Pure software RFC 8032 verification without external provider
+bool VerifySoftware(const uint8_t* public_key,
+                    const uint8_t* message, size_t message_len,
+                    const uint8_t* signature);
+
 } // namespace noescape::network::ed25519

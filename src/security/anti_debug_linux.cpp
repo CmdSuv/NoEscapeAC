@@ -222,7 +222,8 @@ std::vector<core::DetectionEvent> AntiDebug::PerformAudit(const std::vector<std:
         ev.severity = core::Severity::CRITICAL;
         ev.component = "AntiDebug::LinuxTracer";
         ev.details = "Active TracerPid detected attached to process: PID " + std::to_string(tracerPid);
-        ev.timestamp = static_cast<uint64_t>(time(nullptr));
+        ev.timestamp = core::DetectionEvent::NowMonotonicMs();
+        ev.timestamp_utc_ms = core::DetectionEvent::NowUtcMs();
         ev.threat_score = 60;
         events.push_back(ev);
     }
@@ -233,7 +234,8 @@ std::vector<core::DetectionEvent> AntiDebug::PerformAudit(const std::vector<std:
         ev.severity = core::Severity::CRITICAL;
         ev.component = "AntiDebug::HardwareRegisters";
         ev.details = "Hardware breakpoint detected in CPU debug registers (DR0-DR3)";
-        ev.timestamp = static_cast<uint64_t>(time(nullptr));
+        ev.timestamp = core::DetectionEvent::NowMonotonicMs();
+        ev.timestamp_utc_ms = core::DetectionEvent::NowUtcMs();
         ev.threat_score = 90;
         events.push_back(ev);
     }
@@ -245,7 +247,8 @@ std::vector<core::DetectionEvent> AntiDebug::PerformAudit(const std::vector<std:
         ev.severity = core::Severity::HIGH;
         ev.component = "AntiDebug::ProcessScanner";
         ev.details = "Debugger or analysis tool process running in background: " + detectedTool;
-        ev.timestamp = static_cast<uint64_t>(time(nullptr));
+        ev.timestamp = core::DetectionEvent::NowMonotonicMs();
+        ev.timestamp_utc_ms = core::DetectionEvent::NowUtcMs();
         ev.threat_score = 20;
         events.push_back(ev);
     }

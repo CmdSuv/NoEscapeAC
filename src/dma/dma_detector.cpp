@@ -532,7 +532,8 @@ std::vector<core::DetectionEvent> DmaDetector::PerformAudit() {
         ev.severity = core::Severity::CRITICAL;
         ev.component = "DmaDetector::LeechCoreDriver";
         ev.details = "Active Direct Memory Access (DMA) LeechCore device handle identified";
-        ev.timestamp = static_cast<uint64_t>(std::time(nullptr));
+        ev.timestamp = core::DetectionEvent::NowMonotonicMs();
+        ev.timestamp_utc_ms = core::DetectionEvent::NowUtcMs();
         ev.threat_score = 90;
         ev.confidence = core::ConfidenceLevel::CONFIRMED;
         events.push_back(ev);
@@ -552,7 +553,8 @@ std::vector<core::DetectionEvent> DmaDetector::PerformAudit() {
            << " jitter_stddev=" << profile.jitter_stddev
            << " spikes=" << profile.spike_count;
         ev.details = ss.str();
-        ev.timestamp = static_cast<uint64_t>(std::time(nullptr));
+        ev.timestamp = core::DetectionEvent::NowMonotonicMs();
+        ev.timestamp_utc_ms = core::DetectionEvent::NowUtcMs();
         ev.threat_score = 30;
         ev.confidence = core::ConfidenceLevel::LOW;
         events.push_back(ev);
@@ -571,7 +573,8 @@ std::vector<core::DetectionEvent> DmaDetector::PerformAudit() {
                          ConfidenceLevelToString(hw_conf) + ", IOMMU=" +
                          (iommu.dma_remapping_enabled ? "ON" : "OFF") + "): " + dev.description +
                          " [VID: " + dev.vendor_id + " PID: " + dev.device_id + "]";
-            ev.timestamp = static_cast<uint64_t>(std::time(nullptr));
+            ev.timestamp = core::DetectionEvent::NowMonotonicMs();
+            ev.timestamp_utc_ms = core::DetectionEvent::NowUtcMs();
             if (hw_conf == HardwareConfidenceLevel::CONFIRMED_TOOL_ARTIFACT ||
                 hw_conf == HardwareConfidenceLevel::KNOWN_CHEAT_HARDWARE) {
                 ev.severity = core::Severity::HIGH;

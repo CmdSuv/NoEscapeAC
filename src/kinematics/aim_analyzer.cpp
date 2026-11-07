@@ -148,7 +148,8 @@ std::optional<core::DetectionEvent> AimAnalyzer::CheckInstantSnap() {
            << (dt1 * 1000.0f) << " ms (velocity=" << velocity1 << " deg/s, dead stop delta="
            << dist2 << " deg, jerk=" << jerk << " deg/s^3)";
         ev.details = ss.str();
-        ev.timestamp = static_cast<uint64_t>(std::time(nullptr));
+        ev.timestamp = core::DetectionEvent::NowMonotonicMs();
+        ev.timestamp_utc_ms = core::DetectionEvent::NowUtcMs();
         ev.threat_score = 60;
         return ev;
     }
@@ -216,7 +217,8 @@ std::optional<core::DetectionEvent> AimAnalyzer::CheckPerfectLinearity() {
            << " deg, orthogonal_variance=" << varPerp
            << ", max_deviation=" << maxPerp << " deg";
         ev.details = ss.str();
-        ev.timestamp = static_cast<uint64_t>(std::time(nullptr));
+        ev.timestamp = core::DetectionEvent::NowMonotonicMs();
+        ev.timestamp_utc_ms = core::DetectionEvent::NowUtcMs();
         ev.threat_score = 60;
         return ev;
     }
@@ -279,7 +281,8 @@ std::optional<core::DetectionEvent> AimAnalyzer::CheckArtificialSmoothing() {
            << " deg/s, relative_stddev=" << (relStdDev * 100.0) << "% over "
            << totalMovement << " deg";
         ev.details = ss.str();
-        ev.timestamp = static_cast<uint64_t>(std::time(nullptr));
+        ev.timestamp = core::DetectionEvent::NowMonotonicMs();
+        ev.timestamp_utc_ms = core::DetectionEvent::NowUtcMs();
         ev.threat_score = 80;
         return ev;
     }
@@ -448,7 +451,8 @@ std::optional<core::DetectionEvent> AimAnalyzer::CheckSyntheticInputTiming() {
         ev.type = core::DetectionType::KINEMATICS_SYNTHETIC_INPUT;
         ev.severity = core::Severity::MEDIUM;
         ev.component = "Kinematics::SyntheticInputDetector";
-        ev.timestamp = static_cast<uint64_t>(std::time(nullptr));
+        ev.timestamp = core::DetectionEvent::NowMonotonicMs();
+        ev.timestamp_utc_ms = core::DetectionEvent::NowUtcMs();
         ev.threat_score = 45;
         ev.confidence = core::ConfidenceLevel::MEDIUM;
 
@@ -511,7 +515,8 @@ std::optional<core::DetectionEvent> AimAnalyzer::CheckTriggerbotTiming() {
         ev.type = core::DetectionType::KINEMATICS_TRIGGERBOT;
         ev.severity = core::Severity::HIGH;
         ev.component = "Kinematics::TriggerbotAnalyzer";
-        ev.timestamp = static_cast<uint64_t>(std::time(nullptr));
+        ev.timestamp = core::DetectionEvent::NowMonotonicMs();
+        ev.timestamp_utc_ms = core::DetectionEvent::NowUtcMs();
         ev.threat_score = 55;
         ev.confidence = core::ConfidenceLevel::MEDIUM;
 
@@ -577,7 +582,8 @@ std::optional<core::DetectionEvent> AimAnalyzer::CheckRecoilAutomation() {
         ev.type = core::DetectionType::KINEMATICS_RECOIL_AUTOMATION;
         ev.severity = core::Severity::MEDIUM;
         ev.component = "Kinematics::RecoilAnalyzer";
-        ev.timestamp = static_cast<uint64_t>(std::time(nullptr));
+        ev.timestamp = core::DetectionEvent::NowMonotonicMs();
+        ev.timestamp_utc_ms = core::DetectionEvent::NowUtcMs();
         ev.threat_score = 50;
         ev.confidence = core::ConfidenceLevel::MEDIUM;
 

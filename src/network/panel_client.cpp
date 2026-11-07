@@ -359,12 +359,9 @@ bool PanelClient::TlsSupported() {
 }
 
 std::string PanelClient::RandomNonce() {
-    // 128 random bits; random_device is backed by getrandom()/BCryptGenRandom on supported toolchains
-    std::random_device rd;
     uint8_t buf[16];
-    for (size_t i = 0; i < sizeof(buf); i += 4) {
-        uint32_t v = rd();
-        std::memcpy(buf + i, &v, 4);
+    if (!CryptoUtil::GenerateRandomBytes(buf, sizeof(buf))) {
+        throw std::runtime_error("PanelClient::RandomNonce: OS CSPRNG entropy generation failed");
     }
     return CryptoUtil::ToHex(buf, sizeof(buf));
 }
@@ -696,10 +693,12 @@ bool PanelClient::SendAttestation(const AttestChallenge& challenge, const std::s
 
 bool PanelClient::SendBanReport(const core::DetectionEvent& event, uint32_t current_threat_score) {
     uint64_t now = static_cast<uint64_t>(std::time(nullptr));
+    uint64_t eventUtcMs = (event.timestamp_utc_ms != 0) ? event.timestamp_utc_ms : core::GetUtcTimeMs();
     std::ostringstream json;
     json << "{"
          << "\"hwid\":\"" << JsonEscape(hwid_) << "\","
          << "\"timestamp\":" << now << ","
+         << "\"event_timestamp_ms\":" << eventUtcMs << ","
          << "\"nonce\":\"" << RandomNonce() << "\","
          << "\"key_id\":\"" << JsonEscape(key_id_) << "\","
          << "\"threat_score\":" << current_threat_score << ","

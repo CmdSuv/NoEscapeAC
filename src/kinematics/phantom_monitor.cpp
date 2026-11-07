@@ -32,6 +32,10 @@ void PhantomMonitor::Clear() {
     total_detections_ = 0;
 }
 
+void PhantomMonitor::Reset() {
+    Clear();
+}
+
 size_t PhantomMonitor::Count() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return phantoms_.size();
@@ -101,7 +105,8 @@ std::optional<core::DetectionEvent> PhantomMonitor::PushView(float cx, float cy,
        << (mode_ == DecoyMode::SERVER_INTEGRATED ? "SERVER_INTEGRATED" : "LOCAL_ANALYTICAL")
        << ", locks=" << total_detections_ << ")";
     ev.details = ss.str();
-    ev.timestamp = static_cast<uint64_t>(std::time(nullptr));
+    ev.timestamp = core::DetectionEvent::NowMonotonicMs();
+    ev.timestamp_utc_ms = core::DetectionEvent::NowUtcMs();
     ev.threat_score = (mode_ == DecoyMode::SERVER_INTEGRATED && total_detections_ >= 2) ? 85 : 60;
     ev.confidence = (mode_ == DecoyMode::SERVER_INTEGRATED && total_detections_ >= 2)
                         ? core::ConfidenceLevel::CONFIRMED

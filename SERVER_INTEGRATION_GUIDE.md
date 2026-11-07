@@ -19,6 +19,12 @@ If the server never replicates enemy coordinates to an observer's machine while 
 
 NoEscapeAC provides `ServerEspFilter`, an optimized, high-throughput C++20 server component implementing 3D AABB raycast occlusion culling, acoustic cue spatialization, and authoritative movement validation.
 
+> [!IMPORTANT]
+> **Architectural Scope & Integration Notice:**
+> `ServerEspFilter` is a **server-side helper library and algorithmic evaluation engine**, not an automated packet-sniffing or kernel networking interceptor. It does **not** hook low-level sockets automatically. Game developers must explicitly instantiate `ServerEspFilter` in their game server process and invoke `EvaluateEntityReplication` in their replication / entity serialization tick.
+>
+> If a server evaluates replication before registering any static `OccluderBox` geometry or without configuring an `IAuthoritativeVisibilityAdapter`, `ReplicationDecision::occlusion_unconfigured` is explicitly set to `true`. This alerts the server pipeline that occlusion data is missing, preventing silent assumptions of visibility.
+
 ---
 
 ## 2. 3D AABB Raycast Slab Method Architecture
@@ -122,6 +128,49 @@ void NetworkReplicationTick(const Player& observerPlayer, const std::vector<Play
     }
 }
 ```
+
+### 3.3 Authoritative Engine Collision Adapter (`IAuthoritativeVisibilityAdapter`)
+
+For production game servers featuring complex dynamic geometry (destructible walls, procedural meshes, dynamic doors) or existing physics scene queries (PhysX, Havok, Unreal Chaos, Unity PhysX), implement the `IAuthoritativeVisibilityAdapter` contract:
+
+```cpp
+#include "noescape/server/server_integration.hpp"
+
+// Example: Unreal Engine 5 Authoritative Visibility Adapter
+class UnrealVisibilityAdapter : public noescape::server::IAuthoritativeVisibilityAdapter {
+public:
+    explicit UnrealVisibilityAdapter(UWorld* world) : world_(world) {}
+
+    bool LineOfSightBlocked(
+        float x0, float y0, float z0,
+        float x1, float y1, float z1,
+        bool check_penetrable) const override
+    {
+        if (!world_) return false;
+
+        FVector start(x0, y0, z0);
+        FVector end(x1, y1, z1);
+        FHitResult hit;
+        FCollisionQueryParams queryParams(SCENE_QUERY_STAT(AntiCheatOcclusion), false);
+
+        ECollisionChannel channel = check_penetrable 
+            ? ECC_GameTraceChannel_BulletPenetrable 
+            : ECC_Visibility;
+
+        bool hasHit = world_->LineTraceSingleByChannel(hit, start, end, channel, queryParams);
+        return hasHit && hit.bBlockingHit;
+    }
+
+private:
+    UWorld* world_{nullptr};
+};
+
+// Register adapter on server initialization:
+auto adapter = std::make_shared<UnrealVisibilityAdapter>(GetWorld());
+espFilter.SetVisibilityAdapter(adapter);
+```
+
+When an adapter is registered, `ServerEspFilter` delegates raycast line-of-sight checks to the adapter in addition to static bounding boxes, and `decision.occlusion_unconfigured` remains `false`.
 
 ---
 

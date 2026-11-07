@@ -235,7 +235,7 @@ BlackboxRecord BlackboxDumper::CaptureSnapshot(
     uint32_t violation_type
 ) {
     BlackboxRecord rec;
-    rec.timestamp = static_cast<uint64_t>(std::time(nullptr));
+    rec.timestamp = GetUtcTimeMs();
     rec.hwid = network::CryptoUtil::GetMachineHWID();
     rec.violating_component = component;
     rec.violation_reason = RedactSensitivePaths(reason);
@@ -288,9 +288,11 @@ std::vector<uint8_t> BlackboxDumper::SerializeAndEncrypt(
 
     // 2. Generate 12-byte CSPRNG nonce and 16-byte random salt
     std::vector<uint8_t> nonce(12, 0);
-    network::CryptoUtil::GenerateRandomBytes(nonce.data(), nonce.size());
     std::vector<uint8_t> salt(16, 0);
-    network::CryptoUtil::GenerateRandomBytes(salt.data(), salt.size());
+    if (!network::CryptoUtil::GenerateRandomBytes(nonce.data(), nonce.size()) ||
+        !network::CryptoUtil::GenerateRandomBytes(salt.data(), salt.size())) {
+        return {};
+    }
 
     // 3. Derive 32-byte key via HKDF-SHA256
     std::string saltStr(reinterpret_cast<const char*>(salt.data()), salt.size());

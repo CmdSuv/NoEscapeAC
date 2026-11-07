@@ -510,7 +510,8 @@ std::vector<core::DetectionEvent> OverlayDetector::DetectSuspiciousWindows() {
             ev.severity = core::Severity::HIGH;
             ev.threat_score = 75;
             ev.component = "OverlayDetector::WindowScanner";
-            ev.timestamp = static_cast<uint64_t>(std::time(nullptr));
+            ev.timestamp = core::DetectionEvent::NowMonotonicMs();
+            ev.timestamp_utc_ms = core::DetectionEvent::NowUtcMs();
 
             std::ostringstream ss;
             ss << "Suspicious transparent overlay window detected: '" << win.title 
@@ -581,7 +582,8 @@ std::optional<core::DetectionEvent> OverlayDetector::InspectRenderingPointer(con
         ev.severity = core::Severity::CRITICAL;
         ev.threat_score = 100;
         ev.component = "OverlayDetector::SwapchainValidator";
-        ev.timestamp = static_cast<uint64_t>(std::time(nullptr));
+        ev.timestamp = core::DetectionEvent::NowMonotonicMs();
+        ev.timestamp_utc_ms = core::DetectionEvent::NowUtcMs();
 
         std::ostringstream ss;
         ss << "Swapchain function pointer '" << (routine_name ? routine_name : "VTableEntry")
@@ -598,7 +600,8 @@ std::optional<core::DetectionEvent> OverlayDetector::InspectRenderingPointer(con
         ev.severity = core::Severity::CRITICAL;
         ev.threat_score = 95;
         ev.component = "OverlayDetector::RenderingIntegrity";
-        ev.timestamp = static_cast<uint64_t>(std::time(nullptr));
+        ev.timestamp = core::DetectionEvent::NowMonotonicMs();
+        ev.timestamp_utc_ms = core::DetectionEvent::NowUtcMs();
 
         std::ostringstream ss;
         ss << "Inline hook detected on rendering swapchain routine '" << routine_name 

@@ -297,7 +297,8 @@ std::optional<core::DetectionEvent> IntegrityChecker::VerifyIntegrity() {
         ev.severity = core::Severity::CRITICAL;
         ev.component = "IntegrityChecker::DiskImage";
         ev.details = "Anti-cheat code in memory differs from its on-disk image (patched before initialisation)";
-        ev.timestamp = static_cast<uint64_t>(time(nullptr));
+        ev.timestamp = core::DetectionEvent::NowMonotonicMs();
+        ev.timestamp_utc_ms = core::DetectionEvent::NowUtcMs();
         ev.threat_score = 90;
         return ev;
     }
@@ -310,7 +311,8 @@ std::optional<core::DetectionEvent> IntegrityChecker::VerifyIntegrity() {
         ev.component = "IntegrityChecker::TextSection";
         ev.details = "Executable text segment hash mismatch. Expected: " + 
                      baseline_hash_.substr(0, 16) + "... Actual: " + currentHash.substr(0, 16) + "...";
-        ev.timestamp = static_cast<uint64_t>(time(nullptr));
+        ev.timestamp = core::DetectionEvent::NowMonotonicMs();
+        ev.timestamp_utc_ms = core::DetectionEvent::NowUtcMs();
         ev.threat_score = 95;
         return ev;
     }

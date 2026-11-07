@@ -7,6 +7,7 @@
 #include <mutex>
 #include <atomic>
 #include <string>
+#include <cstring>
 #include <cmath>
 
 namespace {
@@ -56,16 +57,25 @@ NoEscapeConfig NoEscape_GetProfileConfig(NoEscapeProfile profile) {
     }
 
     auto coreCfg = noescape::core::EngineConfig::FromProfile(coreProfile);
-    static const std::string s_panel_url = "http://127.0.0.1:8080/api/ac";
-    static const std::string s_secret_key = "NoEscape_Secret_Key_v2.0";
-    static const std::string s_key_id = "default-v1";
     static const std::string s_client_version = "7.0.13";
 
-    cfg.panel_url = coreCfg.panelUrl.empty() ? nullptr : s_panel_url.c_str();
-    cfg.secret_key = coreCfg.secretKey.empty() ? nullptr : s_secret_key.c_str();
-    cfg.key_id = s_key_id.c_str();
-    cfg.client_build_version = s_client_version.c_str();
+    cfg.panel_url = nullptr;
+    cfg.secret_key = nullptr;
+    cfg.key_id = nullptr;
     cfg.server_public_key = nullptr;
+    cfg.client_build_version = s_client_version.c_str();
+
+    if (profile == NOESCAPE_PROFILE_TESTING) {
+        static const std::string s_test_key = "NoEscape_Test_Key";
+        static const std::string s_test_key_id = "test-key-1";
+        static const std::string s_test_pubkey = "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a";
+        static const std::string s_test_panel = "http://127.0.0.1:8080/api/ac";
+        cfg.secret_key = s_test_key.c_str();
+        cfg.key_id = s_test_key_id.c_str();
+        cfg.server_public_key = s_test_pubkey.c_str();
+        cfg.panel_url = s_test_panel.c_str();
+    }
+
     cfg.blackbox_dump_dir = coreCfg.blackboxDumpDirectory.empty() ? nullptr : "/tmp";
     cfg.ban_threshold = coreCfg.banScoreThreshold;
     cfg.enforce_ban = coreCfg.enforceBanOnViolation;
@@ -94,8 +104,62 @@ NoEscapeConfig NoEscape_GetDefaultConfig(void) {
     return NoEscape_GetProfileConfig(NOESCAPE_PROFILE_PRODUCTION);
 }
 
+int NoEscape_ValidateConfig(const NoEscapeConfig* config, char* error_buf, size_t error_buf_size) {
+    auto set_error = [&](const std::string& err) {
+        if (error_buf && error_buf_size > 0) {
+            std::strncpy(error_buf, err.c_str(), error_buf_size - 1);
+            error_buf[error_buf_size - 1] = '\0';
+        }
+    };
+
+    if (!config) {
+        set_error("Configuration pointer is NULL");
+        return -1;
+    }
+
+    if (config->struct_size < sizeof(NoEscapeConfig)) {
+        set_error("Configuration struct_size mismatch: outdated SDK header");
+        return -2;
+    }
+
+    // Check if configuration represents a production or enforcement environment
+    bool is_enforcing = (config->enforcement_mode == static_cast<int>(noescape::core::EnforcementMode::ENFORCE) ||
+                         config->enforcement_mode == static_cast<int>(noescape::core::EnforcementMode::SERVER_SESSION_REJECT) ||
+                         config->enforcement_mode == static_cast<int>(noescape::core::EnforcementMode::SHADOW) ||
+                         config->enable_heartbeat);
+
+    if (is_enforcing) {
+        if (!config->panel_url || config->panel_url[0] == '\0') {
+            set_error("Production configuration missing required backend panel_url");
+            return -3;
+        }
+        if (!config->secret_key || config->secret_key[0] == '\0') {
+            set_error("Production configuration missing required deployment secret_key");
+            return -4;
+        }
+        if (!config->server_public_key || std::strlen(config->server_public_key) != 64) {
+            set_error("Production configuration missing valid 64-hex-char Ed25519 server_public_key");
+            return -5;
+        }
+    }
+
+    return 0;
+}
+
 int NoEscape_Init(const NoEscapeConfig* config) {
     std::lock_guard<std::mutex> lock(g_lifecycle_mutex);
+
+    const char* testEnv = std::getenv("NOESCAPE_TEST_MODE");
+    bool is_test_mode = (testEnv && std::strcmp(testEnv, "1") == 0);
+
+    if (!is_test_mode) {
+        char errBuf[256]{};
+        if (NoEscape_ValidateConfig(config, errBuf, sizeof(errBuf)) != 0) {
+            noescape::core::Logger::Instance().Error(
+                std::string("NoEscape_Init rejected: ") + errBuf);
+            return -1;
+        }
+    }
 
     if (g_engine) {
         SetActiveEngine(nullptr);
@@ -280,6 +344,24 @@ bool NoEscape_IsBanned(void) {
     return engine->IsBanned();
 }
 
+bool NoEscape_IsShadowFlagged(void) {
+    auto engine = ActiveEngine();
+    if (!engine) return false;
+    return engine->IsShadowFlagged();
+}
+
+bool NoEscape_IsMatchRestricted(void) {
+    auto engine = ActiveEngine();
+    if (!engine) return false;
+    return engine->IsMatchRestricted();
+}
+
+bool NoEscape_IsSessionRejected(void) {
+    auto engine = ActiveEngine();
+    if (!engine) return false;
+    return engine->IsSessionRejected();
+}
+
 void NoEscape_SetPanelPin(const char* spki_sha256_hex) {
     std::lock_guard<std::mutex> l(g_preinit_mutex);
     g_panel_pin = spki_sha256_hex ? spki_sha256_hex : "";
@@ -311,6 +393,30 @@ void NoEscape_PushView(float x, float y, float z, float pitch, float yaw, uint64
 
 void NoEscape_SetViewport(int x, int y, int width, int height) {
     noescape::overlay::OverlayDetector::Instance().SetGameViewport(x, y, width, height);
+}
+
+void NoEscape_BeginSession(const char* session_id) {
+    if (auto engine = ActiveEngine()) {
+        engine->BeginSession(session_id ? session_id : "");
+    }
+}
+
+void NoEscape_EndSession(void) {
+    if (auto engine = ActiveEngine()) {
+        engine->EndSession();
+    }
+}
+
+void NoEscape_BeginMatch(const char* match_id) {
+    if (auto engine = ActiveEngine()) {
+        engine->BeginMatch(match_id ? match_id : "");
+    }
+}
+
+void NoEscape_EndMatch(void) {
+    if (auto engine = ActiveEngine()) {
+        engine->EndMatch();
+    }
 }
 
 } // extern "C"

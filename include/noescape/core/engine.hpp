@@ -7,6 +7,7 @@
 #include <mutex>
 #include <thread>
 #include <set>
+#include <deque>
 #include <string>
 #include "noescape/core/types.hpp"
 #include "noescape/core/evidence_correlator.hpp"
@@ -73,6 +74,18 @@ public:
     // Audit cycle performance telemetry (microseconds)
     uint64_t GetLastAuditDurationUs() const { return last_audit_duration_us_.load(std::memory_order_relaxed); }
 
+    // Match and Session lifecycle (Release 1.4)
+    void BeginSession(const std::string& session_id = "");
+    void EndSession();
+    void BeginMatch(const std::string& match_id = "");
+    void EndMatch();
+
+    // Capacity configuration & lifecycle cleanup for bounded state
+    void SetMaxHistoryCapacity(size_t max_capacity);
+    size_t GetMaxHistoryCapacity() const;
+    size_t GetScoredKeysCount() const { std::lock_guard<std::mutex> l(history_mutex_); return scored_keys_.size(); }
+    void PruneHistory(uint64_t max_age_ms = 0);
+
     // Callbacks and configuration
     void SetBanCallback(BanCallback cb) { std::lock_guard<std::mutex> l(history_mutex_); ban_callback_ = std::move(cb); }
     void SetViolationCallback(ViolationCallback cb) { std::lock_guard<std::mutex> l(history_mutex_); violation_callback_ = std::move(cb); }
@@ -123,7 +136,9 @@ private:
     std::atomic<uint32_t> audit_cycle_counter_{0};
     std::atomic<uint64_t> last_dma_audit_ms_{0};
     std::atomic<uint64_t> last_audit_duration_us_{0};
+    size_t max_history_capacity_{512};
     std::set<std::string> scored_keys_;
+    std::deque<std::string> scored_keys_order_;
     std::mutex audit_mutex_;
     std::atomic<std::thread::id> background_thread_id_{};
     std::atomic<uint64_t> last_heavy_scan_ms_{0};
@@ -138,7 +153,7 @@ private:
     mutable std::mutex history_mutex_;
     mutable std::mutex input_mutex_;
     mutable std::mutex heartbeat_mutex_;
-    std::vector<DetectionEvent> history_;
+    std::deque<DetectionEvent> history_;
     std::vector<uint8_t> last_blackbox_payload_;
     std::vector<memory::CheatSignature> default_signatures_;
     BanCallback ban_callback_;

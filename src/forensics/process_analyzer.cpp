@@ -257,7 +257,8 @@ std::optional<core::DetectionEvent> ProcessAnalyzer::InspectExternalHandle(
     ss << "External process PID " << owner_pid << " (" << owner_name << " -> " << owner_path
        << ") holds invasive handle to game process (GrantedAccess=0x" << std::hex << granted_access_mask << ")";
     ev.details = ss.str();
-    ev.timestamp = static_cast<uint64_t>(std::time(nullptr));
+    ev.timestamp = core::DetectionEvent::NowMonotonicMs();
+    ev.timestamp_utc_ms = core::DetectionEvent::NowUtcMs();
     ev.threat_score = hasWriteOrThread ? 95 : 80;
     return ev;
 }
@@ -421,7 +422,8 @@ std::vector<core::DetectionEvent> ProcessAnalyzer::AuditProcesses(
         ev.severity = core::Severity::MEDIUM;
         ev.component = "ProcessAnalyzer::EnvironmentAudit";
         ev.details = "Security anomaly / instrumentation: dynamic linker or debugger environment variable present (LD_PRELOAD / LD_AUDIT / ATTACH_DEBUGGER)";
-        ev.timestamp = static_cast<uint64_t>(std::time(nullptr));
+        ev.timestamp = core::DetectionEvent::NowMonotonicMs();
+        ev.timestamp_utc_ms = core::DetectionEvent::NowUtcMs();
         ev.threat_score = 35;
         events.push_back(ev);
     }
@@ -444,7 +446,8 @@ std::vector<core::DetectionEvent> ProcessAnalyzer::AuditProcesses(
                 ev.component = "ProcessAnalyzer::ProcessBlacklist";
                 ev.details = "Blacklisted process signature active: PID " + std::to_string(proc.pid) +
                              " (" + proc.name + " -> " + proc.path + ")";
-                ev.timestamp = static_cast<uint64_t>(std::time(nullptr));
+                ev.timestamp = core::DetectionEvent::NowMonotonicMs();
+                ev.timestamp_utc_ms = core::DetectionEvent::NowUtcMs();
                 ev.threat_score = 80;
                 events.push_back(ev);
                 break;
@@ -470,7 +473,8 @@ std::vector<core::DetectionEvent> ProcessAnalyzer::AuditProcesses(
                 ev.component = "ProcessAnalyzer::CmdlineInspection";
                 ev.details = "Suspicious commandline injection argument found in PID " +
                              std::to_string(proc.pid) + ": matched '" + cmdBl + "'";
-                ev.timestamp = static_cast<uint64_t>(std::time(nullptr));
+                ev.timestamp = core::DetectionEvent::NowMonotonicMs();
+                ev.timestamp_utc_ms = core::DetectionEvent::NowUtcMs();
                 ev.threat_score = 40;
                 events.push_back(ev);
                 break;
@@ -495,7 +499,8 @@ std::vector<core::DetectionEvent> ProcessAnalyzer::AuditProcesses(
             ev.component = "ProcessAnalyzer::AntiForensics";
             ev.details = "Process executing unlinked memory-ghosted/deleted executable: PID " +
                          std::to_string(proc.pid) + " (" + proc.path + ")";
-            ev.timestamp = static_cast<uint64_t>(std::time(nullptr));
+            ev.timestamp = core::DetectionEvent::NowMonotonicMs();
+            ev.timestamp_utc_ms = core::DetectionEvent::NowUtcMs();
             ev.threat_score = 50;
             events.push_back(ev);
         }
@@ -512,7 +517,8 @@ std::vector<core::DetectionEvent> ProcessAnalyzer::AuditProcesses(
                 ev.component = "ProcessAnalyzer::EnvironmentInjection";
                 ev.details = "Process spawned with dangerous injection environment (LD_PRELOAD): PID " +
                              std::to_string(proc.pid) + " (" + proc.name + ")";
-                ev.timestamp = static_cast<uint64_t>(std::time(nullptr));
+                ev.timestamp = core::DetectionEvent::NowMonotonicMs();
+                ev.timestamp_utc_ms = core::DetectionEvent::NowUtcMs();
                 ev.threat_score = 70;
                 events.push_back(ev);
             }
@@ -528,7 +534,8 @@ std::vector<core::DetectionEvent> ProcessAnalyzer::AuditProcesses(
         ev.component = "ProcessAnalyzer::ExternalHandleAudit";
         ev.details = "External process holding open handle to protected game memory (/proc/self/mem): PID " +
                      std::to_string(reader.pid) + " (" + reader.name + " -> " + reader.path + ")";
-        ev.timestamp = static_cast<uint64_t>(std::time(nullptr));
+        ev.timestamp = core::DetectionEvent::NowMonotonicMs();
+        ev.timestamp_utc_ms = core::DetectionEvent::NowUtcMs();
         ev.threat_score = 95;
         events.push_back(ev);
     }

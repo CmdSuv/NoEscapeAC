@@ -209,7 +209,7 @@ TEST(Crypto, Rfc8439ChaCha20Poly1305NegativeAndTamperTests) {
 }
 
 TEST(Crypto, PureEd25519DirectSoftwareVerification) {
-    // Calling ed25519 namespace directly to guarantee software curve path passes
+    // Calling ed25519 namespace directly to guarantee pure software curve path passes
     std::string priv1Hex = "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60";
     auto priv1 = CryptoUtil::FromHex(priv1Hex);
     uint8_t pubKey[32]{};
@@ -221,12 +221,17 @@ TEST(Crypto, PureEd25519DirectSoftwareVerification) {
     ASSERT_TRUE(noescape::network::ed25519::Sign(priv1.data(), 32,
         reinterpret_cast<const uint8_t*>(msg.data()), msg.size(), sig));
 
+    // Both audited provider (Verify) and pure software curve math (VerifySoftware) must pass
     ASSERT_TRUE(noescape::network::ed25519::Verify(pubKey,
         reinterpret_cast<const uint8_t*>(msg.data()), msg.size(), sig));
+    ASSERT_TRUE(noescape::network::ed25519::VerifySoftware(pubKey,
+        reinterpret_cast<const uint8_t*>(msg.data()), msg.size(), sig));
 
-    // Direct negative test: altered message fails
+    // Direct negative test: altered message fails on both paths
     std::string altered = "tampered";
     ASSERT_FALSE(noescape::network::ed25519::Verify(pubKey,
+        reinterpret_cast<const uint8_t*>(altered.data()), altered.size(), sig));
+    ASSERT_FALSE(noescape::network::ed25519::VerifySoftware(pubKey,
         reinterpret_cast<const uint8_t*>(altered.data()), altered.size(), sig));
 }
 

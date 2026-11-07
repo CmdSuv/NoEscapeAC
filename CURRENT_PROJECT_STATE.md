@@ -13,7 +13,7 @@
 | Validation Vector | Status | Metrics / Details |
 |---|---|---|
 | **C++20 Compilation** | **VERIFIED GREEN** | Compiled with `-DNOESCAPE_WERROR=ON`, zero compiler warnings under GCC 16 / Clang / MSVC. |
-| **Unit & Integration Tests** | **157 / 157 PASSED (100%)** | Full test suite `noescape_tests` passes with 100% green status across all 157 unit and regression tests. |
+| **Unit & Integration Tests** | **171 / 171 PASSED (100%)** | Full test suite `noescape_tests` passes with 100% green status across all 171 unit and regression tests. |
 | **Scenario B Preload Verification** | **6 / 6 PASSED (100%)** | `tools/verify_preload.sh` runs cleanly with `dummy_game` and `LD_PRELOAD`. |
 | **Git Commit History Integrity** | **SANITIZED & CLEAN** | Strictly Omar Yiğitcan Mengü (`@CmdSuv`) & OnlyCosmos (`@OnlyCosmos`) attribution; zero AI artifacts. |
 | **Cross-Platform Compatibility** | **PARITY ACHIEVED** | Full functional parity between Windows x64 and Linux x86_64. |

@@ -7,6 +7,16 @@
 
 namespace noescape::server {
 
+void ServerEspFilter::SetVisibilityAdapter(std::shared_ptr<IAuthoritativeVisibilityAdapter> adapter) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    visibility_adapter_ = std::move(adapter);
+}
+
+std::shared_ptr<IAuthoritativeVisibilityAdapter> ServerEspFilter::GetVisibilityAdapter() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return visibility_adapter_;
+}
+
 void ServerEspFilter::AddOccluder(const OccluderBox& box) {
     std::lock_guard<std::mutex> lock(mutex_);
     OccluderBox normalized = box;
@@ -24,6 +34,11 @@ void ServerEspFilter::ClearOccluders() {
 size_t ServerEspFilter::GetOccluderCount() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return occluders_.size();
+}
+
+bool ServerEspFilter::HasOcclusionData() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return !occluders_.empty() || (visibility_adapter_ != nullptr);
 }
 
 bool ServerEspFilter::SegmentIntersectsAabb(
@@ -61,7 +76,7 @@ bool ServerEspFilter::IsLineOfSightOccluded(
     const ObserverState& observer,
     const TargetEntityState& target) const {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (occluders_.empty()) return false;
+    if (occluders_.empty() && !visibility_adapter_) return false;
 
     // Test center-of-mass plus 4 lateral/vertical bounding offsets to prevent pop-in artifacts on corner peeks
     const float r = std::max(0.0f, target.bounding_radius);
@@ -79,10 +94,15 @@ bool ServerEspFilter::IsLineOfSightOccluded(
         float tz = target.z + offset[2];
 
         bool rayBlocked = false;
-        for (const auto& box : occluders_) {
-            if (SegmentIntersectsAabb(observer.x, observer.y, observer.z, tx, ty, tz, box)) {
-                rayBlocked = true;
-                break;
+        if (visibility_adapter_) {
+            rayBlocked = visibility_adapter_->LineOfSightBlocked(
+                observer.x, observer.y, observer.z, tx, ty, tz, false);
+        } else {
+            for (const auto& box : occluders_) {
+                if (SegmentIntersectsAabb(observer.x, observer.y, observer.z, tx, ty, tz, box)) {
+                    rayBlocked = true;
+                    break;
+                }
             }
         }
         if (!rayBlocked) {
@@ -106,6 +126,12 @@ ReplicationDecision ServerEspFilter::EvaluateEntityReplication(
 
     if (dist > max_replication_distance_) {
         decision.culled_by_distance = true;
+        return decision;
+    }
+
+    if (!HasOcclusionData()) {
+        decision.occlusion_unconfigured = true;
+        decision.replicate_full_transform = true;
         return decision;
     }
 
@@ -153,7 +179,8 @@ std::optional<core::DetectionEvent> ServerEspFilter::ValidatePlayerMovement(
         ev.type = core::DetectionType::SERVER_ESP_VIOLATION;
         ev.severity = core::Severity::CRITICAL;
         ev.component = "ServerEspFilter::MovementValidator";
-        ev.timestamp = static_cast<uint64_t>(std::time(nullptr));
+        ev.timestamp = core::DetectionEvent::NowMonotonicMs();
+        ev.timestamp_utc_ms = core::DetectionEvent::NowUtcMs();
         ev.threat_score = 90;
         ev.confidence = core::ConfidenceLevel::INDEPENDENTLY_VERIFIED;
         ev.corroborating_sources = 2;
@@ -181,12 +208,17 @@ std::optional<core::DetectionEvent> ServerEspFilter::ValidateTargetEngagement(
     bool blockedBySolidWall = false;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        for (const auto& box : occluders_) {
-            if (!box.penetrable &&
-                SegmentIntersectsAabb(attacker.x, attacker.y, attacker.z,
-                                      target.x, target.y, target.z, box)) {
-                blockedBySolidWall = true;
-                break;
+        if (visibility_adapter_) {
+            blockedBySolidWall = visibility_adapter_->LineOfSightBlocked(
+                attacker.x, attacker.y, attacker.z, target.x, target.y, target.z, true);
+        } else {
+            for (const auto& box : occluders_) {
+                if (!box.penetrable &&
+                    SegmentIntersectsAabb(attacker.x, attacker.y, attacker.z,
+                                          target.x, target.y, target.z, box)) {
+                    blockedBySolidWall = true;
+                    break;
+                }
             }
         }
     }
@@ -196,7 +228,8 @@ std::optional<core::DetectionEvent> ServerEspFilter::ValidateTargetEngagement(
         ev.type = core::DetectionType::SERVER_ESP_VIOLATION;
         ev.severity = core::Severity::HIGH;
         ev.component = "ServerEspFilter::OcclusionValidator";
-        ev.timestamp = static_cast<uint64_t>(std::time(nullptr));
+        ev.timestamp = core::DetectionEvent::NowMonotonicMs();
+        ev.timestamp_utc_ms = core::DetectionEvent::NowUtcMs();
         ev.threat_score = 85;
         ev.confidence = core::ConfidenceLevel::INDEPENDENTLY_VERIFIED;
         ev.corroborating_sources = 2;

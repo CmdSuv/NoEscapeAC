@@ -77,6 +77,7 @@ public:
     BanCheckResult QueryBanStatus();
     bool CheckBanStatus(bool& out_is_banned, std::string& out_reason);
     HeartbeatPacket ConstructHeartbeat(uint32_t current_threat_score, const std::string& status);
+    static std::string RandomNonce();
 
     const std::string& GetHwid() const { return hwid_; }
     const std::string& GetBaseUrl() const { return base_url_; }
@@ -123,7 +124,6 @@ private:
 
     HttpResult Request(const ParsedUrl& target, const char* method, const std::string& body,
                        uint32_t timeout_ms) const;
-    static std::string RandomNonce();
 };
 
 } // namespace noescape::network

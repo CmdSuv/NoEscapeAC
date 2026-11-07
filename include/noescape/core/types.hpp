@@ -103,15 +103,35 @@ enum class Severity : uint32_t {
     FATAL_BAN = 5
 };
 
+inline uint64_t GetMonotonicTimeMs() {
+    return static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()
+        ).count()
+    );
+}
+
+inline uint64_t GetUtcTimeMs() {
+    return static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()
+        ).count()
+    );
+}
+
 struct DetectionEvent {
     DetectionType type{DetectionType::UNKNOWN};
     Severity severity{Severity::INFO};
     std::string component{};
     std::string details{};
-    uint64_t timestamp{0};
+    // Monotonic timestamp in milliseconds for time-window calculations and sliding correlation
+    uint64_t timestamp{GetMonotonicTimeMs()};
     uint32_t threat_score{0};
 
-    // Extended structured forensic metadata (Release 1.3)
+    // Separate UTC timestamp in milliseconds for logging and server records
+    uint64_t timestamp_utc_ms{GetUtcTimeMs()};
+
+    // Extended structured forensic metadata (Release 1.4)
     uint64_t event_id{0};
     DetectionCategory category{DetectionCategory::UNKNOWN};
     ConfidenceLevel confidence{ConfidenceLevel::OBSERVATION};
@@ -124,8 +144,8 @@ struct DetectionEvent {
     };
     std::string evidence_source{};
     std::string evidence_hash{};
-    uint64_t first_seen_timestamp{0};
-    uint64_t last_seen_timestamp{0};
+    uint64_t first_seen_timestamp{GetMonotonicTimeMs()};
+    uint64_t last_seen_timestamp{GetMonotonicTimeMs()};
     uint32_t occurrence_count{1};
     uint32_t corroborating_sources{1};
     bool server_verified{false};
@@ -134,8 +154,16 @@ struct DetectionEvent {
     std::string match_id{"default_match"};
     std::string root_cause_id{};
     uint64_t expiration_timestamp{0};
-    std::string detection_version{"7.0.13"};
+    std::string detection_version{"7.0.14"};
     std::vector<uint64_t> related_event_ids{};
+
+    static uint64_t NowMonotonicMs() {
+        return GetMonotonicTimeMs();
+    }
+
+    static uint64_t NowUtcMs() {
+        return GetUtcTimeMs();
+    }
 
     DetectionEvent() = default;
 
@@ -147,10 +175,15 @@ struct DetectionEvent {
         uint64_t ts = 0,
         uint32_t score = 0,
         DetectionCategory cat = DetectionCategory::UNKNOWN,
-        ConfidenceLevel conf = ConfidenceLevel::OBSERVATION
+        ConfidenceLevel conf = ConfidenceLevel::OBSERVATION,
+        uint64_t utc_ts = 0
     ) : type(t), severity(s), component(std::move(comp)), details(std::move(det)),
-        timestamp(ts), threat_score(score), category(cat), confidence(conf),
-        first_seen_timestamp(ts), last_seen_timestamp(ts) {}
+        timestamp(ts != 0 ? ts : GetMonotonicTimeMs()),
+        threat_score(score),
+        timestamp_utc_ms(utc_ts != 0 ? utc_ts : GetUtcTimeMs()),
+        category(cat), confidence(conf),
+        first_seen_timestamp(ts != 0 ? ts : GetMonotonicTimeMs()),
+        last_seen_timestamp(ts != 0 ? ts : GetMonotonicTimeMs()) {}
 
     static const char* TypeToString(DetectionType t) {
         switch (t) {

@@ -500,7 +500,8 @@ std::vector<core::DetectionEvent> MemoryScanner::DetectUnbackedExecutableRegions
                 ss << std::hex << v;
                 return ss.str();
             }(r.end) + "] " + (isRwx ? "(RWX-PROTECTION)" : "(RX-PROTECTION)");
-            ev.timestamp = static_cast<uint64_t>(std::time(nullptr));
+            ev.timestamp = core::DetectionEvent::NowMonotonicMs();
+            ev.timestamp_utc_ms = core::DetectionEvent::NowUtcMs();
             ev.threat_score = isRwx ? 85 : (transientOnly ? 40 : 75);
 
             events.push_back(ev);
@@ -686,7 +687,8 @@ std::vector<core::DetectionEvent> MemoryScanner::ScanSignatures(const std::vecto
                     ss << " - " << sig.GetDescription();
                 }
                 ev.details = ss.str();
-                ev.timestamp = static_cast<uint64_t>(std::time(nullptr));
+                ev.timestamp = core::DetectionEvent::NowMonotonicMs();
+                ev.timestamp_utc_ms = core::DetectionEvent::NowUtcMs();
                 events.push_back(ev);
             }
 
@@ -859,7 +861,8 @@ std::vector<core::DetectionEvent> MemoryScanner::DetectModifiedModules() {
         ss << "In-memory executable differs from on-disk image: " << r.pathname
            << " (" << diffCount << " bytes differ, first at +0x" << std::hex << firstDiff << ")";
         ev.details = ss.str();
-        ev.timestamp = static_cast<uint64_t>(std::time(nullptr));
+        ev.timestamp = core::DetectionEvent::NowMonotonicMs();
+        ev.timestamp_utc_ms = core::DetectionEvent::NowUtcMs();
         ev.threat_score = 50;
         events.push_back(ev);
     }
@@ -934,7 +937,8 @@ std::vector<core::DetectionEvent> MemoryScanner::DetectModifiedModules() {
         ss << "In-memory executable differs from on-disk image: " << r.pathname
            << " (" << diffCount << " bytes differ, first at +0x" << std::hex << firstDiff << ")";
         ev.details = ss.str();
-        ev.timestamp = static_cast<uint64_t>(std::time(nullptr));
+        ev.timestamp = core::DetectionEvent::NowMonotonicMs();
+        ev.timestamp_utc_ms = core::DetectionEvent::NowUtcMs();
         ev.threat_score = 50;
         events.push_back(ev);
     }
@@ -965,7 +969,8 @@ std::vector<core::DetectionEvent> MemoryScanner::DetectSleepingPayloads() {
         ss << "Previously executable anonymous region made inaccessible (sleep-obfuscation pattern) [0x"
            << std::hex << r.start << " - 0x" << r.end << "]";
         ev.details = ss.str();
-        ev.timestamp = static_cast<uint64_t>(std::time(nullptr));
+        ev.timestamp = core::DetectionEvent::NowMonotonicMs();
+        ev.timestamp_utc_ms = core::DetectionEvent::NowUtcMs();
         ev.threat_score = 70;
         events.push_back(ev);
     }
@@ -1043,7 +1048,8 @@ std::optional<core::DetectionEvent> MemoryScanner::InspectThreadAddress(uint32_t
                 ss << "Thread TID " << tid << " execution pointer 0x" << std::hex << code_address
                    << " resides in non-executable region [0x" << r.start << " - 0x" << r.end << "]";
                 ev.details = ss.str();
-                ev.timestamp = static_cast<uint64_t>(std::time(nullptr));
+                ev.timestamp = core::DetectionEvent::NowMonotonicMs();
+                ev.timestamp_utc_ms = core::DetectionEvent::NowUtcMs();
                 ev.threat_score = 95;
                 return ev;
             }
@@ -1057,7 +1063,8 @@ std::optional<core::DetectionEvent> MemoryScanner::InspectThreadAddress(uint32_t
                    << std::hex << code_address << " [0x" << r.start << " - 0x" << r.end << "] ("
                    << (r.pathname.empty() ? "[anon]" : r.pathname) << ")";
                 ev.details = ss.str();
-                ev.timestamp = static_cast<uint64_t>(std::time(nullptr));
+                ev.timestamp = core::DetectionEvent::NowMonotonicMs();
+                ev.timestamp_utc_ms = core::DetectionEvent::NowUtcMs();
                 ev.threat_score = 95;
                 return ev;
             }
@@ -1073,7 +1080,8 @@ std::optional<core::DetectionEvent> MemoryScanner::InspectThreadAddress(uint32_t
     std::ostringstream ss;
     ss << "Thread TID " << tid << " points to unmapped user-space address 0x" << std::hex << code_address;
     ev.details = ss.str();
-    ev.timestamp = static_cast<uint64_t>(std::time(nullptr));
+    ev.timestamp = core::DetectionEvent::NowMonotonicMs();
+    ev.timestamp_utc_ms = core::DetectionEvent::NowUtcMs();
     ev.threat_score = 75;
     return ev;
 }
@@ -1382,7 +1390,8 @@ std::vector<core::DetectionEvent> MemoryScanner::AuditModuleProvenance() {
                 ss << " (SHA256: " << m.sha256_disk_hash.substr(0, 16) << "...)";
             }
             ev.details = ss.str();
-            ev.timestamp = static_cast<uint64_t>(std::time(nullptr));
+            ev.timestamp = core::DetectionEvent::NowMonotonicMs();
+            ev.timestamp_utc_ms = core::DetectionEvent::NowUtcMs();
             ev.threat_score = (ev.severity == core::Severity::CRITICAL) ? 90 : 75;
             events.push_back(ev);
         }

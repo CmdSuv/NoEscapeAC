@@ -28,8 +28,8 @@ public:
     // Streaming SHA-256 file digest (64KB chunks; empty string on I/O error)
     static std::string Sha256File(const std::string& file_path);
 
-    // OS CSPRNG byte and hex token generation
-    static void GenerateRandomBytes(uint8_t* out, size_t length);
+    // OS CSPRNG byte and hex token generation (returns false on entropy failure)
+    static bool GenerateRandomBytes(uint8_t* out, size_t length);
     static std::string GenerateRandomHex(size_t byte_length);
 
     // HKDF-SHA256 (RFC 5869) directional/session key derivation
