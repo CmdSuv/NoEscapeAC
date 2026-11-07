@@ -70,6 +70,11 @@
    - Acoustic cue routing: transmits footsteps and gunshot cues when players are within hearing radius while keeping visual coordinates withheld.
    - Authoritative speedhack, teleportation, and solid-wall engagement validation.
 
+12. **Authentic Cryptographic Security & Asymmetric Attestation**:
+   - **RFC 8032 Ed25519 Engine**: Genuine elliptic-curve public-key digital signatures (Curve25519) with strict RFC 8032 test-vector compliance and zero insecure fallbacks.
+   - **RFC 8439 ChaCha20-Poly1305 AEAD**: Authenticated encryption with associated data protecting flight recorder blackbox snapshots with Poly1305 authentication tags.
+   - **Dynamic Server-Verified Sessions**: Server-issued single-use code attestation challenges requiring HMAC computation over pseudorandom executable segments.
+
 ---
 
 ### 🚀 Build & Verification
