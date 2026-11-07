@@ -84,7 +84,7 @@
 cmake -B build -DCMAKE_BUILD_TYPE=Release -DNOESCAPE_WERROR=ON
 cmake --build build -j$(nproc)
 
-# Run Comprehensive Unit Test Suite (133 test cases across all subsystems)
+# Run Comprehensive Unit Test Suite (153 test cases across all subsystems)
 ./build/noescape_tests
 
 # Run Preload Scenario B Verification Suite (6/6 tests)
@@ -106,13 +106,21 @@ cmake --build build -j$(nproc)
 - [FALSE_POSITIVE_STRATEGY.md](FALSE_POSITIVE_STRATEGY.md) — Heuristic dampening, confidence tiers, whitelisting, and dispute workflow.
 - [PERFORMANCE_BENCHMARKS.md](PERFORMANCE_BENCHMARKS.md) — AVX2 SIMD throughput (>9.4 GB/s), VMA page walks, and frame-time impact.
 - [PLATFORM_COMPATIBILITY.md](PLATFORM_COMPATIBILITY.md) — Windows x64, Linux x86_64, and Proton/Wine execution parity.
-- [TEST_STRATEGY.md](TEST_STRATEGY.md) — Unit test suite structure (133 tests), mock injection harnesses, and CI sanitizers.
+- [TEST_STRATEGY.md](TEST_STRATEGY.md) — Unit test suite structure (153 tests), mock injection harnesses, and CI sanitizers.
 - [PRIVACY_AND_DATA_POLICY.md](PRIVACY_AND_DATA_POLICY.md) — Zero PII collection policy, one-way HWID hashing, and encrypted blackbox dumps.
 - [CHANGELOG.md](CHANGELOG.md) — Full release history from v1.0 through v1.3.
 - [CURRENT_PROJECT_STATE.md](CURRENT_PROJECT_STATE.md) — Active project state, build verification, and deployment handoff.
 - [AUDIT_REPORT.md](AUDIT_REPORT.md) — Comprehensive technical security audit report.
 - [RING3_THREAT_MODEL.md](RING3_THREAT_MODEL.md) — Ring-3 threat modeling, threat vectors, and architectural mitigations.
 - [DETECTION_GAP_ANALYSIS.md](DETECTION_GAP_ANALYSIS.md) — Gap analysis and technical countermeasure analysis.
+- [FILE_INVENTORY.md](FILE_INVENTORY.md) — Exhaustive source file catalog, public APIs, calling graphs, and ownership.
+- [ARCHITECTURE_MAP.md](ARCHITECTURE_MAP.md) — 9-layer architectural map and cross-cutting security boundaries.
+- [DEPENDENCY_GRAPH.md](DEPENDENCY_GRAPH.md) — Component dependency topology, acyclic validation, and coupling metrics.
+- [SECURITY_FINDINGS.md](SECURITY_FINDINGS.md) — Critical vulnerability registry (SEC-01 through SEC-11) and verification.
+- [CRYPTOGRAPHY_REVIEW.md](CRYPTOGRAPHY_REVIEW.md) — Cryptographic architecture audit (RFC 8032 Ed25519 & RFC 8439 AEAD).
+- [EVIDENCE_MODEL.md](EVIDENCE_MODEL.md) — Temporal correlation, state transitions, decay models, and confidence calibration.
+- [SDK_INTEGRATION_GUIDE.md](SDK_INTEGRATION_GUIDE.md) — C-ABI and C++ SDK integration manual and thread safety contract.
+- [SERVER_INTEGRATION_GUIDE.md](SERVER_INTEGRATION_GUIDE.md) — Authoritative server integration, AABB occlusion culling, and attestation.
 
 ---
 
@@ -175,7 +183,7 @@ NoEscapeAC/
 │   ├── network/
 │   └── sdk/
 ├── demo/                     # Interactive demonstration program
-├── tests/                    # 133 unit & regression tests
+├── tests/                    # 153 unit & regression tests
 └── CMakeLists.txt            # Exports libnoescape.a, libnoescape.so, and executables
 ```
 
