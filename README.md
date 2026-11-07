@@ -22,7 +22,7 @@
    - Compile-time XOR string obfuscation (`NOESCAPE_XOR`) and FNV-1a hashing (`NOESCAPE_HASH`).
 
 2. **SIMD Pattern Scanner (AVX2 / SSE2 / Scalar)**:
-   - High-throughput byte signature search utilizing AVX2 256-bit vector registers with scalar fallback (up to 35+ GB/s throughput).
+   - High-throughput byte signature search utilizing AVX2 256-bit vector registers with automatic runtime CPU dispatch (AVX2 → SSE2 → scalar; the library loads on CPUs without AVX2).
    - Supports IDA-style wildcard patterns (`48 B8 ? ? ? ? ? ? ? ? FF E0`) and batch scanning in a single pass.
 
 3. **Memory & Injection Analysis**:
@@ -76,7 +76,7 @@
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j$(nproc)
 
-# Run Comprehensive Unit Test Suite (48 test cases across all subsystems)
+# Run Comprehensive Unit Test Suite (123 test cases across all subsystems)
 ./build/noescape_tests
 
 # Run Interactive Subsystem Demo
@@ -85,6 +85,36 @@ cmake --build build -j$(nproc)
 # Run Standalone Anti-Cheat Engine (Single Audit)
 ./build/noescape_app --once
 ```
+
+---
+
+### ⚖️ What this is — and is not
+
+NoEscapeAC is a **user-mode (Ring-3) detection and deterrence layer**. It runs with the same privileges as the game, so be realistic about its limits:
+
+- A cheat running *inside* the process (or with higher privileges: kernel drivers, hypervisors, DMA hardware) can in principle tamper with any client-side check. Self-integrity, hook and memory checks raise the cost; they do not make bypass impossible.
+- Purely **external, read-only** cheats (most ESP/radar tools) cannot be observed from user mode at all.
+- Pattern/name based detections are signatures: they catch off-the-shelf tools and lazy modifications, not custom builds.
+- Therefore the client should be one signal among several. For competitive titles, pair it with **server-side** validation (fog-of-war culling, movement/aim statistics, mandatory signed heartbeats) and treat client reports as evidence, not verdicts.
+- Roll new rules out in *report-only* mode first (`enforce_ban = false`) and watch false-positive telemetry before enabling bans.
+
+### 🧷 Self-protection
+
+The audit loop and the watchdog supervise **each other**: the watchdog bans when the audit loop stalls (> 3 s), and the audit loop reports when the watchdog stops answering, so suspending or killing only one of the two threads is detected. Audits are serialized, long scans report progress, and `Tick()` never blocks behind a running background audit.
+
+### 🛰️ Server-verified sessions (recommended for competitive games)
+
+Enable heartbeats (`enable_heartbeat = true` / `NOESCAPE_ENABLE_HEARTBEAT=1`). Each signed heartbeat reply may carry a **code-attestation challenge**: the server names a random byte range of the client's executable segment, the client returns `HMAC(secret, id:nonce:bytes)` and the server recomputes it from the reference build (`NOESCAPE_REF_IMAGE` in `tools/reference_server.py`; ELF in the reference implementation). Your **game server** then asks `GET /api/ac/session?hwid=H` and drops players whose session is not `valid` (no heartbeat, expired TTL, wrong or unanswered attestation). Enforcement therefore lives on the server, where a cheat cannot switch it off. Challenges are random, single-use and signed, so answers cannot be replayed or precomputed.
+
+### 🔐 Integration Notes
+
+- **Always set a unique `secret_key` and `panel_url`.** The built-in default key is public; a warning is logged when it is used.
+- `https://` panel URLs are supported via OpenSSL on Linux and WinHTTP on Windows, with optional SPKI SHA-256 public-key pinning (`NoEscape_SetPanelPin` / `NOESCAPE_PANEL_PIN_SHA256`). If built without TLS (`-DNOESCAPE_WITH_TLS=OFF`), `https://` URLs are refused rather than silently downgraded to cleartext.
+- Detections are scored **once per distinct finding**; persistent conditions no longer snowball into a ban. Network I/O runs on its own thread so slow/hostile panels cannot trip the watchdog.
+- `NoEscape_Tick()` works without `NoEscape_Start()`; it runs a full synchronous audit on the calling thread (do not call it every frame).
+- Weakening environment overrides (`NOESCAPE_ENFORCE_BAN=0`, `NOESCAPE_BAN_THRESHOLD`, …) are honoured only when `NOESCAPE_TEST_MODE=1`.
+- `bool` fields in `NoEscapeConfig` are 1 byte: use `[MarshalAs(UnmanagedType.U1)]` in C# P/Invoke.
+- Build with `-DNOESCAPE_WERROR=ON` in CI to treat warnings as errors.
 
 ---
 
@@ -115,7 +145,7 @@ NoEscapeAC/
 │   ├── network/
 │   └── sdk/
 ├── demo/                     # Interactive demonstration program
-├── tests/                    # 48 Comprehensive unit tests
+├── tests/                    # 123 unit & regression tests
 └── CMakeLists.txt            # Exports libnoescape.a, libnoescape.so, and executables
 ```
 

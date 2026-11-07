@@ -40,7 +40,7 @@ inline uint64_t ReadTsc() {
 #endif
 }
 
-inline void MemoryBarrier() {
+inline void FullFence() {
 #if defined(__x86_64__) || defined(_M_X64)
     _mm_mfence();
 #elif defined(__GNUC__)
@@ -77,17 +77,17 @@ uint64_t DmaDetector::MeasureBufferTraversal() {
     }
 #endif
 
-    MemoryBarrier();
+    FullFence();
     uint64_t t0 = ReadTsc();
-    MemoryBarrier();
+    FullFence();
 
     for (size_t i = 0; i < size; i += stride) {
         sink += ptr[i];
     }
 
-    MemoryBarrier();
+    FullFence();
     uint64_t t1 = ReadTsc();
-    MemoryBarrier();
+    FullFence();
 
     (void)sink;
     return (t1 > t0) ? (t1 - t0) : 0;
@@ -210,8 +210,7 @@ std::vector<PciDeviceInfo> DmaDetector::ScanHardwareDevices() {
 
             // Check for FTDI FT601 (VID_0403&PID_601F) or standard LeechCore bridges
             if (keyUpper.find("VID_0403&PID_601F") != std::string::npos ||
-                keyUpper.find("VID_0403&PID_6010") != std::string::npos ||
-                keyUpper.find("VID_0403&PID_6014") != std::string::npos) {
+                keyUpper.find("VID_0403&PID_601E") != std::string::npos) {
                 PciDeviceInfo info;
                 info.device_id = subKeyName;
                 info.vendor_id = "0403";
@@ -296,7 +295,8 @@ std::vector<PciDeviceInfo> DmaDetector::ScanHardwareDevices() {
             std::string vid, pid;
             if (vendorFile >> vid && prodFile >> pid) {
                 // FTDI FT601 USB 3.0 bridge VID: 0403, PID: 601f
-                if (vid == "0403" && (pid == "601f" || pid == "6010" || pid == "6014")) {
+                // Only FT600/FT601 (601e/601f). 6010/6014 are FT2232H/FT232H, ubiquitous USB-serial adapters.
+                if (vid == "0403" && (pid == "601f" || pid == "601e")) {
                     PciDeviceInfo dev;
                     dev.device_id = pid;
                     dev.vendor_id = vid;
@@ -335,12 +335,6 @@ bool DmaDetector::CheckLeechCoreArtifacts() {
     std::ifstream dev2(NOESCAPE_XOR("/dev/fpgamem"));
     if (dev2.is_open()) return true;
 
-    // Direct /dev/mem handle check
-    int fd = open("/dev/mem", O_RDONLY);
-    if (fd >= 0) {
-        close(fd);
-        return true;
-    }
     return false;
 #endif
 }
@@ -371,7 +365,8 @@ std::vector<core::DetectionEvent> DmaDetector::PerformAudit() {
             ev.details = "DMA Hardware device discovered on bus: " + dev.description +
                          " [VID: " + dev.vendor_id + " PID: " + dev.device_id + "]";
             ev.timestamp = static_cast<uint64_t>(std::time(nullptr));
-            ev.threat_score = 100;
+            ev.severity = core::Severity::HIGH; // vendor ID alone is not proof of a DMA card
+            ev.threat_score = 60;
             events.push_back(ev);
         }
     }
@@ -381,7 +376,7 @@ std::vector<core::DetectionEvent> DmaDetector::PerformAudit() {
     if (profile.anomalous) {
         core::DetectionEvent ev;
         ev.type = core::DetectionType::DMA_LATENCY_JITTER_ANOMALY;
-        ev.severity = core::Severity::HIGH;
+        ev.severity = core::Severity::MEDIUM;
         ev.component = "DmaDetector::LatencyJitter";
 
         std::ostringstream ss;
@@ -391,7 +386,7 @@ std::vector<core::DetectionEvent> DmaDetector::PerformAudit() {
            << " spikes=" << profile.spike_count;
         ev.details = ss.str();
         ev.timestamp = static_cast<uint64_t>(std::time(nullptr));
-        ev.threat_score = 75;
+        ev.threat_score = 30;
         events.push_back(ev);
     }
 

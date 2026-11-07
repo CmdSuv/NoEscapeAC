@@ -196,22 +196,22 @@ std::vector<CheatSignature> SignatureDatabase::CreateDefaultSignatures() {
 
     list.emplace_back(
         "42 6C 61 63 6B 62 6F 6E 65", // "Blackbone"
-        "Blackbone_Driver_Signature",
+        "BlackBone_Driver_Signature",
         SignatureCategory::INJECTOR_STUB,
         100,
         core::Severity::FATAL_BAN,
         MemoryTargetRule::UNBACKED_ONLY,
-        "Blackbone kernel/userland memory hacking and injection library identifier"
+        "BlackBone kernel/userland memory hacking and injection library identifier"
     );
 
     list.emplace_back(
         "48 83 EC 28 48 89 4C 24 20 48 89 54 24 28 48 8B",
-        "Blackbone_APC_Injection_Stub",
+        "BlackBone_APC_Injection_Stub",
         SignatureCategory::INJECTOR_STUB,
         100,
         core::Severity::FATAL_BAN,
         MemoryTargetRule::UNBACKED_ONLY,
-        "Blackbone APC execution trampoline stub"
+        "BlackBone APC execution trampoline stub"
     );
 
     list.emplace_back(
@@ -236,27 +236,27 @@ std::vector<CheatSignature> SignatureDatabase::CreateDefaultSignatures() {
 
     list.emplace_back(
         "4B 53 44 75 6D 70 65 72", // "KSDumper"
-        "KSDumper_Driver_Signature",
+        "KsDumper_Driver_Signature",
         SignatureCategory::INJECTOR_STUB,
         100,
         core::Severity::FATAL_BAN,
         MemoryTargetRule::UNBACKED_ONLY,
-        "KSDumper ring0 memory dumper device identifier"
+        "KsDumper ring0 memory dumper device identifier"
     );
 
     list.emplace_back(
         "81 FA 00 22 22 00 74",
-        "KSDumper_IOCTL_Dispatch",
+        "KsDumper_IOCTL_Dispatch",
         SignatureCategory::INJECTOR_STUB,
         90,
         core::Severity::FATAL_BAN,
         MemoryTargetRule::UNBACKED_ONLY,
-        "KSDumper memory copy IOCTL verification dispatch"
+        "KsDumper memory copy IOCTL verification dispatch"
     );
 
     list.emplace_back(
         "52 65 66 6C 65 63 74 69 76 65 4C 6F 61 64 65 72", // "ReflectiveLoader"
-        "ReflectiveLoader_Export",
+        "Reflective_Loader_Export",
         SignatureCategory::INJECTOR_STUB,
         100,
         core::Severity::FATAL_BAN,
@@ -277,12 +277,14 @@ std::vector<CheatSignature> SignatureDatabase::CreateDefaultSignatures() {
     // =========================================================================
     // 3. Direct Memory Access (DMA) Tools (DMA_TOOL)
     // =========================================================================
+    // NOTE: text-string signatures scan ordinary data pages, where attacker-controlled strings
+    // (player names, chat) can legitimately appear. They are low-weight, corroborating evidence only.
     list.emplace_back(
         "4C 43 5F 4D 45 4D", // "LC_MEM"
         "LeechCore_Memory_Header",
         SignatureCategory::DMA_TOOL,
-        100,
-        core::Severity::FATAL_BAN,
+        30,
+        core::Severity::MEDIUM,
         MemoryTargetRule::ANY_ANONYMOUS,
         "LeechCore PCIe DMA physical memory snapshot banner"
     );
@@ -291,8 +293,8 @@ std::vector<CheatSignature> SignatureDatabase::CreateDefaultSignatures() {
         "4C 45 45 43 48 43 4F 52 45", // "LEECHCORE"
         "LeechCore_Device_Config",
         SignatureCategory::DMA_TOOL,
-        100,
-        core::Severity::FATAL_BAN,
+        30,
+        core::Severity::MEDIUM,
         MemoryTargetRule::ANY_ANONYMOUS,
         "LeechCore hardware configuration and interface header"
     );
@@ -301,8 +303,8 @@ std::vector<CheatSignature> SignatureDatabase::CreateDefaultSignatures() {
         "56 4D 4D 44 4C 4C", // "VMMDLL"
         "MemProcFS_VmmDll",
         SignatureCategory::DMA_TOOL,
-        100,
-        core::Severity::FATAL_BAN,
+        30,
+        core::Severity::MEDIUM,
         MemoryTargetRule::ANY_ANONYMOUS,
         "MemProcFS PCIe DMA virtual memory exploration engine tag"
     );
@@ -311,8 +313,8 @@ std::vector<CheatSignature> SignatureDatabase::CreateDefaultSignatures() {
         "4D 45 4D 50 52 4F 43 46 53", // "MEMPROCFS"
         "MemProcFS_Vfs_Header",
         SignatureCategory::DMA_TOOL,
-        100,
-        core::Severity::FATAL_BAN,
+        30,
+        core::Severity::MEDIUM,
         MemoryTargetRule::ANY_ANONYMOUS,
         "MemProcFS DMA filesystem mount header"
     );
@@ -334,18 +336,18 @@ std::vector<CheatSignature> SignatureDatabase::CreateDefaultSignatures() {
         "44 42 4B 36 34", // "DBK64"
         "CheatEngine_DBK_Driver",
         SignatureCategory::DEBUGGER_INTERFACE,
-        100,
-        core::Severity::FATAL_BAN,
+        30,
+        core::Severity::MEDIUM,
         MemoryTargetRule::ANY_ANONYMOUS,
-        "Cheat Engine DBK64 kernel driver device string"
+        "Cheat Engine Dbk64 kernel driver device string"
     );
 
     list.emplace_back(
         "43 45 4C 75 61 53 65 72 76 65 72", // "CELuaServer"
         "CheatEngine_Lua_Core",
         SignatureCategory::DEBUGGER_INTERFACE,
-        100,
-        core::Severity::FATAL_BAN,
+        30,
+        core::Severity::MEDIUM,
         MemoryTargetRule::ANY_ANONYMOUS,
         "Cheat Engine Lua scripting engine communication pipe"
     );
@@ -354,8 +356,8 @@ std::vector<CheatSignature> SignatureDatabase::CreateDefaultSignatures() {
         "66 72 69 64 61 2D 61 67 65 6E 74", // "frida-agent"
         "Frida_Agent_Signature",
         SignatureCategory::DEBUGGER_INTERFACE,
-        100,
-        core::Severity::FATAL_BAN,
+        30,
+        core::Severity::MEDIUM,
         MemoryTargetRule::ANY_ANONYMOUS,
         "Frida dynamic binary instrumentation runtime agent library"
     );
@@ -384,8 +386,8 @@ std::vector<CheatSignature> SignatureDatabase::CreateDefaultSignatures() {
         "43 45 5F 56 45 48", // "CE_VEH"
         "CheatEngine_VEH_Debugger",
         SignatureCategory::DEBUGGER_INTERFACE,
-        95,
-        core::Severity::FATAL_BAN,
+        30,
+        core::Severity::MEDIUM,
         MemoryTargetRule::ANY_ANONYMOUS,
         "Cheat Engine Vectored Exception Handling (VEH) debugger marker"
     );
@@ -430,20 +432,20 @@ std::vector<CheatSignature> SignatureDatabase::CreateDefaultSignatures() {
         "49 6D 47 75 69 20 4F 76 65 72 6C 61 79", // "ImGui Overlay"
         "ImGui_Overlay_Header",
         SignatureCategory::OVERLAY_HOOK,
-        100,
-        core::Severity::FATAL_BAN,
+        30,
+        core::Severity::MEDIUM,
         MemoryTargetRule::ANY_ANONYMOUS,
-        "Injected Dear ImGui overlay render identity"
+        "Injected Dear-ImGui overlay render identity"
     );
 
     list.emplace_back(
         "44 65 61 72 20 49 6D 47 75 69", // "Dear ImGui"
         "ImGui_DearImGui_Banner",
         SignatureCategory::OVERLAY_HOOK,
-        75,
-        core::Severity::HIGH,
+        30,
+        core::Severity::MEDIUM,
         MemoryTargetRule::ANY_ANONYMOUS,
-        "Dear ImGui framework signature in unbacked memory allocation"
+        "Dear-ImGui framework signature in unbacked memory allocation"
     );
 
     list.emplace_back(
@@ -483,8 +485,8 @@ std::vector<CheatSignature> SignatureDatabase::CreateDefaultSignatures() {
         "55 50 58 30", // "UPX0"
         "UPX_Section_0",
         SignatureCategory::PACKER_PROTECTOR,
-        70,
-        core::Severity::HIGH,
+        30,
+        core::Severity::MEDIUM,
         MemoryTargetRule::ANY_ANONYMOUS,
         "UPX packer header segment 0 in anonymous allocation"
     );
@@ -493,8 +495,8 @@ std::vector<CheatSignature> SignatureDatabase::CreateDefaultSignatures() {
         "55 50 58 31", // "UPX1"
         "UPX_Section_1",
         SignatureCategory::PACKER_PROTECTOR,
-        70,
-        core::Severity::HIGH,
+        30,
+        core::Severity::MEDIUM,
         MemoryTargetRule::ANY_ANONYMOUS,
         "UPX packer header segment 1 in anonymous allocation"
     );
@@ -511,12 +513,12 @@ std::vector<CheatSignature> SignatureDatabase::CreateDefaultSignatures() {
 
     list.emplace_back(
         "54 68 65 6D 69 64 61", // "Themida"
-        "Themida_SDK_Marker",
+        "ThemIDA_SDK_Marker",
         SignatureCategory::PACKER_PROTECTOR,
         80,
         core::Severity::HIGH,
         MemoryTargetRule::UNBACKED_ONLY,
-        "Themida / WinLicense protected payload indicator"
+        "ThemIDA / WinLicense protected payload indicator"
     );
 
     list.emplace_back(
@@ -541,12 +543,12 @@ std::vector<CheatSignature> SignatureDatabase::CreateDefaultSignatures() {
 
     list.emplace_back(
         "2E 74 68 65 6D 69 64 61", // ".themida"
-        "Themida_Section_Tag",
+        "ThemIDA_Section_Tag",
         SignatureCategory::PACKER_PROTECTOR,
         85,
         core::Severity::FATAL_BAN,
         MemoryTargetRule::UNBACKED_ONLY,
-        "Themida protected section header tag in unbacked memory"
+        "ThemIDA protected section header tag in unbacked memory"
     );
 
     // =========================================================================
@@ -556,8 +558,8 @@ std::vector<CheatSignature> SignatureDatabase::CreateDefaultSignatures() {
         "53 70 65 65 64 68 61 63 6B 2E 64 6C 6C", // "Speedhack.dll"
         "Speedhack_CE_ModuleName",
         SignatureCategory::SPEEDHACK_WRAPPER,
-        100,
-        core::Severity::FATAL_BAN,
+        30,
+        core::Severity::MEDIUM,
         MemoryTargetRule::ANY_ANONYMOUS,
         "Cheat Engine Speedhack DLL reference string"
     );

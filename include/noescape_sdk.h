@@ -4,7 +4,9 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-#if defined(_WIN32)
+#if defined(NOESCAPE_STATIC)
+    #define NOESCAPE_API
+#elif defined(_WIN32)
     #if defined(NOESCAPE_EXPORTS)
         #define NOESCAPE_API __declspec(dllexport)
     #else
@@ -80,6 +82,14 @@ NOESCAPE_API void NoEscape_SetViolationCallback(NoEscapeViolationCallback callba
 // Sets the game viewport rectangle for overlay matching
 NOESCAPE_API void NoEscape_SetViewport(int x, int y, int width, int height);
 
+// Pins the panel's TLS public key (hex SHA-256 of the certificate's SubjectPublicKeyInfo).
+// Call before NoEscape_Init(). Obtain it with:
+//   openssl x509 -in panel.crt -pubkey -noout | openssl pkey -pubin -outform der | sha256sum
+NOESCAPE_API void NoEscape_SetPanelPin(const char* spki_sha256_hex);
+
+// Declares that the host embeds a JIT (LuaJIT, V8/CEF, Mono...). Call before NoEscape_Init().
+NOESCAPE_API void NoEscape_SetHostUsesJit(bool uses_jit);
+
 // Registers an invisible decoy entity (never render or network it). Sustained precise aim at
 // it is reported as PHANTOM_ENTITY_TARGETED.
 NOESCAPE_API void NoEscape_AddPhantom(uint32_t id, float x, float y, float z);
@@ -139,6 +149,26 @@ public:
 
     static void SetViewport(int x, int y, int width, int height) {
         NoEscape_SetViewport(x, y, width, height);
+    }
+
+    static void SetPanelPin(const char* spki_sha256_hex) {
+        NoEscape_SetPanelPin(spki_sha256_hex);
+    }
+
+    static void SetHostUsesJit(bool uses_jit) {
+        NoEscape_SetHostUsesJit(uses_jit);
+    }
+
+    static void AddPhantom(uint32_t id, float x, float y, float z) {
+        NoEscape_AddPhantom(id, x, y, z);
+    }
+
+    static void UpdatePhantom(uint32_t id, float x, float y, float z) {
+        NoEscape_UpdatePhantom(id, x, y, z);
+    }
+
+    static void PushView(float x, float y, float z, float pitch, float yaw, uint64_t timestamp_ms) {
+        NoEscape_PushView(x, y, z, pitch, yaw, timestamp_ms);
     }
 };
 

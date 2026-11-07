@@ -26,6 +26,11 @@ uint64_t TimingIntegrity::ReadHardwareTsc() const {
 }
 
 bool TimingIntegrity::Calibrate(uint32_t calibrationMs) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return CalibrateLocked(calibrationMs);
+}
+
+bool TimingIntegrity::CalibrateLocked(uint32_t calibrationMs) {
     auto startOs = std::chrono::steady_clock::now();
     uint64_t startTsc = ReadHardwareTsc();
 
@@ -48,8 +53,9 @@ bool TimingIntegrity::Calibrate(uint32_t calibrationMs) {
 }
 
 std::optional<core::DetectionEvent> TimingIntegrity::CheckSpeedhack() {
+    std::lock_guard<std::mutex> lock(mutex_);
     if (!calibrated_) {
-        if (!Calibrate()) return std::nullopt;
+        if (!CalibrateLocked(50)) return std::nullopt;
     }
 
     auto nowOs = std::chrono::steady_clock::now();
@@ -63,13 +69,17 @@ std::optional<core::DetectionEvent> TimingIntegrity::CheckSpeedhack() {
 
     // Check for negative delta / backwards time travel
     if (nowTsc < last_tsc_) {
+        // Per-core TSC skew, VM migration and suspend/resume can all do this: re-baseline and
+        // report as a moderate signal instead of an instant ban.
+        last_tsc_ = nowTsc;
+        last_os_time_ = nowOs;
         core::DetectionEvent ev;
         ev.type = core::DetectionType::SPEEDHACK_TIMING_DISCREPANCY;
-        ev.severity = core::Severity::FATAL_BAN;
+        ev.severity = core::Severity::HIGH;
         ev.component = "TimingIntegrity::TSC";
-        ev.details = "Hardware TSC jumped backwards (Anti-Tick / Rewind exploit detected)";
+        ev.details = "Hardware TSC jumped backwards (possible Anti-Tick / Rewind exploit)";
         ev.timestamp = static_cast<uint64_t>(time(nullptr));
-        ev.threat_score = 100;
+        ev.threat_score = 40;
         return ev;
     }
 

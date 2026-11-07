@@ -183,11 +183,11 @@ std::vector<core::DetectionEvent> ArtifactAnalyzer::PerformAudit(
     if (CheckSystemWidePreload()) {
         core::DetectionEvent ev;
         ev.type = core::DetectionType::ENVIRONMENT_TAMPERING;
-        ev.severity = core::Severity::FATAL_BAN;
+        ev.severity = core::Severity::HIGH; // some AV/EDR and accessibility software legitimately use these
         ev.component = "ArtifactAnalyzer::SystemHook";
         ev.details = "System-wide persistent dynamic hook installed (/etc/ld.so.preload or AppInit_DLLs)";
         ev.timestamp = static_cast<uint64_t>(std::time(nullptr));
-        ev.threat_score = 100;
+        ev.threat_score = 50;
         events.push_back(ev);
     }
 
@@ -196,11 +196,11 @@ std::vector<core::DetectionEvent> ArtifactAnalyzer::PerformAudit(
     for (const auto& art : fsArtifacts) {
         core::DetectionEvent ev;
         ev.type = core::DetectionType::FORENSICS_ARTIFACT_DETECTED;
-        ev.severity = core::Severity::HIGH;
+        ev.severity = core::Severity::MEDIUM; // /tmp is world-writable: a dropped file proves little
         ev.component = "ArtifactAnalyzer::Filesystem";
         ev.details = "Cheat binary or payload artifact found on disk: " + art.path + " (matched: " + art.matched_signature + ")";
         ev.timestamp = static_cast<uint64_t>(std::time(nullptr));
-        ev.threat_score = 70;
+        ev.threat_score = 40;
         events.push_back(ev);
     }
 

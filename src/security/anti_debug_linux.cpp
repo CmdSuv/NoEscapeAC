@@ -2,6 +2,7 @@
 
 #include "noescape/security/anti_debug.hpp"
 #include "noescape/core/obfuscation.hpp"
+#include "noescape/core/envutil.hpp"
 #include <sys/ptrace.h>
 #include <sys/prctl.h>
 #include <sys/syscall.h>
@@ -198,7 +199,7 @@ bool AntiDebug::CheckKnownDebuggerProcesses(const std::vector<std::string>& blac
         if (std::getline(commFile, comm)) {
             std::string lowerComm = ToLower(comm);
             for (const auto& target : blacklist) {
-                if (lowerComm.find(ToLower(target)) != std::string::npos) {
+                if (core::NameMatchesEntry(lowerComm, ToLower(target))) {
                     detectedName = comm;
                     closedir(procDir);
                     return true;
@@ -226,17 +227,6 @@ std::vector<core::DetectionEvent> AntiDebug::PerformAudit(const std::vector<std:
         events.push_back(ev);
     }
 
-    if (CheckWchanWait()) {
-        core::DetectionEvent ev;
-        ev.type = core::DetectionType::ANTI_DEBUG_TRACER;
-        ev.severity = core::Severity::CRITICAL;
-        ev.component = "AntiDebug::LinuxWchan";
-        ev.details = "Process is waiting in ptrace_stop state via kernel wchan";
-        ev.timestamp = static_cast<uint64_t>(time(nullptr));
-        ev.threat_score = 80;
-        events.push_back(ev);
-    }
-
     if (CheckHardwareBreakpoints()) {
         core::DetectionEvent ev;
         ev.type = core::DetectionType::ANTI_DEBUG_HARDWARE_BP;
@@ -256,7 +246,7 @@ std::vector<core::DetectionEvent> AntiDebug::PerformAudit(const std::vector<std:
         ev.component = "AntiDebug::ProcessScanner";
         ev.details = "Debugger or analysis tool process running in background: " + detectedTool;
         ev.timestamp = static_cast<uint64_t>(time(nullptr));
-        ev.threat_score = 60;
+        ev.threat_score = 20;
         events.push_back(ev);
     }
 

@@ -10,6 +10,7 @@
 #include <filesystem>
 #include <ctime>
 #include <cstring>
+#include <cctype>
 
 #if defined(_WIN32)
 #include <windows.h>
@@ -22,6 +23,12 @@
 namespace noescape::overlay {
 
 namespace {
+
+#if !defined(_WIN32)
+// Xlib's default error handler calls exit(): a window destroyed between XQueryTree and
+// XGetWindowAttributes (BadWindow) would otherwise terminate the whole game process.
+int SwallowX11Error(void*, void*) { return 0; }
+#endif
 
 std::string ToLower(std::string_view str) {
     std::string s(str);
@@ -160,6 +167,8 @@ std::vector<OverlayWindowInfo> OverlayDetector::EnumerateTopLevelWindows() {
         typedef int (*XGetWindowAttributesFn)(void*, unsigned long, void*);
         typedef int (*XFreeFn)(void*);
         typedef int (*XFetchNameFn)(void*, unsigned long, char**);
+        typedef int (*(*XSetErrorHandlerFn)(int (*)(void*, void*)))(void*, void*);
+        typedef int (*XSyncFn)(void*, int);
 
         auto pXOpenDisplay = reinterpret_cast<XOpenDisplayFn>(dlsym(libX11, "XOpenDisplay"));
         auto pXCloseDisplay = reinterpret_cast<XCloseDisplayFn>(dlsym(libX11, "XCloseDisplay"));
@@ -168,8 +177,12 @@ std::vector<OverlayWindowInfo> OverlayDetector::EnumerateTopLevelWindows() {
         auto pXGetWindowAttributes = reinterpret_cast<XGetWindowAttributesFn>(dlsym(libX11, "XGetWindowAttributes"));
         auto pXFree = reinterpret_cast<XFreeFn>(dlsym(libX11, "XFree"));
         auto pXFetchName = reinterpret_cast<XFetchNameFn>(dlsym(libX11, "XFetchName"));
+        auto pXSetErrorHandler = reinterpret_cast<XSetErrorHandlerFn>(dlsym(libX11, "XSetErrorHandler"));
+        auto pXSync = reinterpret_cast<XSyncFn>(dlsym(libX11, "XSync"));
 
         if (pXOpenDisplay && pXCloseDisplay && pXDefaultRootWindow && pXQueryTree && pXGetWindowAttributes && pXFree) {
+            // Install a non-fatal handler for the duration of the scan only
+            auto prevHandler = pXSetErrorHandler ? pXSetErrorHandler(SwallowX11Error) : nullptr;
             void* display = pXOpenDisplay(nullptr);
             if (display) {
                 unsigned long root = pXDefaultRootWindow(display);
@@ -223,8 +236,10 @@ std::vector<OverlayWindowInfo> OverlayDetector::EnumerateTopLevelWindows() {
                     }
                     pXFree(children);
                 }
+                if (pXSync) pXSync(display, 0);
                 pXCloseDisplay(display);
             }
+            if (pXSetErrorHandler) pXSetErrorHandler(prevHandler);
         }
         dlclose(libX11);
     }
@@ -263,9 +278,15 @@ std::vector<OverlayWindowInfo> OverlayDetector::EnumerateTopLevelWindows() {
                 "plasmashell", "xfwm4", "marco", "compiz"
             };
 
+            // Match on the executable's own name only; a path or argument containing "obs"/"steam"
+            // must not exempt an arbitrary program.
+            std::string argv0 = lowerCmd.substr(0, lowerCmd.find(' '));
+            size_t slash = argv0.find_last_of('/');
+            if (slash != std::string::npos) argv0 = argv0.substr(slash + 1);
             bool isWhitelisted = false;
             for (const auto& w : whitelistedTools) {
-                if (lowerCmd.find(w) != std::string::npos) {
+                if (argv0 == w || (argv0.rfind(w, 0) == 0 && argv0.size() > w.size() &&
+                                   !std::isalpha(static_cast<unsigned char>(argv0[w.size()])))) {
                     isWhitelisted = true;
                     break;
                 }
@@ -463,25 +484,25 @@ std::vector<core::DetectionEvent> OverlayDetector::AuditSwapchainHooks() {
 #if defined(_WIN32)
     HMODULE hOpengl = GetModuleHandleA("opengl32.dll");
     if (hOpengl) {
-        graphicsApis.emplace_back("wglSwapBuffers", GetProcAddress(hOpengl, "wglSwapBuffers"));
+        graphicsApis.emplace_back("wglSwapBuffers", reinterpret_cast<void*>(GetProcAddress(hOpengl, "wglSwapBuffers")));
     }
     HMODULE hDxgi = GetModuleHandleA("dxgi.dll");
     if (hDxgi) {
-        graphicsApis.emplace_back("CreateDXGIFactory", GetProcAddress(hDxgi, "CreateDXGIFactory"));
-        graphicsApis.emplace_back("CreateDXGIFactory1", GetProcAddress(hDxgi, "CreateDXGIFactory1"));
-        graphicsApis.emplace_back("CreateDXGIFactory2", GetProcAddress(hDxgi, "CreateDXGIFactory2"));
+        graphicsApis.emplace_back("CreateDXGIFactory", reinterpret_cast<void*>(GetProcAddress(hDxgi, "CreateDXGIFactory")));
+        graphicsApis.emplace_back("CreateDXGIFactory1", reinterpret_cast<void*>(GetProcAddress(hDxgi, "CreateDXGIFactory1")));
+        graphicsApis.emplace_back("CreateDXGIFactory2", reinterpret_cast<void*>(GetProcAddress(hDxgi, "CreateDXGIFactory2")));
     }
     HMODULE hD3d11 = GetModuleHandleA("d3d11.dll");
     if (hD3d11) {
-        graphicsApis.emplace_back("D3D11CreateDeviceAndSwapChain", GetProcAddress(hD3d11, "D3D11CreateDeviceAndSwapChain"));
+        graphicsApis.emplace_back("D3D11CreateDeviceAndSwapChain", reinterpret_cast<void*>(GetProcAddress(hD3d11, "D3D11CreateDeviceAndSwapChain")));
     }
     HMODULE hD3d9 = GetModuleHandleA("d3d9.dll");
     if (hD3d9) {
-        graphicsApis.emplace_back("Direct3DCreate9", GetProcAddress(hD3d9, "Direct3DCreate9"));
+        graphicsApis.emplace_back("Direct3DCreate9", reinterpret_cast<void*>(GetProcAddress(hD3d9, "Direct3DCreate9")));
     }
     HMODULE hVulkan = GetModuleHandleA("vulkan-1.dll");
     if (hVulkan) {
-        graphicsApis.emplace_back("vkQueuePresentKHR", GetProcAddress(hVulkan, "vkQueuePresentKHR"));
+        graphicsApis.emplace_back("vkQueuePresentKHR", reinterpret_cast<void*>(GetProcAddress(hVulkan, "vkQueuePresentKHR")));
     }
 #else
     void* pGlx = dlsym(RTLD_DEFAULT, "glXSwapBuffers");

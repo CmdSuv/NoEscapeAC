@@ -9,13 +9,16 @@
 #include <ctime>
 #include <chrono>
 #include <set>
+#include <atomic>
 
 #if defined(_WIN32)
 #include <windows.h>
 #include <psapi.h>
 #else
 #include <execinfo.h>
+#include <fcntl.h>
 #include <unistd.h>
+#include <sys/stat.h>
 #endif
 
 namespace noescape::core {
@@ -330,7 +333,8 @@ bool BlackboxDumper::DecryptAndDeserialize(
     uint32_t cipherLen = 0;
     if (!GetU32(ptr, remain, cipherLen)) return false;
 
-    if (remain < cipherLen + 64) return false;
+    // widen before adding: a uint32 sum wraps for cipherLen close to 4 GiB
+    if (remain < static_cast<size_t>(cipherLen) + 64) return false;
     std::vector<uint8_t> ciphertext(ptr, ptr + cipherLen);
     ptr += cipherLen; remain -= cipherLen;
 
@@ -342,7 +346,7 @@ bool BlackboxDumper::DecryptAndDeserialize(
     signPayload.append(reinterpret_cast<const char*>(ciphertext.data()), ciphertext.size());
     std::string expectedTag = network::CryptoUtil::HmacSha256(secret_key, signPayload);
 
-    if (providedTag != expectedTag) {
+    if (!network::CryptoUtil::ConstantTimeEquals(providedTag, expectedTag)) {
         Logger::Instance().Error("Blackbox decryption failed: HMAC signature mismatch (Tampered or Wrong Key)");
         return false;
     }
@@ -411,10 +415,27 @@ bool BlackboxDumper::DecryptAndDeserialize(
 }
 
 bool BlackboxDumper::SaveDumpToFile(const std::string& file_path, const std::vector<uint8_t>& encrypted_data) {
-    std::ofstream ofs(file_path, std::ios::binary);
+#if !defined(_WIN32)
+    int fd = ::open(file_path.c_str(), O_CREAT | O_WRONLY | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0600);
+    if (fd < 0) return false;
+    (void)::fchmod(fd, 0600);
+    size_t total = 0;
+    while (total < encrypted_data.size()) {
+        ssize_t n = ::write(fd, encrypted_data.data() + total, encrypted_data.size() - total);
+        if (n <= 0) {
+            ::close(fd);
+            return false;
+        }
+        total += static_cast<size_t>(n);
+    }
+    ::close(fd);
+    return true;
+#else
+    std::ofstream ofs(file_path, std::ios::binary | std::ios::trunc);
     if (!ofs.is_open()) return false;
     ofs.write(reinterpret_cast<const char*>(encrypted_data.data()), encrypted_data.size());
     return ofs.good();
+#endif
 }
 
 void BlackboxDumper::SetDumpDirectory(const std::string& dir) {
@@ -430,7 +451,8 @@ std::string BlackboxDumper::GetDumpDirectory() const {
 std::string BlackboxDumper::GenerateDumpFilename() const {
     uint64_t now = static_cast<uint64_t>(std::time(nullptr));
     std::lock_guard<std::mutex> lock(mutex_);
-    std::string base = "noescape_blackbox_" + std::to_string(now) + ".dmp";
+    static std::atomic<uint32_t> seq{0};
+    std::string base = "noescape_blackbox_" + std::to_string(now) + "_" + std::to_string(seq.fetch_add(1)) + ".dmp";
     if (dump_dir_.empty()) {
         return base;
     }

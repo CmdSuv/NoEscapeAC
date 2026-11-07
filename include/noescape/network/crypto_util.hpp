@@ -18,6 +18,9 @@ public:
     // Machine Hardware ID (HWID) Fingerprinting
     static std::string GetMachineHWID();
 
+    // Constant-time equality for MAC/signature comparison (no early exit on first mismatch)
+    static bool ConstantTimeEquals(const std::string& a, const std::string& b);
+
     // Hex formatting helper
     static std::string ToHex(const uint8_t* data, size_t length);
 };

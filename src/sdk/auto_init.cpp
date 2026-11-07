@@ -70,6 +70,7 @@ DWORD WINAPI WindowsAutoInitWorker(LPVOID lpParam) {
     NoEscapeConfig cfg = NoEscape_GetDefaultConfig();
 
     // Stack buffers for environment overrides (NoEscape_Init copies into std::string immediately)
+    DWORD len = 0;
     char urlBuf[256]{};
     len = GetEnvironmentVariableA("NOESCAPE_PANEL_URL", urlBuf, sizeof(urlBuf));
     if (len > 0) {
@@ -82,6 +83,12 @@ DWORD WINAPI WindowsAutoInitWorker(LPVOID lpParam) {
         cfg.secret_key = keyBuf;
     }
 
+    char pinBuf[128]{};
+    len = GetEnvironmentVariableA("NOESCAPE_PANEL_PIN", pinBuf, sizeof(pinBuf));
+    if (len > 0 && len < sizeof(pinBuf)) {
+        NoEscape_SetPanelPin(pinBuf);
+    }
+
     char dumpBuf[MAX_PATH]{};
     len = GetEnvironmentVariableA("NOESCAPE_DUMP_DIR", dumpBuf, sizeof(dumpBuf));
     if (len > 0) {
@@ -90,14 +97,14 @@ DWORD WINAPI WindowsAutoInitWorker(LPVOID lpParam) {
 
     char threshBuf[32]{};
     len = GetEnvironmentVariableA("NOESCAPE_BAN_THRESHOLD", threshBuf, sizeof(threshBuf));
-    if (len > 0) {
+    if (allowDevOptOut && len > 0) {
         int v = std::atoi(threshBuf);
         if (v > 0) cfg.ban_threshold = static_cast<uint32_t>(v);
     }
 
     char enforceBuf[16]{};
     len = GetEnvironmentVariableA("NOESCAPE_ENFORCE_BAN", enforceBuf, sizeof(enforceBuf));
-    if (len > 0) {
+    if (allowDevOptOut && len > 0) {
         if (_stricmp(enforceBuf, "0") == 0 || _stricmp(enforceBuf, "false") == 0) {
             cfg.enforce_ban = false;
         } else if (_stricmp(enforceBuf, "1") == 0 || _stricmp(enforceBuf, "true") == 0) {
@@ -107,7 +114,7 @@ DWORD WINAPI WindowsAutoInitWorker(LPVOID lpParam) {
 
     char antiDebugBuf[16]{};
     len = GetEnvironmentVariableA("NOESCAPE_ENABLE_ANTI_DEBUG", antiDebugBuf, sizeof(antiDebugBuf));
-    if (len > 0) {
+    if (allowDevOptOut && len > 0) {
         if (_stricmp(antiDebugBuf, "0") == 0 || _stricmp(antiDebugBuf, "false") == 0) {
             cfg.enable_anti_debug = false;
         } else if (_stricmp(antiDebugBuf, "1") == 0 || _stricmp(antiDebugBuf, "true") == 0) {
@@ -125,7 +132,7 @@ DWORD WINAPI WindowsAutoInitWorker(LPVOID lpParam) {
 
     char termBuf[16]{};
     len = GetEnvironmentVariableA("NOESCAPE_TERMINATE_ON_BAN", termBuf, sizeof(termBuf));
-    if (len > 0) {
+    if (allowDevOptOut && len > 0) {
         if (_stricmp(termBuf, "0") == 0 || _stricmp(termBuf, "false") == 0) {
             cfg.terminate_on_ban = false;
         } else if (_stricmp(termBuf, "1") == 0 || _stricmp(termBuf, "true") == 0) {
@@ -315,13 +322,18 @@ void* LinuxAutoInitWorker(void* arg) {
         cfg.secret_key = secretKeyEnv;
     }
 
+    const char* pinEnv = std::getenv("NOESCAPE_PANEL_PIN");
+    if (pinEnv && std::strlen(pinEnv) > 0) {
+        NoEscape_SetPanelPin(pinEnv);
+    }
+
     const char* dumpDirEnv = std::getenv("NOESCAPE_DUMP_DIR");
     if (dumpDirEnv && std::strlen(dumpDirEnv) > 0) {
         cfg.blackbox_dump_dir = dumpDirEnv;
     }
 
     const char* banThreshEnv = std::getenv("NOESCAPE_BAN_THRESHOLD");
-    if (banThreshEnv) {
+    if (allowDevOptOut && banThreshEnv) {
         char* endp = nullptr;
         unsigned long v = std::strtoul(banThreshEnv, &endp, 10);
         if (endp && *endp == '\0' && v > 0) {
@@ -330,7 +342,7 @@ void* LinuxAutoInitWorker(void* arg) {
     }
 
     const char* enforceBanEnv = std::getenv("NOESCAPE_ENFORCE_BAN");
-    if (enforceBanEnv) {
+    if (allowDevOptOut && enforceBanEnv) {
         if (std::strcmp(enforceBanEnv, "0") == 0 || strcasecmp(enforceBanEnv, "false") == 0) {
             cfg.enforce_ban = false;
         } else if (std::strcmp(enforceBanEnv, "1") == 0 || strcasecmp(enforceBanEnv, "true") == 0) {
@@ -339,7 +351,7 @@ void* LinuxAutoInitWorker(void* arg) {
     }
 
     const char* antiDebugEnv = std::getenv("NOESCAPE_ENABLE_ANTI_DEBUG");
-    if (antiDebugEnv) {
+    if (allowDevOptOut && antiDebugEnv) {
         if (std::strcmp(antiDebugEnv, "0") == 0 || strcasecmp(antiDebugEnv, "false") == 0) {
             cfg.enable_anti_debug = false;
         } else if (std::strcmp(antiDebugEnv, "1") == 0 || strcasecmp(antiDebugEnv, "true") == 0) {
@@ -355,7 +367,7 @@ void* LinuxAutoInitWorker(void* arg) {
     }
 
     const char* termEnv = std::getenv("NOESCAPE_TERMINATE_ON_BAN");
-    if (termEnv) {
+    if (allowDevOptOut && termEnv) {
         if (std::strcmp(termEnv, "0") == 0 || strcasecmp(termEnv, "false") == 0) {
             cfg.terminate_on_ban = false;
         } else if (std::strcmp(termEnv, "1") == 0 || strcasecmp(termEnv, "true") == 0) {

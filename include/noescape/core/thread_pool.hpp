@@ -9,6 +9,9 @@
 #include <functional>
 #include <atomic>
 #include <type_traits>
+#include <tuple>
+#include <memory>
+#include <stdexcept>
 
 namespace noescape::core {
 
@@ -26,7 +29,9 @@ public:
         using return_type = std::invoke_result_t<F, Args...>;
 
         auto task = std::make_shared<std::packaged_task<return_type()>>(
-            std::bind(std::forward<F>(f), std::forward<Args>(args)...)
+            [fn = std::forward<F>(f), tup = std::make_tuple(std::forward<Args>(args)...)]() mutable -> return_type {
+                return std::apply(std::move(fn), std::move(tup));
+            }
         );
 
         std::future<return_type> res = task->get_future();
