@@ -2,7 +2,7 @@
 
 All notable technical changes to the NoEscape Anti-Cheat system are documented in this file.
 
-## [Release 1.4.1 / v1.4 Critical Remediation Patch] — 2026-11-08
+## [Release 1.5.0] — 2026-11-08 (Critical Security Remediation & Architecture Hardening)
 
 ### Fixed & Remediated
 - **P0-1: Timestamp Normalization across Detection Subsystems (`types.hpp`, all producers):**

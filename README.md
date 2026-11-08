@@ -1,16 +1,16 @@
-# 🛡️ NoEscape Anti-Cheat Engine (v7.0 / Release 1.4)
+# 🛡️ NoEscape Anti-Cheat Engine (v7.0 / Release 1.5)
 
-[![GitHub Release](https://img.shields.io/badge/Release-NoEscapeAC%201.4-red?style=for-the-badge&logo=github)](https://github.com/CmdSuv/NoEscapeAC/releases/tag/v1.4)
-[![Download Zip](https://img.shields.io/badge/Download-Source%20Code%20(.zip)-darkred?style=for-the-badge&logo=github)](https://github.com/CmdSuv/NoEscapeAC/archive/refs/tags/v1.4.zip)
+[![GitHub Release](https://img.shields.io/badge/Release-NoEscapeAC%201.5-red?style=for-the-badge&logo=github)](https://github.com/CmdSuv/NoEscapeAC/releases/tag/v1.5)
+[![Download Zip](https://img.shields.io/badge/Download-Source%20Code%20(.zip)-darkred?style=for-the-badge&logo=github)](https://github.com/CmdSuv/NoEscapeAC/archive/refs/tags/v1.5.zip)
 [![License: Non-Commercial Share-Alike](https://img.shields.io/badge/License-Non--Commercial%20Share--Alike-blue?style=for-the-badge)](LICENSE)
 
 **NoEscape Anti-Cheat (NoEscapeAC)** is a modern, lightweight, and unified user-mode (Ring-3) anti-cheat and runtime integrity framework engineered in **C++20** for Linux and Windows. Designed to safeguard competitive multiplayer games and custom game launchers without intrusive kernel drivers, NoEscapeAC delivers defense-in-depth security: 20+ GB/s AVX2 SIMD byte pattern scanning, unbacked memory forensics with JVM/JIT HotSpot awareness, automatic inline API unhooking (with Intel CET `endbr64` +4 offset support), PCIe DMA anomaly & hardware controller detection, statistical mouse kinematics (silent-aim / instant-snap heuristics), ESP fake-window overlay interception, runtime rolling-key memory value obfuscation, and a standalone crimson security ban enforcement UI.
 
 ---
 
-### 📦 Latest Release: NoEscapeAC 1.4
-> **[Direct Download: NoEscapeAC 1.4 Source Code (.zip)](https://github.com/CmdSuv/NoEscapeAC/archive/refs/tags/v1.4.zip)**  
-> **Release Tag**: `v1.4` | **Changelog & Release Notes**: [View on GitHub Releases](https://github.com/CmdSuv/NoEscapeAC/releases/tag/v1.4)
+### 📦 Latest Release: NoEscapeAC 1.5
+> **[Direct Download: NoEscapeAC 1.5 Source Code (.zip)](https://github.com/CmdSuv/NoEscapeAC/archive/refs/tags/v1.5.zip)**  
+> **Release Tag**: `v1.5` | **Changelog & Release Notes**: [View on GitHub Releases](https://github.com/CmdSuv/NoEscapeAC/releases/tag/v1.5)
 
 ---
 
@@ -113,7 +113,7 @@ cmake --build build -j$(nproc)
 - [PLATFORM_COMPATIBILITY.md](PLATFORM_COMPATIBILITY.md) — Windows x64, Linux x86_64, and Proton/Wine execution parity.
 - [TEST_STRATEGY.md](TEST_STRATEGY.md) — Unit test suite structure (171 tests), mock injection harnesses, and CI sanitizers.
 - [PRIVACY_AND_DATA_POLICY.md](PRIVACY_AND_DATA_POLICY.md) — Zero PII collection policy, one-way HWID hashing, and encrypted blackbox dumps.
-- [CHANGELOG.md](CHANGELOG.md) — Full release history from v1.0 through v1.4.
+- [CHANGELOG.md](CHANGELOG.md) — Full release history from v1.0 through v1.5.
 - [CURRENT_PROJECT_STATE.md](CURRENT_PROJECT_STATE.md) — Active project state, build verification, and deployment handoff.
 - [AUDIT_REPORT.md](AUDIT_REPORT.md) — Comprehensive technical security audit report.
 - [RING3_THREAT_MODEL.md](RING3_THREAT_MODEL.md) — Ring-3 threat modeling, threat vectors, and architectural mitigations.
