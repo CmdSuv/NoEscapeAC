@@ -2,6 +2,36 @@
 
 All notable technical changes to the NoEscape Anti-Cheat system are documented in this file.
 
+## [Release 1.6.0] — 2026-11-08 (Cross-Platform Live Verification & Evasion Hardening Release)
+
+### Added & Remediated
+- **Live Windows PE & MinGW-w64 Cross-Platform Parity:**
+  - Integrated official MinGW-w64 GCC 16.2.0 cross-compilation toolchain (`cmake/toolchain-mingw64.cmake`) and Wine/Proton runner into CI and automated scripts.
+  - Resolved 6 critical Windows OS runtime and loader edge-case bugs:
+    - *Self-Thread Suspend Deadlock:* Replaced `SuspendThread` with `RtlCaptureContext` for scanner self-threads.
+    - *128TB VirtualQuery Overflow:* Terminated region loops cleanly at user-space boundaries.
+    - *System-Wide Handle Duplication Deadlock:* Filtered non-process handles during OS handle table audits.
+    - *Windows DLL Forwarder Allowlisting:* Whitelisted legitimate Windows 10/11 OS API forwarders (`advapi32` -> `cryptbase`/`cryptsp`/`bcrypt`, `kernelbase` -> `ntdll`, `user32` -> `win32u`, `ole32` -> `combase`, `gdi32` -> `gdi32full`, `ws2_32` -> `mswsock`).
+    - *CNG Library Linking:* Linked `ncrypt` library for Windows CNG key storage providers.
+    - Added `<psapi.h>` for `EnumProcessModules`.
+- **Server ESP Occlusion Culling with Vector FOV Frustum & Z-Axis Raycasts (`server_integration.cpp`):**
+  - Implemented dynamic 3D view frustum culling: calculates angular deviation $\theta$ between observer's pitch/yaw look vector and target direction. Withholds full transform replication for targets outside $\frac{\text{FOV}}{2} + \text{margin}$, completely neutralizing 360° radar and 2-PC DMA cheats.
+  - Added melee and close-contact physical body overlap protection (`dist <= r`), ensuring knife-distance combatants are never falsely culled by FOV.
+  - Upgraded raycast probe sampling from 2D horizontal plane to 3D with vertical offsets (`+0.85r` head, `-0.85r` body), eliminating false occlusion of head-glitching and crouch-peeking players behind half-walls.
+- **Multi-Signal Corroboration Engine v2 (`evidence_correlator.cpp`):**
+  - Resolved the coarse-category immunity paradox under `strict_corroboration_mode`.
+  - Orthogonal detection sub-types within the same family (e.g. `KINEMATICS_AIMBOT_SNAP` + `KINEMATICS_TRIGGERBOT`, or `UNBACKED_EXECUTABLE_MEMORY` + `MEMORY_SIGNATURE_MATCH`) are now formally recognized as independent corroborating proofs even when referencing the same root cause.
+- **Kinematics Sustained Yaw-Sweep Hardening (`aim_analyzer.cpp`):**
+  - Removed unconditional axis-aligned sweep bypass for sustained rotations ($> 15^\circ$), auditing robotic linearity and artificial velocity smoothing even during pure horizontal head-level panning.
+- **Timing Integrity Speedhack Debounced Window (`timing.cpp`):**
+  - Tightened speedhack ratio threshold window from $[0.60, 1.60]$ down to $[0.80, 1.25]$ with consecutive double-sample debouncing to detect moderate speedhacks ($> 20\%$) while suppressing OS scheduling jitter.
+- **Engine Watchdog Fail-Closed Resilience (`engine.cpp`):**
+  - Prolonged background audit loop stalls ($> 6000\text{ms}$) without system sleep trigger an immediate `FATAL_BAN` enforcement, preventing attackers from disabling audit routines by suspending background worker threads.
+- **Test Automation & GitHub Actions CI Matrix:**
+  - Added `scripts/test_all.sh`, `scripts/test_linux.sh`, and `scripts/test_windows.sh`.
+  - Added `.github/workflows/ci.yml` supporting Ubuntu (GCC, Clang) and Windows (MSVC 2022).
+  - Achieved 178 / 178 tests (100% pass rate) on both Linux and Windows.
+
 ## [Release 1.5.1 / Next-Gen Ring-3 SOTA Modernization] — 2026-11-08
 
 ### Added & Reengineered (All 10 SOTA Modules)

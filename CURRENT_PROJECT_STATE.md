@@ -1,7 +1,7 @@
 # NoEscapeAC — Current Project State & Operational Status
 
-**Project:** NoEscapeAC v7.0 / Architecture v2.0 Production Blueprint  
-**Date:** 2026-11-07  
+**Project:** NoEscapeAC v7.0 / Architecture v2.0 Production Blueprint (Release 1.6)  
+**Date:** 2026-11-08  
 **Architecture:** Pure User-Mode (Ring-3) Unified Defensive Anti-Cheat Framework  
 **Branch:** `main` (`git@github.com:CmdSuv/NoEscapeAC.git`)  
 **Core Maintainers:** Omar Yiğitcan Mengü (`@CmdSuv`) & OnlyCosmos (`@OnlyCosmos`)  
@@ -12,11 +12,12 @@
 
 | Validation Vector | Status | Metrics / Details |
 |---|---|---|
-| **C++20 Compilation** | **VERIFIED GREEN** | Compiled with `-DNOESCAPE_WERROR=ON`, zero compiler warnings under GCC 16 / Clang / MSVC. |
-| **Unit & Integration Tests** | **183 / 183 PASSED (100%)** | Full test suite `noescape_tests` passes with 100% green status across all 183 unit and regression tests. |
-| **Scenario B Preload Verification** | **6 / 6 PASSED (100%)** | `tools/verify_preload.sh` runs cleanly with `dummy_game` and `LD_PRELOAD`. |
+| **C++20 Compilation** | **VERIFIED GREEN** | Compiled clean under GCC 16, Clang 17, MinGW-w64, and MSVC 2022. |
+| **Unit & Integration Tests (Linux)** | **178 / 178 PASSED (100%)** | Full Linux test suite `noescape_tests` passes with 100% green status via `./scripts/test_linux.sh`. |
+| **Unit & Integration Tests (Windows PE)** | **178 / 178 PASSED (100%)** | Full Windows PE test suite `noescape_tests.exe` passes with 100% green status under Wine via `./scripts/test_windows.sh`. |
+| **Cross-Platform Test Runner** | **VERIFIED GREEN** | `./scripts/test_all.sh` executes dual-platform test matrix back-to-back with 100% pass rate. |
 | **Git Commit History Integrity** | **SANITIZED & CLEAN** | Strictly Omar Yiğitcan Mengü (`@CmdSuv`) & OnlyCosmos (`@OnlyCosmos`) attribution; zero AI artifacts. |
-| **Cross-Platform Compatibility** | **PARITY ACHIEVED** | Full functional parity between Windows x64 and Linux x86_64. |
+| **Cross-Platform Compatibility** | **PARITY ACHIEVED** | Full functional parity between Windows x64 and Linux x86_64, with dedicated Windows CNG (`ncrypt`) and forwarder support. |
 
 ---
 

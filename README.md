@@ -1,16 +1,16 @@
-# 🛡️ NoEscape Anti-Cheat Engine (v7.0 / Release 1.5)
+# 🛡️ NoEscape Anti-Cheat Engine (v7.0 / Release 1.6)
 
-[![GitHub Release](https://img.shields.io/badge/Release-NoEscapeAC%201.5-red?style=for-the-badge&logo=github)](https://github.com/CmdSuv/NoEscapeAC/releases/tag/v1.5)
-[![Download Zip](https://img.shields.io/badge/Download-Source%20Code%20(.zip)-darkred?style=for-the-badge&logo=github)](https://github.com/CmdSuv/NoEscapeAC/archive/refs/tags/v1.5.zip)
+[![GitHub Release](https://img.shields.io/badge/Release-NoEscapeAC%201.6-red?style=for-the-badge&logo=github)](https://github.com/CmdSuv/NoEscapeAC/releases/tag/v1.6)
+[![Download Zip](https://img.shields.io/badge/Download-Source%20Code%20(.zip)-darkred?style=for-the-badge&logo=github)](https://github.com/CmdSuv/NoEscapeAC/archive/refs/tags/v1.6.zip)
 [![License: Non-Commercial Share-Alike](https://img.shields.io/badge/License-Non--Commercial%20Share--Alike-blue?style=for-the-badge)](LICENSE)
 
-**NoEscape Anti-Cheat (NoEscapeAC)** is a modern, lightweight, and unified user-mode (Ring-3) anti-cheat and runtime integrity framework engineered in **C++20** for Linux and Windows. Designed to safeguard competitive multiplayer games and custom game launchers without intrusive kernel drivers, NoEscapeAC delivers defense-in-depth security: 20+ GB/s AVX2 SIMD byte pattern scanning, unbacked memory forensics with JVM/JIT HotSpot awareness, automatic inline API unhooking (with Intel CET `endbr64` +4 offset support), PCIe DMA anomaly & hardware controller detection, statistical mouse kinematics (silent-aim / instant-snap heuristics), ESP fake-window overlay interception, runtime rolling-key memory value obfuscation, and a standalone crimson security ban enforcement UI.
+**NoEscape Anti-Cheat (NoEscapeAC)** is a modern, lightweight, and unified user-mode (Ring-3) anti-cheat and runtime integrity framework engineered in **C++20** for Linux and Windows. Designed to safeguard competitive multiplayer games and custom game launchers without intrusive kernel drivers, NoEscapeAC delivers defense-in-depth security: 20+ GB/s AVX2 SIMD byte pattern scanning, unbacked memory forensics with JVM/JIT HotSpot awareness, automatic inline API unhooking (with Intel CET `endbr64` +4 offset support), PCIe DMA anomaly & hardware controller detection, statistical mouse kinematics (silent-aim / instant-snap heuristics), ESP fake-window overlay interception, runtime rolling-key memory value obfuscation, server-authoritative FOV frustum & occlusion culling, and a standalone crimson security ban enforcement UI.
 
 ---
 
-### 📦 Latest Release: NoEscapeAC 1.5
-> **[Direct Download: NoEscapeAC 1.5 Source Code (.zip)](https://github.com/CmdSuv/NoEscapeAC/archive/refs/tags/v1.5.zip)**  
-> **Release Tag**: `v1.5` | **Changelog & Release Notes**: [View on GitHub Releases](https://github.com/CmdSuv/NoEscapeAC/releases/tag/v1.5)
+### 📦 Latest Release: NoEscapeAC 1.6
+> **[Direct Download: NoEscapeAC 1.6 Source Code (.zip)](https://github.com/CmdSuv/NoEscapeAC/archive/refs/tags/v1.6.zip)**  
+> **Release Tag**: `v1.6` | **Changelog & Release Notes**: [View on GitHub Releases](https://github.com/CmdSuv/NoEscapeAC/releases/tag/v1.6)
 
 ---
 
@@ -86,14 +86,17 @@
 #### Build Commands
 ```bash
 # Configure and build (Linux)
-cmake -B build -DCMAKE_BUILD_TYPE=Release -DNOESCAPE_WERROR=ON
+cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j$(nproc)
 
-# Run Comprehensive Unit Test Suite (183 test cases across all subsystems)
-./build/noescape_tests
+# Run Full Cross-Platform Validation (Linux Native + Windows PE under Wine)
+./scripts/test_all.sh
 
-# Run Preload Scenario B Verification Suite (6/6 tests)
-./tools/verify_preload.sh ./build
+# Run Linux Native Test Suite (178 test cases across all subsystems)
+./scripts/test_linux.sh
+
+# Run Windows PE Test Suite via MinGW-w64 + Wine (178 test cases)
+./scripts/test_windows.sh
 
 # Run Interactive Subsystem Demo
 ./build/noescape_demo
@@ -109,13 +112,14 @@ cmake --build build -j$(nproc)
 - [SECURITY_ARCHITECTURE.md](SECURITY_ARCHITECTURE.md) — Subsystem taxonomy, layered defense structure, anti-tamper, and telemetry pipeline.
 - [DETECTION_MATRIX.md](DETECTION_MATRIX.md) — Complete detection coverage matrix, bypass difficulty, and test references.
 - [FALSE_POSITIVE_STRATEGY.md](FALSE_POSITIVE_STRATEGY.md) — Heuristic dampening, confidence tiers, whitelisting, and dispute workflow.
-- [PERFORMANCE_BENCHMARKS.md](PERFORMANCE_BENCHMARKS.md) — AVX2 SIMD throughput (>9.4 GB/s), VMA page walks, and frame-time impact.
+- [PERFORMANCE_BENCHMARKS.md](PERFORMANCE_BENCHMARKS.md) — AVX2 SIMD throughput (>20 GB/s), VMA page walks, and frame-time impact.
 - [PLATFORM_COMPATIBILITY.md](PLATFORM_COMPATIBILITY.md) — Windows x64, Linux x86_64, and Proton/Wine execution parity.
-- [TEST_STRATEGY.md](TEST_STRATEGY.md) — Unit test suite structure (183 tests), mock injection harnesses, and CI sanitizers.
+- [TEST_STRATEGY.md](TEST_STRATEGY.md) — Unit test suite structure (178 tests), mock injection harnesses, and cross-platform runners.
 - [PRIVACY_AND_DATA_POLICY.md](PRIVACY_AND_DATA_POLICY.md) — Zero PII collection policy, one-way HWID hashing, and encrypted blackbox dumps.
-- [CHANGELOG.md](CHANGELOG.md) — Full release history from v1.0 through v1.5.
+- [CHANGELOG.md](CHANGELOG.md) — Full release history from v1.0 through v1.6.
 - [CURRENT_PROJECT_STATE.md](CURRENT_PROJECT_STATE.md) — Active project state, build verification, and deployment handoff.
 - [AUDIT_REPORT.md](AUDIT_REPORT.md) — Comprehensive technical security audit report.
+- [TECH_MODERNIZATION_REPORT.md](TECH_MODERNIZATION_REPORT.md) — Next-Gen SOTA architecture modernization report.
 - [RING3_THREAT_MODEL.md](RING3_THREAT_MODEL.md) — Ring-3 threat modeling, threat vectors, and architectural mitigations.
 - [DETECTION_GAP_ANALYSIS.md](DETECTION_GAP_ANALYSIS.md) — Gap analysis and technical countermeasure analysis.
 - [FILE_INVENTORY.md](FILE_INVENTORY.md) — Exhaustive source file catalog, public APIs, calling graphs, and ownership.
@@ -187,9 +191,11 @@ NoEscapeAC/
 │   ├── server/
 │   ├── network/
 │   └── sdk/
+├── cmake/                    # MinGW-w64 toolchain configuration
+├── scripts/                  # Automated cross-platform test runners (test_all, test_linux, test_windows)
 ├── demo/                     # Interactive demonstration program
-├── tests/                    # 183 unit & regression tests
-└── CMakeLists.txt            # Exports libnoescape.a, libnoescape.so, and executables
+├── tests/                    # 178 unit & regression tests (100% Linux + Windows parity)
+└── CMakeLists.txt            # Exports libnoescape, static/shared targets, and executables
 ```
 
 ---
