@@ -38,6 +38,7 @@ struct ReplicationDecision {
     bool replicate_acoustic_cue_only{false};
     bool culled_by_occlusion{false};
     bool culled_by_distance{false};
+    bool culled_by_fov{false};
     bool occlusion_unconfigured{false}; // Explicitly flagged when no occluder boxes or adapter are configured
 };
 

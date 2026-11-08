@@ -155,6 +155,7 @@ set(TEST_SOURCES
     tests/test_server_and_correlation.cpp
     tests/test_audit_v2_reengineering.cpp
     tests/test_remediation_v1_4.cpp
+    tests/test_audit_hardening_v1_5.cpp
 )
 
 add_executable(noescape_tests ${TEST_SOURCES})

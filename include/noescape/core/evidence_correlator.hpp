@@ -85,6 +85,8 @@ private:
         uint64_t event_id{0};
         uint64_t timestamp{0};
         std::string root_cause_id;
+        DetectionType type{DetectionType::UNKNOWN};
+        Severity severity{Severity::INFO};
     };
 
     std::unordered_map<std::string, DetectionEvent> aggregated_by_key_;

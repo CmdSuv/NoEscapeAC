@@ -183,9 +183,9 @@ std::optional<core::DetectionEvent> AimAnalyzer::CheckPerfectLinearity() {
 
     if (lineLenSq < 1.0f) return std::nullopt;
 
-    // Pure horizontal/vertical sweeps (gamepad stick, low-sens mouse panning) are trivially "linear"
-    // for humans; only diagonal trajectories carry signal.
-    if (std::min(std::abs(vP), std::abs(vY)) < 1.0f) return std::nullopt;
+    // Pure horizontal/vertical sweeps (gamepad stick, low-sens mouse panning) of <= 15 deg
+    // are exempted; sustained sweeps (> 15 deg) must be analyzed to prevent axis-aligned aimbot bypass.
+    if (totalDist <= 15.0f && std::min(std::abs(vP), std::abs(vY)) < 1.0f) return std::nullopt;
 
     std::vector<float> perpDists;
     perpDists.reserve(min_samples_);
@@ -261,7 +261,8 @@ std::optional<core::DetectionEvent> AimAnalyzer::CheckArtificialSmoothing() {
         const auto& st = history_[n - min_samples_];
         float nP = history_.back().pitch - st.pitch;
         float nY = NormalizeAngleDelta(history_.back().yaw - st.yaw);
-        if (std::min(std::abs(nP), std::abs(nY)) < 1.0f) return std::nullopt; // axis-aligned sweep
+        // Exemption for axis-aligned sweeps applies only to movements <= 15 deg; sustained sweeps (> 15 deg) are analyzed
+        if (totalMovement <= 15.0f && std::min(std::abs(nP), std::abs(nY)) < 1.0f) return std::nullopt;
     }
 
     double meanVel = std::accumulate(velocities.begin(), velocities.end(), 0.0) / velocities.size();

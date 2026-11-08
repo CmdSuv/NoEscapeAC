@@ -309,14 +309,17 @@ bool ServerEspFilter::IsLineOfSightOccluded(
     std::shared_lock<std::shared_mutex> lock(mutex_);
     if (occluders_.empty() && !visibility_adapter_) return false;
 
-    // Test center-of-mass plus 4 lateral/vertical bounding offsets to prevent pop-in artifacts on corner peeks
+    // Test center-of-mass plus 6 lateral and vertical bounding offsets ({0,0,0}, {+/-r,0,0}, {0,+/-r,0}, {0,0,+/-r})
+    // to prevent pop-in artifacts on corner peeks and false occlusion of crouching/head-peeking players behind half-walls.
     const float r = std::max(0.0f, target.bounding_radius);
-    const float sampleOffsets[5][3] = {
+    const float sampleOffsets[7][3] = {
         {0.0f, 0.0f, 0.0f},
         {r, 0.0f, 0.0f},
         {-r, 0.0f, 0.0f},
         {0.0f, r, 0.0f},
-        {0.0f, -r, 0.0f}
+        {0.0f, -r, 0.0f},
+        {0.0f, 0.0f, r},
+        {0.0f, 0.0f, -r}
     };
 
     for (const auto& offset : sampleOffsets) {
@@ -353,6 +356,42 @@ ReplicationDecision ServerEspFilter::EvaluateEntityReplication(
     if (dist > max_replication_distance_) {
         decision.culled_by_distance = true;
         return decision;
+    }
+
+    // FOV Frustum Culling:
+    // Determine observer unit forward vector from yaw and pitch (degrees: yaw about +Z, pitch up positive)
+    constexpr float kDegToRad = 3.14159265358979323846f / 180.0f;
+    constexpr float kRadToDeg = 180.0f / 3.14159265358979323846f;
+    float cp = std::cos(observer.pitch_deg * kDegToRad);
+    float sp = std::sin(observer.pitch_deg * kDegToRad);
+    float cyw = std::cos(observer.yaw_deg * kDegToRad);
+    float syw = std::sin(observer.yaw_deg * kDegToRad);
+    float fx = cp * cyw;
+    float fy = cp * syw;
+    float fz = sp;
+
+    float effectiveFov = (observer.fov_deg > 0.0f && observer.fov_deg < 360.0f) ? observer.fov_deg : 110.0f;
+    float halfFov = effectiveFov * 0.5f;
+    constexpr float kFovMarginDeg = 15.0f; // Peripheral / aspect ratio buffer
+    float r = std::max(0.0f, target.bounding_radius);
+    float angularRadius = (dist > r && r > 0.0f) ? (std::asin(std::clamp(r / dist, 0.0f, 1.0f)) * kRadToDeg) : 0.0f;
+    float maxAngle = halfFov + kFovMarginDeg + angularRadius;
+
+    if (dist > 0.001f) {
+        float dirX = dx / dist;
+        float dirY = dy / dist;
+        float dirZ = dz / dist;
+        float dot = fx * dirX + fy * dirY + fz * dirZ;
+        dot = std::clamp(dot, -1.0f, 1.0f);
+        float angleDeg = std::acos(dot) * kRadToDeg;
+
+        if (angleDeg > maxAngle) {
+            decision.culled_by_fov = true;
+            if (target.is_making_sound && dist <= target.sound_radius) {
+                decision.replicate_acoustic_cue_only = true;
+            }
+            return decision;
+        }
     }
 
     if (!HasOcclusionData()) {

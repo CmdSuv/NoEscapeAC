@@ -91,9 +91,9 @@ std::optional<core::DetectionEvent> TimingIntegrity::CheckSpeedhack() {
     last_tsc_ = nowTsc;
     last_os_time_ = nowOs;
 
-    // A ratio significantly < 0.60 means OS time is ticking much faster than CPU cycles (Speedhack acceleration)
-    // A ratio significantly > 1.60 means OS time was dilated / slowed down (Bullet-time or speedhack slowdown)
-    if (ratio < 0.60 || ratio > 1.60) {
+    // A ratio < 0.80 means OS time is ticking faster than CPU cycles (Speedhack acceleration >= 1.25x)
+    // A ratio > 1.25 means OS time is ticking slower than CPU cycles (Speedhack slowdown <= 0.80x)
+    if (ratio < 0.80 || ratio > 1.25) {
         consecutive_anomalies_++;
         // Require 2 consecutive anomalies to eliminate scheduling hiccups / context switch spikes
         if (consecutive_anomalies_ >= 2) {

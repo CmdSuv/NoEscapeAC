@@ -144,6 +144,7 @@ private:
     std::atomic<uint64_t> last_heavy_scan_ms_{0};
     std::atomic<bool> freeze_background_loop_for_testing_{false};
     std::atomic<bool> freeze_watchdog_for_testing_{false};
+    std::atomic<bool> watchdog_delay_warned_{false};
 
     EvidenceCorrelator correlator_;
     network::PanelClient panel_client_;

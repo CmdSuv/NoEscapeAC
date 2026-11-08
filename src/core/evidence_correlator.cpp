@@ -120,9 +120,11 @@ bool EvidenceCorrelator::IsWeakSingleHeuristic(const DetectionEvent& event) {
         event.component.find("KernelIntegrity") != std::string::npos) {
         return true;
     }
-    // 6. Watchdog scheduling delay / heartbeat timing jitter alone
+    // 6. Watchdog scheduling delay / heartbeat timing jitter alone (transient < 6000ms)
     if (event.type == DetectionType::HEARTBEAT_TAMPERING &&
-        event.component.find("Watchdog") != std::string::npos) {
+        event.component.find("Watchdog") != std::string::npos &&
+        event.details.find("Prolonged") == std::string::npos &&
+        event.details.find("> 6000ms") == std::string::npos) {
         return true;
     }
     // 7. Process environment audit / dynamic linker environment variables alone
@@ -301,20 +303,25 @@ CorrelationDecision EvidenceCorrelator::Evaluate(
         if (entry.root_cause_id == ev.root_cause_id) {
             entry.timestamp = now;
             entry.event_id = ev.event_id;
+            entry.type = ev.type;
+            entry.severity = ev.severity;
             foundRootCause = true;
             break;
         }
     }
     if (!foundRootCause) {
-        catEntries.push_back(CategoryTimelineEntry{ev.event_id, now, ev.root_cause_id});
+        catEntries.push_back(CategoryTimelineEntry{ev.event_id, now, ev.root_cause_id, ev.type, ev.severity});
         if (catEntries.size() > 32) {
             catEntries.erase(catEntries.begin());
         }
     }
 
-    // Compute independent active categories with distinct root causes
+    // Compute independent active categories with distinct root causes and orthogonal types
     std::unordered_set<uint32_t> distinctCategories;
     std::unordered_set<std::string> distinctRootCauses;
+    std::unordered_set<uint32_t> distinctTypes;
+    std::unordered_set<uint32_t> distinctHighSeverityTypes;
+    std::unordered_map<uint32_t, std::unordered_set<uint32_t>> categoryToTypes;
     uint64_t cutoff = (now > time_window_ms_) ? (now - time_window_ms_) : 0;
 
     for (const auto& [otherCat, entries] : category_timeline_) {
@@ -322,7 +329,13 @@ CorrelationDecision EvidenceCorrelator::Evaluate(
             if (entry.timestamp >= cutoff) {
                 distinctCategories.insert(otherCat);
                 distinctRootCauses.insert(entry.root_cause_id);
-                if (ev.related_event_ids.size() < 16 && otherCat != catKey &&
+                distinctTypes.insert(static_cast<uint32_t>(entry.type));
+                categoryToTypes[otherCat].insert(static_cast<uint32_t>(entry.type));
+                if (entry.severity >= Severity::HIGH) {
+                    distinctHighSeverityTypes.insert(static_cast<uint32_t>(entry.type));
+                }
+                if (ev.related_event_ids.size() < 16 && entry.event_id != ev.event_id &&
+                    (otherCat != catKey || entry.root_cause_id != ev.root_cause_id) &&
                     std::find(ev.related_event_ids.begin(), ev.related_event_ids.end(), entry.event_id) == ev.related_event_ids.end()) {
                     ev.related_event_ids.push_back(entry.event_id);
                 }
@@ -334,14 +347,32 @@ CorrelationDecision EvidenceCorrelator::Evaluate(
     bool weakSingle = IsWeakSingleHeuristic(ev);
     ConfidenceLevel baseConf = InferBaseConfidence(ev);
 
-    // Promote confidence across independent families
+    // Multi-signal corroboration is satisfied when:
+    // 1. Cross-category: At least 2 independent detection categories with distinct root causes.
+    // 2. Intra-category: Distinct orthogonal detection sub-types within the same category
+    //    (e.g., KINEMATICS_AIMBOT_SNAP + KINEMATICS_TRIGGERBOT, or UNBACKED_EXECUTABLE_MEMORY + MEMORY_SIGNATURE_MATCH)
+    //    when distinct root causes >= 2 or distinct high-severity types >= 2.
+    bool hasCategoryOrthogonalTypes = false;
+    for (const auto& [cat, types] : categoryToTypes) {
+        if (types.size() >= 2) {
+            hasCategoryOrthogonalTypes = true;
+            break;
+        }
+    }
+    bool intraCategoryCorroborated = hasCategoryOrthogonalTypes &&
+        (distinctRootCauses.size() >= 2 || distinctHighSeverityTypes.size() >= 2);
+    bool hasMultiSignalCorroboration = (independentCategories >= 2 && distinctRootCauses.size() >= 2) ||
+        intraCategoryCorroborated;
+    bool corroboratedOrVerified = hasMultiSignalCorroboration || ev.server_verified;
+
+    // Promote confidence across independent families / orthogonal proofs
     ConfidenceLevel promotedConf = baseConf;
     EvidenceState state = EvidenceState::OBSERVED;
 
     if (ev.server_verified) {
         promotedConf = ConfidenceLevel::INDEPENDENTLY_VERIFIED;
         state = EvidenceState::SERVER_VERIFIED;
-    } else if (independentCategories >= 2 && distinctRootCauses.size() >= 2) {
+    } else if (hasMultiSignalCorroboration) {
         promotedConf = (baseConf >= ConfidenceLevel::CORROBORATED_ANOMALY)
             ? ConfidenceLevel::HIGH_CONFIDENCE_VIOLATION
             : ConfidenceLevel::CORROBORATED_ANOMALY;
@@ -357,7 +388,7 @@ CorrelationDecision EvidenceCorrelator::Evaluate(
 
     ev.confidence = promotedConf;
     ev.evidence_state = state;
-    ev.corroborating_sources = static_cast<uint32_t>(independentCategories);
+    ev.corroborating_sources = static_cast<uint32_t>(std::max(independentCategories, hasMultiSignalCorroboration ? size_t{2} : size_t{1}));
     aggregated_by_key_[key] = ev;
     EvictToCapacityLocked();
 
@@ -365,15 +396,13 @@ CorrelationDecision EvidenceCorrelator::Evaluate(
     decision.effective_score_delta = ev.threat_score;
     decision.overall_confidence = promotedConf;
     decision.evidence_state = state;
-    decision.independent_category_count = independentCategories;
+    decision.independent_category_count = std::max(independentCategories, intraCategoryCorroborated ? size_t{2} : independentCategories);
     decision.is_weak_single_signal = weakSingle;
 
     uint32_t projectedScore = current_total_score + ev.threat_score;
     bool scoreReached = (ban_threshold > 0 && projectedScore >= ban_threshold);
     bool fatalSeverity = (ev.severity == Severity::FATAL_BAN);
     bool criticalOrAbove = (ev.severity >= Severity::CRITICAL);
-    bool hasMultiSignalCorroboration = (independentCategories >= 2 && distinctRootCauses.size() >= 2);
-    bool corroboratedOrVerified = hasMultiSignalCorroboration || ev.server_verified;
 
     decision.eligible_for_report_only = true;
 

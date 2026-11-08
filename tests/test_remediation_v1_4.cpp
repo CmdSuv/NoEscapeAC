@@ -170,17 +170,17 @@ TEST(RemediationV1_4, SingleCriticalClientHeuristicCannotBypassCorroboration) {
     // Score delta must be capped so score cannot reach 100
     ASSERT_EQ(decision.effective_score_delta, 99u);
 
-    // A second signal from the SAME category must NOT satisfy multi-signal corroboration
-    DetectionEvent ev_same_cat;
-    ev_same_cat.type = DetectionType::MEMORY_SIGNATURE_MATCH;
-    ev_same_cat.severity = Severity::CRITICAL;
-    ev_same_cat.component = "MemoryScanner::SigScan";
-    ev_same_cat.details = "Pattern match in heap";
-    ev_same_cat.timestamp = DetectionEvent::NowMonotonicMs();
-    ev_same_cat.timestamp_utc_ms = DetectionEvent::NowUtcMs();
-    ev_same_cat.threat_score = 100;
+    // A second signal of the SAME heuristic sub-type must NOT satisfy multi-signal corroboration
+    DetectionEvent ev_same_type;
+    ev_same_type.type = DetectionType::UNBACKED_EXECUTABLE_MEMORY;
+    ev_same_type.severity = Severity::CRITICAL;
+    ev_same_type.component = "MemoryScanner::UnbackedPages";
+    ev_same_type.details = "Suspicious anonymous executable memory allocation #2";
+    ev_same_type.timestamp = DetectionEvent::NowMonotonicMs();
+    ev_same_type.timestamp_utc_ms = DetectionEvent::NowUtcMs();
+    ev_same_type.threat_score = 100;
 
-    auto decision_same = correlator.Evaluate(ev_same_cat, 99, 100, true /* strict */);
+    auto decision_same = correlator.Evaluate(ev_same_type, 99, 100, true /* strict */);
     ASSERT_FALSE(decision_same.eligible_for_permanent_ban);
     ASSERT_FALSE(decision_same.eligible_for_session_reject);
 

@@ -142,6 +142,7 @@ TEST(ServerIntegrationV2, CloseProximityOccludedTargetCulled) {
     ObserverState observer;
     observer.player_id = 1;
     observer.x = 0.0f; observer.y = 0.0f; observer.z = 1.0f;
+    observer.yaw_deg = 90.0f; // Facing along +Y towards wall and target
 
     // Target is only 3.0 meters away (<= 6.0m close_proximity_radius_), but directly behind wall at y = 3.0
     TargetEntityState target_occluded;

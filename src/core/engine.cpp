@@ -780,6 +780,7 @@ void AntiCheatEngine::Stop() {
     stop_requested_.store(true, std::memory_order_release);
     freeze_background_loop_for_testing_.store(false, std::memory_order_release);
     freeze_watchdog_for_testing_.store(false, std::memory_order_release);
+    watchdog_delay_warned_.store(false, std::memory_order_release);
     if (watchdog_thread_.joinable()) {
         watchdog_thread_.join();
     }
@@ -885,6 +886,7 @@ void AntiCheatEngine::UpdateAuditHeartbeat() {
     std::lock_guard<std::mutex> lock(heartbeat_mutex_);
     if (!freeze_background_loop_for_testing_.load(std::memory_order_acquire)) {
         last_audit_heartbeat_ms_.store(GetSteadyNowMs(), std::memory_order_release);
+        watchdog_delay_warned_.store(false, std::memory_order_release);
     }
 }
 
@@ -893,6 +895,7 @@ void AntiCheatEngine::SimulateSystemWakeRecoveryForTesting() {
     uint64_t now = GetSteadyNowMs();
     if (!freeze_background_loop_for_testing_.load(std::memory_order_acquire)) {
         last_audit_heartbeat_ms_.store(now, std::memory_order_release);
+        watchdog_delay_warned_.store(false, std::memory_order_release);
     }
     if (!freeze_watchdog_for_testing_.load(std::memory_order_acquire)) {
         watchdog_heartbeat_ms_.store(now, std::memory_order_release);
@@ -925,18 +928,47 @@ void AntiCheatEngine::WatchdogLoop() {
 
         uint64_t now = GetSteadyNowMs();
         uint64_t last = last_audit_heartbeat_ms_.load(std::memory_order_acquire);
-        if (last > 0 && now > last && (now - last) > 3000) {
-            Logger::Instance().Warn("Watchdog detected thread delay (> 3000ms heartbeat deadline missed). Flagging anomaly.");
-            DetectionEvent ev;
-            ev.type = DetectionType::HEARTBEAT_TAMPERING;
-            ev.severity = Severity::CRITICAL;
-            ev.component = "AntiCheatEngine::Watchdog";
-            ev.details = "Watchdog heartbeat timeout: background audit loop delayed or suspended (> 3000ms)";
-            ev.timestamp = DetectionEvent::NowMonotonicMs();
-            ev.timestamp_utc_ms = DetectionEvent::NowUtcMs();
-            ev.threat_score = 100;
-            ProcessDetection(ev);
-            last_audit_heartbeat_ms_.store(now, std::memory_order_release);
+        if (last > 0 && now > last) {
+            uint64_t diff = now - last;
+            if (diff > 6000) {
+                Logger::Instance().Error("Watchdog detected PROLONGED audit thread freeze (> 6000ms). Enforcing fail-closed policy.");
+                DetectionEvent ev;
+                ev.type = DetectionType::HEARTBEAT_TAMPERING;
+                ev.severity = Severity::FATAL_BAN;
+                ev.component = "AntiCheatEngine::Watchdog";
+                ev.details = "Prolonged background audit loop freeze detected (> 6000ms): audit subsystem permanently disabled";
+                ev.timestamp = DetectionEvent::NowMonotonicMs();
+                ev.timestamp_utc_ms = DetectionEvent::NowUtcMs();
+                ev.threat_score = 100;
+                ProcessDetection(ev);
+
+                // Fail-closed enforcement: never allow permanently frozen audit loop to run disarmed
+                if (config_.enforcementMode == EnforcementMode::ENFORCE) {
+                    is_session_rejected_.store(true, std::memory_order_release);
+                    is_match_restricted_.store(true, std::memory_order_release);
+                    if (config_.enforceBanOnViolation) {
+                        TriggerBan(ev.details, ev.type, ev.component);
+                    }
+                } else if (config_.enforcementMode == EnforcementMode::SERVER_SESSION_REJECT) {
+                    is_session_rejected_.store(true, std::memory_order_release);
+                } else if (config_.enforcementMode == EnforcementMode::MATCH_RESTRICTION) {
+                    is_match_restricted_.store(true, std::memory_order_release);
+                } else if (config_.enforcementMode == EnforcementMode::SHADOW) {
+                    is_shadow_flagged_.store(true, std::memory_order_release);
+                }
+                break;
+            } else if (diff > 3000 && !watchdog_delay_warned_.exchange(true)) {
+                Logger::Instance().Warn("Watchdog detected thread delay (> 3000ms heartbeat deadline missed). Flagging anomaly.");
+                DetectionEvent ev;
+                ev.type = DetectionType::HEARTBEAT_TAMPERING;
+                ev.severity = Severity::CRITICAL;
+                ev.component = "AntiCheatEngine::Watchdog";
+                ev.details = "Watchdog heartbeat timeout: background audit loop delayed or suspended (> 3000ms)";
+                ev.timestamp = DetectionEvent::NowMonotonicMs();
+                ev.timestamp_utc_ms = DetectionEvent::NowUtcMs();
+                ev.threat_score = 100;
+                ProcessDetection(ev);
+            }
         }
     }
     // Reaching here with the engine still running and nobody banned means the loop ended on its

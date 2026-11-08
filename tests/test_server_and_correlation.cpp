@@ -127,6 +127,7 @@ TEST(ServerIntegration, AuthoritativeEspCullingAndReplication) {
     ObserverState observer;
     observer.player_id = 1;
     observer.x = 0.0f; observer.y = 0.0f; observer.z = 1.0f;
+    observer.yaw_deg = 90.0f; // Facing along +Y towards wall and targets
 
     // Target behind the wall at y = 40, silent
     TargetEntityState target_occluded;
