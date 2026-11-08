@@ -1484,6 +1484,7 @@ bool VerifyWindowsAuthenticode(const std::string& path) {
 std::vector<ModuleProvenanceInfo> MemoryScanner::QueryModuleProvenance() {
     std::vector<ModuleProvenanceInfo> modules;
     auto regions = QueryMemoryRegions();
+    const bool jitHost = IsJitRuntime(regions);
 
     std::map<std::string, ModuleProvenanceInfo> byPath;
     for (const auto& r : regions) {
@@ -1516,15 +1517,20 @@ std::vector<ModuleProvenanceInfo> MemoryScanner::QueryModuleProvenance() {
         std::string lower = path;
         std::transform(lower.begin(), lower.end(), lower.begin(),
                        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-        info.is_suspicious_origin = (lower.find("\\appdata\\local\\temp\\") != std::string::npos ||
-                                     lower.find("\\windows\\temp\\") != std::string::npos);
+        bool isTempDir = (lower.find("\\appdata\\local\\temp\\") != std::string::npos ||
+                          lower.find("\\windows\\temp\\") != std::string::npos ||
+                          lower.find("/tmp/") != std::string::npos ||
+                          lower.find("\\temp\\") != std::string::npos);
+        // For JIT hosts (Java JVM / Minecraft / .NET), native runtime dependencies (LWJGL, JNA, OpenAL, etc.)
+        // are legitimately unpacked from JAR archives into the user's temp directory at launch.
+        info.is_suspicious_origin = isTempDir && !jitHost;
 #else
         bool isMemfdOrDeleted = (path.rfind("/memfd:", 0) == 0 ||
                                  path.find("(deleted)") != std::string::npos);
         bool isWorldTemp = (path.rfind("/dev/shm/", 0) == 0 ||
                             path.rfind("/tmp/", 0) == 0 ||
                             path.rfind("/var/tmp/", 0) == 0);
-        info.is_suspicious_origin = isMemfdOrDeleted || isWorldTemp;
+        info.is_suspicious_origin = (isMemfdOrDeleted || (isWorldTemp && !jitHost));
         if (!isMemfdOrDeleted && path[0] == '/') {
             info.sha256_disk_hash = network::CryptoUtil::Sha256File(path);
             info.elf_build_id = ExtractElfBuildId(path);
