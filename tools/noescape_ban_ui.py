@@ -239,11 +239,8 @@ class MinimalistBanWindow(QWidget):
         main_layout.addLayout(center_layout)
         main_layout.addStretch(1)
 
-    def mousePressEvent(self, event):
-        self.close()
-
     def keyPressEvent(self, event):
-        if event.key() in (Qt.Key_Escape, Qt.Key_Q, Qt.Key_Space, Qt.Key_Return):
+        if event.key() in (Qt.Key_Escape, Qt.Key_Q):
             self.close()
         else:
             super().keyPressEvent(event)
