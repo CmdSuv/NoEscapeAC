@@ -91,6 +91,8 @@ private:
     std::optional<core::DetectionEvent> CheckInstantSnap();
     std::optional<core::DetectionEvent> CheckPerfectLinearity();
     std::optional<core::DetectionEvent> CheckArtificialSmoothing();
+    std::optional<core::DetectionEvent> CheckMinimumJerkViolation();
+    std::optional<core::DetectionEvent> CheckPhaseSpaceCurvature();
     std::optional<core::DetectionEvent> CheckSyntheticInputTiming();
     std::optional<core::DetectionEvent> CheckTriggerbotTiming();
     std::optional<core::DetectionEvent> CheckRecoilAutomation();

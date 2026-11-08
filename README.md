@@ -89,7 +89,7 @@
 cmake -B build -DCMAKE_BUILD_TYPE=Release -DNOESCAPE_WERROR=ON
 cmake --build build -j$(nproc)
 
-# Run Comprehensive Unit Test Suite (171 test cases across all subsystems)
+# Run Comprehensive Unit Test Suite (183 test cases across all subsystems)
 ./build/noescape_tests
 
 # Run Preload Scenario B Verification Suite (6/6 tests)
@@ -111,7 +111,7 @@ cmake --build build -j$(nproc)
 - [FALSE_POSITIVE_STRATEGY.md](FALSE_POSITIVE_STRATEGY.md) — Heuristic dampening, confidence tiers, whitelisting, and dispute workflow.
 - [PERFORMANCE_BENCHMARKS.md](PERFORMANCE_BENCHMARKS.md) — AVX2 SIMD throughput (>9.4 GB/s), VMA page walks, and frame-time impact.
 - [PLATFORM_COMPATIBILITY.md](PLATFORM_COMPATIBILITY.md) — Windows x64, Linux x86_64, and Proton/Wine execution parity.
-- [TEST_STRATEGY.md](TEST_STRATEGY.md) — Unit test suite structure (171 tests), mock injection harnesses, and CI sanitizers.
+- [TEST_STRATEGY.md](TEST_STRATEGY.md) — Unit test suite structure (183 tests), mock injection harnesses, and CI sanitizers.
 - [PRIVACY_AND_DATA_POLICY.md](PRIVACY_AND_DATA_POLICY.md) — Zero PII collection policy, one-way HWID hashing, and encrypted blackbox dumps.
 - [CHANGELOG.md](CHANGELOG.md) — Full release history from v1.0 through v1.5.
 - [CURRENT_PROJECT_STATE.md](CURRENT_PROJECT_STATE.md) — Active project state, build verification, and deployment handoff.
@@ -188,7 +188,7 @@ NoEscapeAC/
 │   ├── network/
 │   └── sdk/
 ├── demo/                     # Interactive demonstration program
-├── tests/                    # 171 unit & regression tests
+├── tests/                    # 183 unit & regression tests
 └── CMakeLists.txt            # Exports libnoescape.a, libnoescape.so, and executables
 ```
 

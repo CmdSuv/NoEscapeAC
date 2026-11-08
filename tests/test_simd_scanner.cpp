@@ -128,3 +128,30 @@ TEST(PatternScanner, AllWildcardsAndLeadingWildcards) {
     ASSERT_TRUE(resTrail.has_value());
     ASSERT_EQ(*resTrail, 0);
 }
+
+TEST(PatternScanner, CacheBlockBoundaryCrossScan) {
+    constexpr size_t kTotalSize = 128 * 1024; // 128 KiB buffer
+    std::vector<uint8_t> buf(kTotalSize, 0x90);
+
+    // Signature spanning across the 32 KiB (32768) block boundary:
+    // Starts at 32764: 32764, 32765, 32766, 32767 | 32768, 32769, 32770, 32771
+    size_t boundaryTarget = 32764;
+    buf[boundaryTarget + 0] = 0xDE;
+    buf[boundaryTarget + 1] = 0xAD;
+    buf[boundaryTarget + 2] = 0xBE;
+    buf[boundaryTarget + 3] = 0xEF;
+    buf[boundaryTarget + 4] = 0xCA;
+    buf[boundaryTarget + 5] = 0xFE;
+    buf[boundaryTarget + 6] = 0xBA;
+    buf[boundaryTarget + 7] = 0xBE;
+
+    std::vector<Pattern> patterns = {
+        Pattern("DE AD BE EF CA FE BA BE", "BoundarySig")
+    };
+
+    auto matches = PatternScanner::ScanBatch(buf.data(), buf.size(), patterns);
+    ASSERT_EQ(matches.size(), 1);
+    ASSERT_EQ(matches[0].pattern_name, "BoundarySig");
+    ASSERT_EQ(matches[0].address, boundaryTarget);
+}
+

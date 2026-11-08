@@ -143,3 +143,60 @@ TEST(Kinematics, SubMillisecondMousePolling) {
     ASSERT_FALSE(ev2.has_value());
     ASSERT_FALSE(ev3.has_value());
 }
+
+TEST(Kinematics, PhaseSpaceAngularCuspDetection) {
+    AimAnalyzer analyzer(64);
+    uint64_t t = 1000;
+
+    // Sample 0: origin
+    analyzer.PushSample(0.0f, 0.0f, t);
+    t += 16;
+
+    // Sample 1: high speed sweep along yaw (500 deg/s)
+    analyzer.PushSample(0.0f, 8.0f, t);
+    t += 16;
+
+    // Sample 2: instantaneous 180-degree velocity reversal at high speed (-437.5 deg/s)
+    auto ev = analyzer.PushSample(0.0f, 1.0f, t);
+
+    ASSERT_TRUE(ev.has_value());
+    ASSERT_EQ(ev->type, DetectionType::KINEMATICS_AIMBOT_SNAP);
+    ASSERT_NE(ev->details.find("Phase-space angular cusp"), std::string::npos);
+}
+
+TEST(Kinematics, ExGaussianTriggerbotReactionProfile) {
+    AimAnalyzer analyzer(64);
+    uint64_t t = 10000;
+
+    std::optional<DetectionEvent> lastEv;
+    for (int i = 0; i < 7; ++i) {
+        analyzer.RecordCrosshairTargetAcquire(t);
+        // Fixed triggerbot sleep: 60ms +/- 0.5ms (mu ~ 60ms, sigma < 1.0ms, tau < 1.0ms)
+        uint64_t delay = 60 + (i % 2);
+        auto ev = analyzer.RecordWeaponFire(t + delay);
+        if (ev) lastEv = ev;
+        t += 2000;
+    }
+
+    ASSERT_TRUE(lastEv.has_value());
+    ASSERT_EQ(lastEv->type, DetectionType::KINEMATICS_TRIGGERBOT);
+    ASSERT_NE(lastEv->details.find("ex-gaussian"), std::string::npos);
+}
+
+TEST(Kinematics, FlashHoganMinimumJerkViolation) {
+    AimAnalyzer analyzer(64);
+    uint64_t t = 1000;
+
+    float yawAngles[] = {0.0f, 0.1f, 0.3f, 0.5f, 2.8f, 3.0f, 3.2f, 3.5f, 7.8f, 8.0f, 8.6f};
+    std::optional<DetectionEvent> caught;
+    for (float yaw : yawAngles) {
+        auto ev = analyzer.PushSample(0.0f, yaw, t);
+        if (ev) caught = ev;
+        t += 40;
+    }
+
+    ASSERT_TRUE(caught.has_value());
+    ASSERT_EQ(caught->type, DetectionType::KINEMATICS_AIMBOT_SNAP);
+    ASSERT_NE(caught->details.find("minimum-jerk violation"), std::string::npos);
+}
+

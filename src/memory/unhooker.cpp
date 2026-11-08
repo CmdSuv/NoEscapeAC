@@ -552,7 +552,8 @@ std::optional<core::DetectionEvent> Unhooker::InspectTableEntry(
     const std::string& table_type,
     const std::string& symbol_name,
     uintptr_t slot_address,
-    uintptr_t resolved_target
+    uintptr_t resolved_target,
+    const std::string& expected_module
 ) {
     if (resolved_target < 0x10000ULL) return std::nullopt;
 
@@ -597,6 +598,49 @@ std::optional<core::DetectionEvent> Unhooker::InspectTableEntry(
                 ev.threat_score = 95;
                 return ev;
             }
+
+            // ExpectedModuleMatch: verify that resolved IAT/GOT pointers point into the genuine module exporting that symbol,
+            // catching DLL / module stomping even when file-backed.
+            if (!expected_module.empty()) {
+                std::string targetMod = BaseNameOf(r.pathname);
+                std::transform(targetMod.begin(), targetMod.end(), targetMod.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                std::string expMod = BaseNameOf(expected_module);
+                std::transform(expMod.begin(), expMod.end(), expMod.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+
+                auto stemOf = [](const std::string& name) -> std::string {
+                    size_t pos = name.find('.');
+                    return (pos != std::string::npos) ? name.substr(0, pos) : name;
+                };
+
+                std::string targetStem = stemOf(targetMod);
+                std::string expStem = stemOf(expMod);
+
+                // Check for forwarders / API set mappings / version differences
+                bool isApiSet = (expMod.rfind("api-ms-", 0) == 0 || expMod.rfind("ext-ms-", 0) == 0);
+                bool isKernelForwarder = (expMod == "kernel32.dll" && (targetMod == "kernelbase.dll" || targetMod == "ntdll.dll"));
+                bool isMsvcrtForwarder = (expMod == "msvcrt.dll" && targetMod.rfind("ucrtbase", 0) == 0);
+                // glibc 2.34+ merges libpthread, libdl, librt, libm, libutil into libc.so.6
+                bool isGlibcMerged = (targetStem == "libc" &&
+                    (expStem == "libpthread" || expStem == "libdl" || expStem == "librt" || expStem == "libm" || expStem == "libutil" || expStem == "ld-linux-x86-64"));
+
+                bool stemsMatch = (targetStem == expStem);
+
+                if (!stemsMatch && !isApiSet && !isKernelForwarder && !isMsvcrtForwarder && !isGlibcMerged && targetMod != expMod) {
+                    core::DetectionEvent ev;
+                    ev.type = core::DetectionType::IAT_GOT_HOOK_DETECTED;
+                    ev.severity = core::Severity::CRITICAL;
+                    ev.component = "Unhooker::TableIntegrity";
+                    std::ostringstream ss;
+                    ss << table_type << " slot for '" << symbol_name << "' [" << Hex(slot_address)
+                       << "] module stomping detected: points to " << targetMod
+                       << " (" << Hex(resolved_target) << ") instead of expected " << expMod;
+                    ev.details = ss.str();
+                    ev.timestamp = core::DetectionEvent::NowMonotonicMs();
+                    ev.timestamp_utc_ms = core::DetectionEvent::NowUtcMs();
+                    ev.threat_score = 95;
+                    return ev;
+                }
+            }
             return std::nullopt;
         }
     }
@@ -619,33 +663,47 @@ std::vector<core::DetectionEvent> Unhooker::AuditImportExportTables() {
     std::vector<core::DetectionEvent> events;
 
 #if defined(_WIN32)
-    HMODULE hMain = GetModuleHandleW(nullptr);
-    if (!hMain) return events;
-    auto base = reinterpret_cast<uintptr_t>(hMain);
-    auto dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
-    if (dos->e_magic != IMAGE_DOS_SIGNATURE) return events;
-    auto nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
-    if (nt->Signature != IMAGE_NT_SIGNATURE) return events;
+    HMODULE hMods[512]{};
+    DWORD cbNeeded = 0;
+    HANDLE hProcess = GetCurrentProcess();
+    DWORD modCount = 0;
+    if (EnumProcessModules(hProcess, hMods, sizeof(hMods), &cbNeeded)) {
+        modCount = std::min<DWORD>(cbNeeded / sizeof(HMODULE), 512);
+    } else {
+        hMods[0] = GetModuleHandleW(nullptr);
+        modCount = (hMods[0] != nullptr) ? 1 : 0;
+    }
 
-    const auto& impDir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
-    if (impDir.VirtualAddress && impDir.Size) {
-        auto desc = reinterpret_cast<const IMAGE_IMPORT_DESCRIPTOR*>(base + impDir.VirtualAddress);
-        for (; desc->Name != 0 && desc->FirstThunk != 0; ++desc) {
-            const char* dllName = reinterpret_cast<const char*>(base + desc->Name);
-            auto thunk = reinterpret_cast<const IMAGE_THUNK_DATA*>(base + desc->FirstThunk);
-            auto origThunk = desc->OriginalFirstThunk
-                ? reinterpret_cast<const IMAGE_THUNK_DATA*>(base + desc->OriginalFirstThunk)
-                : thunk;
-            for (; thunk->u1.Function != 0; ++thunk, ++origThunk) {
-                uintptr_t slotAddr = reinterpret_cast<uintptr_t>(&thunk->u1.Function);
-                uintptr_t fnTarget = static_cast<uintptr_t>(thunk->u1.Function);
-                std::string symName = dllName ? dllName : "IAT";
-                if (!(origThunk->u1.Ordinal & IMAGE_ORDINAL_flag)) {
-                    auto byName = reinterpret_cast<const IMAGE_IMPORT_BY_NAME*>(base + origThunk->u1.AddressOfData);
-                    symName += std::string("!") + reinterpret_cast<const char*>(byName->Name);
+    for (DWORD m = 0; m < modCount; ++m) {
+        HMODULE hMod = hMods[m];
+        if (!hMod) continue;
+        auto base = reinterpret_cast<uintptr_t>(hMod);
+        auto dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+        if (dos->e_magic != IMAGE_DOS_SIGNATURE) continue;
+        auto nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
+        if (nt->Signature != IMAGE_NT_SIGNATURE) continue;
+
+        const auto& impDir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+        if (impDir.VirtualAddress && impDir.Size) {
+            auto desc = reinterpret_cast<const IMAGE_IMPORT_DESCRIPTOR*>(base + impDir.VirtualAddress);
+            for (; desc->Name != 0 && desc->FirstThunk != 0; ++desc) {
+                const char* dllName = reinterpret_cast<const char*>(base + desc->Name);
+                std::string expectedMod = dllName ? dllName : "";
+                auto thunk = reinterpret_cast<const IMAGE_THUNK_DATA*>(base + desc->FirstThunk);
+                auto origThunk = desc->OriginalFirstThunk
+                    ? reinterpret_cast<const IMAGE_THUNK_DATA*>(base + desc->OriginalFirstThunk)
+                    : thunk;
+                for (; thunk->u1.Function != 0; ++thunk, ++origThunk) {
+                    uintptr_t slotAddr = reinterpret_cast<uintptr_t>(&thunk->u1.Function);
+                    uintptr_t fnTarget = static_cast<uintptr_t>(thunk->u1.Function);
+                    std::string symName = dllName ? dllName : "IAT";
+                    if (!(origThunk->u1.Ordinal & IMAGE_ORDINAL_FLAG)) {
+                        auto byName = reinterpret_cast<const IMAGE_IMPORT_BY_NAME*>(base + origThunk->u1.AddressOfData);
+                        symName += std::string("!") + reinterpret_cast<const char*>(byName->Name);
+                    }
+                    auto ev = InspectTableEntry("PE_IAT", symName, slotAddr, fnTarget, expectedMod);
+                    if (ev.has_value()) events.push_back(*ev);
                 }
-                auto ev = InspectTableEntry("PE_IAT", symName, slotAddr, fnTarget);
-                if (ev.has_value()) events.push_back(*ev);
             }
         }
     }
@@ -653,14 +711,18 @@ std::vector<core::DetectionEvent> Unhooker::AuditImportExportTables() {
     struct GotWalkCtx {
         Unhooker* self;
         std::vector<core::DetectionEvent>* outEvents;
+        size_t modulesScanned{0};
     };
-    GotWalkCtx ctx{this, &events};
+    GotWalkCtx ctx{this, &events, 0};
 
     dl_iterate_phdr([](struct dl_phdr_info* info, size_t, void* data) -> int {
-        // Inspect the main executable's GOT/PLT table (dlpi_name is empty for main binary)
-        if (!info->dlpi_name || info->dlpi_name[0] != '\0') return 0;
         auto* c = static_cast<GotWalkCtx*>(data);
+        if (c->modulesScanned >= 64) return 1;
+        c->modulesScanned++;
+
         uintptr_t base = static_cast<uintptr_t>(info->dlpi_addr);
+        const char* modPath = (info->dlpi_name && info->dlpi_name[0] != '\0') ? info->dlpi_name : "[main]";
+        std::string modName = BaseNameOf(modPath);
 
         const ElfW(Dyn)* dyn = nullptr;
         for (int i = 0; i < info->dlpi_phnum; ++i) {
@@ -687,7 +749,6 @@ std::vector<core::DetectionEvent> Unhooker::AuditImportExportTables() {
                 default: break;
             }
         }
-        // On glibc, d_ptr in memory is already relocated; if not (< base), add base
         if (jmprel && jmprel < base) jmprel += base;
         if (symtab && symtab < base) symtab += base;
         if (strtab && strtab < base) strtab += base;
@@ -697,13 +758,27 @@ std::vector<core::DetectionEvent> Unhooker::AuditImportExportTables() {
 
         size_t count = pltrelsz / sizeof(ElfW(Rela));
         const auto* relas = reinterpret_cast<const ElfW(Rela)*>(jmprel);
-        for (size_t i = 0; i < count && i < 512; ++i) {
+        for (size_t i = 0; i < count && i < 256; ++i) {
             uintptr_t gotSlot = base + relas[i].r_offset;
             if (!IsReadableAddress(gotSlot, sizeof(uintptr_t))) continue;
             uintptr_t resolved = *reinterpret_cast<const uintptr_t*>(gotSlot);
             if (resolved == 0) continue;
 
-            std::string symName = "plt_slot_" + std::to_string(i);
+            // In ELF lazy-binding, uncalled PLT slots point into the module's own .plt segment
+            bool insideSelf = false;
+            for (int p = 0; p < info->dlpi_phnum; ++p) {
+                if (info->dlpi_phdr[p].p_type == PT_LOAD) {
+                    uintptr_t segStart = base + info->dlpi_phdr[p].p_vaddr;
+                    uintptr_t segEnd = segStart + info->dlpi_phdr[p].p_memsz;
+                    if (resolved >= segStart && resolved < segEnd) {
+                        insideSelf = true;
+                        break;
+                    }
+                }
+            }
+            if (insideSelf) continue;
+
+            std::string symName = modName + "!plt_" + std::to_string(i);
 #if defined(ELF64_R_SYM)
             uint32_t symIdx = static_cast<uint32_t>(ELF64_R_SYM(relas[i].r_info));
             if (symtab && strtab && symIdx > 0 && symIdx < 4096) {
@@ -711,7 +786,7 @@ std::vector<core::DetectionEvent> Unhooker::AuditImportExportTables() {
                 if (IsReadableAddress(symAddr, sizeof(ElfW(Sym)))) {
                     const auto* sym = reinterpret_cast<const ElfW(Sym)*>(symAddr);
                     if (sym->st_name > 0 && IsReadableAddress(strtab + sym->st_name, 1)) {
-                        symName = reinterpret_cast<const char*>(strtab + sym->st_name);
+                        symName = modName + "!" + reinterpret_cast<const char*>(strtab + sym->st_name);
                     }
                 }
             }
@@ -721,7 +796,7 @@ std::vector<core::DetectionEvent> Unhooker::AuditImportExportTables() {
                 c->outEvents->push_back(*ev);
             }
         }
-        return 1;
+        return 0; // Scan all loaded modules!
     }, &ctx);
 #endif
 

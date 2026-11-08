@@ -40,7 +40,8 @@ public:
         const std::string& table_type,
         const std::string& symbol_name,
         uintptr_t slot_address,
-        uintptr_t resolved_target
+        uintptr_t resolved_target,
+        const std::string& expected_module = ""
     );
 
     // Attempts to remove the hook by restoring original instructions

@@ -27,3 +27,18 @@ bool VerifySoftware(const uint8_t* public_key,
                     const uint8_t* signature);
 
 } // namespace noescape::network::ed25519
+
+namespace noescape::network::x25519 {
+
+// Generates an X25519 keypair from a 32-byte seed / private key.
+// out_public_key: buffer of at least 32 bytes
+// out_private_key: buffer of at least 32 bytes
+bool CreateKeyPair(const uint8_t* seed, uint8_t* out_public_key, uint8_t* out_private_key);
+
+// Performs X25519 Diffie-Hellman scalar multiplication (RFC 7748):
+// out_shared_secret = private_key * peer_public_key
+// out_shared_secret: buffer of at least 32 bytes
+bool DiffieHellman(const uint8_t* private_key, const uint8_t* peer_public_key, uint8_t* out_shared_secret);
+
+} // namespace noescape::network::x25519
+

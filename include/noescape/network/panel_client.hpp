@@ -16,6 +16,8 @@ struct HeartbeatPacket {
     std::string status;
     std::string nonce;
     std::string hmac_signature;
+    std::string client_ephemeral_pubkey;
+    std::string ed25519_signature;
 };
 
 enum class BanCheckStatus {
@@ -92,6 +94,10 @@ public:
     void SetClientBuildVersion(std::string ver) { client_build_version_ = std::move(ver); }
     const std::string& GetClientBuildVersion() const { return client_build_version_; }
 
+    // Client ephemeral Ed25519 signing keypair
+    const std::string& GetClientEphemeralPublicKey() const { return client_ephemeral_pub_hex_; }
+    const std::string& GetClientEphemeralPrivateKey() const { return client_ephemeral_priv_hex_; }
+
     // Verifies a server message using Ed25519 asymmetric key if configured, else HMAC
     bool VerifyServerSignature(const std::string& message, const std::string& signature_hex) const;
 
@@ -121,6 +127,8 @@ private:
     std::string server_public_key_;
     std::string key_id_{"default-v1"};
     std::string client_build_version_{"7.0.13"};
+    std::string client_ephemeral_priv_hex_;
+    std::string client_ephemeral_pub_hex_;
 
     HttpResult Request(const ParsedUrl& target, const char* method, const std::string& body,
                        uint32_t timeout_ms) const;

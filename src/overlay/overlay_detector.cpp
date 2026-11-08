@@ -85,6 +85,100 @@ void OverlayDetector::ClearMockWindows() {
     mock_windows_.clear();
 }
 
+bool OverlayDetector::InitializeSwapchainFingerprint() {
+#if defined(_WIN32)
+    HWND hWnd = CreateWindowA("STATIC", "NoEscape_DXGI_Dummy", WS_OVERLAPPEDWINDOW, 0, 0, 1, 1, nullptr, nullptr, nullptr, nullptr);
+    if (!hWnd) return false;
+
+    HMODULE hD3D11 = LoadLibraryA("d3d11.dll");
+    HMODULE hDXGI = LoadLibraryA("dxgi.dll");
+    if (!hD3D11 || !hDXGI) {
+        if (hD3D11) FreeLibrary(hD3D11);
+        if (hDXGI) FreeLibrary(hDXGI);
+        DestroyWindow(hWnd);
+        return false;
+    }
+
+    using PFN_D3D11_CREATE_DEVICE_AND_SWAP_CHAIN = HRESULT(WINAPI*)(
+        void*, int, void*, unsigned int, const void*, unsigned int,
+        unsigned int, const void*, void**, void**, void*, void**
+    );
+    auto pfnCreate = reinterpret_cast<PFN_D3D11_CREATE_DEVICE_AND_SWAP_CHAIN>(
+        GetProcAddress(hD3D11, "D3D11CreateDeviceAndSwapChain")
+    );
+    if (!pfnCreate) {
+        FreeLibrary(hD3D11);
+        FreeLibrary(hDXGI);
+        DestroyWindow(hWnd);
+        return false;
+    }
+
+    struct DXGI_RATIONAL { unsigned int Numerator; unsigned int Denominator; };
+    struct DXGI_MODE_DESC {
+        unsigned int Width, Height;
+        DXGI_RATIONAL RefreshRate;
+        int Format, ScanlineOrdering, Scaling;
+    };
+    struct DXGI_SAMPLE_DESC { unsigned int Count, Quality; };
+    struct DXGI_SWAP_CHAIN_DESC_RAW {
+        DXGI_MODE_DESC BufferDesc;
+        DXGI_SAMPLE_DESC SampleDesc;
+        unsigned int BufferUsage;
+        unsigned int BufferCount;
+        HWND OutputWindow;
+        BOOL Windowed;
+        int SwapEffect;
+        unsigned int Flags;
+    };
+
+    DXGI_SWAP_CHAIN_DESC_RAW scd{};
+    scd.BufferCount = 1;
+    scd.BufferDesc.Width = 1;
+    scd.BufferDesc.Height = 1;
+    scd.BufferDesc.Format = 28; // DXGI_FORMAT_R8G8B8A8_UNORM
+    scd.BufferDesc.RefreshRate.Numerator = 60;
+    scd.BufferDesc.RefreshRate.Denominator = 1;
+    scd.BufferUsage = 0x20; // DXGI_USAGE_RENDER_TARGET_OUTPUT
+    scd.OutputWindow = hWnd;
+    scd.SampleDesc.Count = 1;
+    scd.SampleDesc.Quality = 0;
+    scd.Windowed = TRUE;
+
+    void* pDevice = nullptr;
+    void* pContext = nullptr;
+    void* pSwapChain = nullptr;
+
+    HRESULT hr = pfnCreate(nullptr, 1 /*HARDWARE*/, nullptr, 0, nullptr, 0, 7, &scd, &pSwapChain, &pDevice, nullptr, &pContext);
+    if (FAILED(hr) || !pSwapChain) {
+        hr = pfnCreate(nullptr, 2 /*WARP*/, nullptr, 0, nullptr, 0, 7, &scd, &pSwapChain, &pDevice, nullptr, &pContext);
+    }
+
+    if (SUCCEEDED(hr) && pSwapChain) {
+        void** vtable = *reinterpret_cast<void***>(pSwapChain);
+        if (vtable) {
+            RegisterSwapchainVTable(vtable, 25);
+        }
+        using ReleaseFn = ULONG(WINAPI*)(void*);
+        if (vtable && vtable[2]) reinterpret_cast<ReleaseFn>(vtable[2])(pSwapChain);
+        if (pContext) {
+            void** ctxVTable = *reinterpret_cast<void***>(pContext);
+            if (ctxVTable && ctxVTable[2]) reinterpret_cast<ReleaseFn>(ctxVTable[2])(pContext);
+        }
+        if (pDevice) {
+            void** devVTable = *reinterpret_cast<void***>(pDevice);
+            if (devVTable && devVTable[2]) reinterpret_cast<ReleaseFn>(devVTable[2])(pDevice);
+        }
+    }
+
+    DestroyWindow(hWnd);
+    FreeLibrary(hD3D11);
+    FreeLibrary(hDXGI);
+    return true;
+#else
+    return true;
+#endif
+}
+
 void OverlayDetector::RegisterSwapchainVTable(void** vtable, size_t entry_count) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (vtable && entry_count > 0) {
@@ -286,8 +380,9 @@ std::vector<OverlayWindowInfo> OverlayDetector::EnumerateTopLevelWindows() {
             static const std::vector<std::string> whitelistedTools = {
                 "picom", "compton", "kwin", "mutter", "sway", "waybar",
                 "wf-shell", "mangohud", "vkbasalt", "obs-vkcapture", "obs",
-                "steam", "gameoverlayui", "discord", "gamescope", "xwayland", "gnome-shell",
-                "plasmashell", "xfwm4", "marco", "compiz"
+                "steam", "gameoverlayui", "gameoverlayrenderer", "discord", "gamescope",
+                "xwayland", "gnome-shell", "plasmashell", "xfwm4", "marco", "compiz",
+                "srt-bwrap", "pv-adverb", "pressure-vessel"
             };
 
             // Match on the executable's own name only; a path or argument containing "obs"/"steam"
@@ -303,12 +398,32 @@ std::vector<OverlayWindowInfo> OverlayDetector::EnumerateTopLevelWindows() {
                     break;
                 }
             }
+            if (lowerCmd.find("gameoverlayrenderer.so") != std::string::npos &&
+                lowerCmd.find("steam") != std::string::npos) {
+                isWhitelisted = true;
+            }
             if (isWhitelisted) continue;
 
             static const std::vector<std::string> overlayTools = {
                 "gl-inject", "pyglass", "esp_overlay", "liboverlay",
-                "gameoverlay", "cheat_overlay", "d3d_overlay", "aimbot_overlay"
+                "cheat_overlay", "d3d_overlay", "aimbot_overlay"
             };
+
+            if (lowerCmd.find("layer-shell") != std::string::npos ||
+                lowerCmd.find("zwlr_layer_shell") != std::string::npos ||
+                lowerCmd.find("wl-overlay") != std::string::npos) {
+                OverlayWindowInfo info;
+                info.title = "WaylandLayerShell (" + argv0 + ")";
+                info.class_name = "WaylandLayerShellOverlay";
+                info.pid = static_cast<uint32_t>(pid);
+                info.handle = static_cast<uintptr_t>(pid);
+                info.rect = game_viewport_;
+                info.is_topmost = true;
+                info.is_transparent = true;
+                info.is_layered = true;
+                windows.push_back(info);
+                continue;
+            }
 
             for (const auto& tool : overlayTools) {
                 if (lowerCmd.find(tool) != std::string::npos) {
@@ -341,7 +456,7 @@ bool OverlayDetector::IsSuspiciousOverlayWindow(const OverlayWindowInfo& win) co
     static const std::vector<std::string> whitelistedTitles = {
         "picom", "compton", "kwin", "mutter", "sway", "waybar",
         "wf-shell", "mangohud", "steam", "steam overlay", "gameoverlayui",
-        "discord overlay", "obs", "nvidia share", "geforce experience"
+        "gameoverlay", "discord overlay", "obs", "nvidia share", "geforce experience"
     };
 
     static const std::vector<std::string> suspiciousBinaryMarkers = {

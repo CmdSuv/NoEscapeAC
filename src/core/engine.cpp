@@ -129,6 +129,10 @@ bool AntiCheatEngine::Initialize() {
         BlackboxDumper::Instance().SetDumpDirectory(config_.blackboxDumpDirectory);
     }
 
+    if (config_.enableOverlayDetection) {
+        overlay::OverlayDetector::Instance().InitializeSwapchainFingerprint();
+    }
+
     if (config_.secretKey == EngineConfig().secretKey) {
         Logger::Instance().Warn("Using the built-in default secret key: panel/blackbox signatures are forgeable. "
                                 "Configure a unique per-deployment key.");

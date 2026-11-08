@@ -253,12 +253,7 @@ BlackboxRecord BlackboxDumper::CaptureSnapshot(
     return rec;
 }
 
-std::vector<uint8_t> BlackboxDumper::SerializeAndEncrypt(
-    const BlackboxRecord& record,
-    const std::string& secret_key
-) {
-    // 1. Serialize plaintext payload
-    std::vector<uint8_t> plaintext;
+void SerializePlaintext(const BlackboxRecord& record, std::vector<uint8_t>& plaintext) {
     PutU64(plaintext, record.timestamp);
     PutU32(plaintext, record.threat_score);
     PutU32(plaintext, record.violation_type);
@@ -285,6 +280,186 @@ std::vector<uint8_t> BlackboxDumper::SerializeAndEncrypt(
     for (const auto& mod : record.loaded_modules_sample) {
         PutString(plaintext, mod);
     }
+}
+
+bool DeserializePlaintext(const uint8_t* pPlain, size_t pRemain, BlackboxRecord& out_record) {
+    if (!GetU64(pPlain, pRemain, out_record.timestamp)) return false;
+    if (!GetU32(pPlain, pRemain, out_record.threat_score)) return false;
+    if (!GetU32(pPlain, pRemain, out_record.violation_type)) return false;
+    if (!GetString(pPlain, pRemain, out_record.hwid)) return false;
+    if (!GetString(pPlain, pRemain, out_record.violating_component)) return false;
+    if (!GetString(pPlain, pRemain, out_record.violation_reason)) return false;
+
+    // Backtrace
+    uint16_t btCount = 0;
+    if (!GetU16(pPlain, pRemain, btCount)) return false;
+    out_record.backtrace_addrs.clear();
+    for (uint16_t i = 0; i < btCount; ++i) {
+        uint64_t addr = 0;
+        if (!GetU64(pPlain, pRemain, addr)) return false;
+        out_record.backtrace_addrs.push_back(static_cast<uintptr_t>(addr));
+    }
+
+    // Input trail
+    uint16_t trailCount = 0;
+    if (!GetU16(pPlain, pRemain, trailCount)) return false;
+    out_record.recent_input_trail.clear();
+    for (uint16_t i = 0; i < trailCount; ++i) {
+        kinematics::AngleSample s;
+        if (!GetFloat(pPlain, pRemain, s.pitch)) return false;
+        if (!GetFloat(pPlain, pRemain, s.yaw)) return false;
+        if (!GetU64(pPlain, pRemain, s.timestamp_ms)) return false;
+        out_record.recent_input_trail.push_back(s);
+    }
+
+    // Loaded modules
+    uint16_t modCount = 0;
+    if (!GetU16(pPlain, pRemain, modCount)) return false;
+    out_record.loaded_modules_sample.clear();
+    for (uint16_t i = 0; i < modCount; ++i) {
+        std::string mod;
+        if (!GetString(pPlain, pRemain, mod)) return false;
+        out_record.loaded_modules_sample.push_back(mod);
+    }
+
+    return true;
+}
+
+std::vector<uint8_t> BlackboxDumper::SerializeAndEncryptHpke(
+    const BlackboxRecord& record,
+    const std::string& server_public_key_hex
+) {
+    if (server_public_key_hex.empty()) return {};
+
+    std::vector<uint8_t> plaintext;
+    SerializePlaintext(record, plaintext);
+
+    // 1. Generate client ephemeral X25519 keypair
+    auto eph = network::CryptoUtil::GenerateX25519KeyPair();
+    if (eph.private_key_hex.empty() || eph.public_key_hex.empty()) return {};
+
+    // 2. Compute Diffie-Hellman shared secret
+    std::string sharedSecretHex = network::CryptoUtil::DiffieHellmanX25519(eph.private_key_hex, server_public_key_hex);
+    if (sharedSecretHex.empty()) return {};
+
+    // 3. Derive 32-byte AEAD key and 12-byte base nonce via HKDF-SHA256
+    std::string keyHex = network::CryptoUtil::DeriveKeyHkdf(sharedSecretHex, eph.public_key_hex, "NoEscape-HPKE-ChaCha20Poly1305-Key");
+    std::string nonceHex = network::CryptoUtil::DeriveKeyHkdf(sharedSecretHex, eph.public_key_hex, "NoEscape-HPKE-Nonce");
+    auto keyBytes = network::CryptoUtil::FromHex(keyHex);
+    auto nonceBytes = network::CryptoUtil::FromHex(nonceHex);
+    if (keyBytes.size() < 32 || nonceBytes.size() < 12) return {};
+    keyBytes.resize(32);
+    nonceBytes.resize(12);
+
+    auto ephPubBytes = network::CryptoUtil::FromHex(eph.public_key_hex);
+    if (ephPubBytes.size() != 32) return {};
+
+    // 4. Construct AAD: Magic ("NEBB") + Version (3) + EphemeralPubKey (32) + Nonce (12)
+    std::vector<uint8_t> aad = {'N', 'E', 'B', 'B'};
+    PutU16(aad, 3);
+    aad.insert(aad.end(), ephPubBytes.begin(), ephPubBytes.end());
+    aad.insert(aad.end(), nonceBytes.begin(), nonceBytes.end());
+
+    // 5. Encrypt with RFC 8439 ChaCha20-Poly1305 AEAD
+    std::vector<uint8_t> ciphertext;
+    uint8_t tag[16]{};
+    if (!network::CryptoUtil::AeadChaCha20Poly1305Encrypt(
+            plaintext, aad, keyBytes.data(), nonceBytes.data(), ciphertext, tag)) {
+        return {};
+    }
+
+    // 6. Build final packet:
+    // [AAD: 50B] [Tag: 16B] [CipherLen: 4B] [Ciphertext: NB]
+    std::vector<uint8_t> packet = aad;
+    packet.insert(packet.end(), tag, tag + 16);
+    PutU32(packet, static_cast<uint32_t>(ciphertext.size()));
+    packet.insert(packet.end(), ciphertext.begin(), ciphertext.end());
+
+    return packet;
+}
+
+bool BlackboxDumper::DecryptAndDeserializeHpke(
+    const std::vector<uint8_t>& encrypted_data,
+    const std::string& server_private_key_hex,
+    BlackboxRecord& out_record
+) {
+    if (encrypted_data.size() < 70) return false;
+    if (encrypted_data[0] != 'N' || encrypted_data[1] != 'E' ||
+        encrypted_data[2] != 'B' || encrypted_data[3] != 'B') return false;
+
+    const uint8_t* ptr = encrypted_data.data() + 4;
+    size_t remain = encrypted_data.size() - 4;
+    uint16_t version = 0;
+    if (!GetU16(ptr, remain, version) || version != 3) return false;
+
+    std::vector<uint8_t> ephPub(ptr, ptr + 32);
+    ptr += 32; remain -= 32;
+    std::vector<uint8_t> nonce(ptr, ptr + 12);
+    ptr += 12; remain -= 12;
+    uint8_t tag[16]{};
+    std::memcpy(tag, ptr, 16);
+    ptr += 16; remain -= 16;
+
+    uint32_t cipherLen = 0;
+    if (!GetU32(ptr, remain, cipherLen) || remain < static_cast<size_t>(cipherLen)) return false;
+    std::vector<uint8_t> ciphertext(ptr, ptr + cipherLen);
+
+    std::string ephPubHex = network::CryptoUtil::ToHex(ephPub.data(), ephPub.size());
+    std::string sharedSecretHex = network::CryptoUtil::DiffieHellmanX25519(server_private_key_hex, ephPubHex);
+    if (sharedSecretHex.empty()) return false;
+
+    std::string keyHex = network::CryptoUtil::DeriveKeyHkdf(sharedSecretHex, ephPubHex, "NoEscape-HPKE-ChaCha20Poly1305-Key");
+    std::string nonceHex = network::CryptoUtil::DeriveKeyHkdf(sharedSecretHex, ephPubHex, "NoEscape-HPKE-Nonce");
+    auto keyBytes = network::CryptoUtil::FromHex(keyHex);
+    auto nonceBytes = network::CryptoUtil::FromHex(nonceHex);
+    if (keyBytes.size() < 32 || nonceBytes.size() < 12) return false;
+    keyBytes.resize(32);
+    nonceBytes.resize(12);
+
+    std::vector<uint8_t> aad = {'N', 'E', 'B', 'B'};
+    PutU16(aad, 3);
+    aad.insert(aad.end(), ephPub.begin(), ephPub.end());
+    aad.insert(aad.end(), nonceBytes.begin(), nonceBytes.end());
+
+    std::vector<uint8_t> plaintext;
+    if (!network::CryptoUtil::AeadChaCha20Poly1305Decrypt(
+            ciphertext, aad, tag, keyBytes.data(), nonceBytes.data(), plaintext)) {
+        Logger::Instance().Error("Blackbox HPKE decryption failed: AEAD Poly1305 authentication tag mismatch");
+        return false;
+    }
+
+    return DeserializePlaintext(plaintext.data(), plaintext.size(), out_record);
+}
+
+void BlackboxDumper::SetServerPublicKey(std::string pubkey_hex) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    server_public_key_ = std::move(pubkey_hex);
+}
+
+std::string BlackboxDumper::GetServerPublicKey() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return server_public_key_;
+}
+
+std::vector<uint8_t> BlackboxDumper::SerializeAndEncrypt(
+    const BlackboxRecord& record,
+    const std::string& secret_key
+) {
+    std::string sPub;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        sPub = server_public_key_;
+    }
+    if (!sPub.empty() && secret_key.empty()) {
+        return SerializeAndEncryptHpke(record, sPub);
+    }
+    if (secret_key.rfind("hpke:", 0) == 0) {
+        return SerializeAndEncryptHpke(record, secret_key.substr(5));
+    }
+
+    // 1. Serialize plaintext payload
+    std::vector<uint8_t> plaintext;
+    SerializePlaintext(record, plaintext);
 
     // 2. Generate 12-byte CSPRNG nonce and 16-byte random salt
     std::vector<uint8_t> nonce(12, 0);
@@ -331,10 +506,7 @@ bool BlackboxDumper::DecryptAndDeserialize(
     const std::string& secret_key,
     BlackboxRecord& out_record
 ) {
-    // Header checks: Version 2 requires at least 4 + 2 + 12 + 16 + 16 + 4 = 54 bytes
-    if (encrypted_data.size() < 54) {
-        return false;
-    }
+    if (encrypted_data.size() < 6) return false;
 
     if (encrypted_data[0] != 'N' || encrypted_data[1] != 'E' ||
         encrypted_data[2] != 'B' || encrypted_data[3] != 'B') {
@@ -347,6 +519,10 @@ bool BlackboxDumper::DecryptAndDeserialize(
     uint16_t version = 0;
     if (!GetU16(ptr, remain, version)) {
         return false;
+    }
+
+    if (version == 3) {
+        return DecryptAndDeserializeHpke(encrypted_data, secret_key, out_record);
     }
 
     std::vector<uint8_t> plaintext;
@@ -378,7 +554,7 @@ bool BlackboxDumper::DecryptAndDeserialize(
         aad.insert(aad.end(), salt.begin(), salt.end());
 
         if (!network::CryptoUtil::AeadChaCha20Poly1305Decrypt(
-                ciphertext, aad, tag, derivedKeyBytes.data(), nonce.data(), plaintext)) {
+            ciphertext, aad, tag, derivedKeyBytes.data(), nonce.data(), plaintext)) {
             Logger::Instance().Error("Blackbox decryption failed: AEAD Poly1305 authentication tag mismatch");
             return false;
         }
@@ -425,51 +601,9 @@ bool BlackboxDumper::DecryptAndDeserialize(
         return false;
     }
 
-    // Deserialize plaintext fields
-    const uint8_t* pPlain = plaintext.data();
-    size_t pRemain = plaintext.size();
-
-    if (!GetU64(pPlain, pRemain, out_record.timestamp)) return false;
-    if (!GetU32(pPlain, pRemain, out_record.threat_score)) return false;
-    if (!GetU32(pPlain, pRemain, out_record.violation_type)) return false;
-    if (!GetString(pPlain, pRemain, out_record.hwid)) return false;
-    if (!GetString(pPlain, pRemain, out_record.violating_component)) return false;
-    if (!GetString(pPlain, pRemain, out_record.violation_reason)) return false;
-
-    // Backtrace
-    uint16_t btCount = 0;
-    if (!GetU16(pPlain, pRemain, btCount)) return false;
-    out_record.backtrace_addrs.clear();
-    for (uint16_t i = 0; i < btCount; ++i) {
-        uint64_t addr = 0;
-        if (!GetU64(pPlain, pRemain, addr)) return false;
-        out_record.backtrace_addrs.push_back(static_cast<uintptr_t>(addr));
-    }
-
-    // Input trail
-    uint16_t trailCount = 0;
-    if (!GetU16(pPlain, pRemain, trailCount)) return false;
-    out_record.recent_input_trail.clear();
-    for (uint16_t i = 0; i < trailCount; ++i) {
-        kinematics::AngleSample s;
-        if (!GetFloat(pPlain, pRemain, s.pitch)) return false;
-        if (!GetFloat(pPlain, pRemain, s.yaw)) return false;
-        if (!GetU64(pPlain, pRemain, s.timestamp_ms)) return false;
-        out_record.recent_input_trail.push_back(s);
-    }
-
-    // Loaded modules
-    uint16_t modCount = 0;
-    if (!GetU16(pPlain, pRemain, modCount)) return false;
-    out_record.loaded_modules_sample.clear();
-    for (uint16_t i = 0; i < modCount; ++i) {
-        std::string mod;
-        if (!GetString(pPlain, pRemain, mod)) return false;
-        out_record.loaded_modules_sample.push_back(mod);
-    }
-
-    return true;
+    return DeserializePlaintext(plaintext.data(), plaintext.size(), out_record);
 }
+
 
 bool BlackboxDumper::SaveDumpToFile(const std::string& file_path, const std::vector<uint8_t>& encrypted_data) {
 #if !defined(_WIN32)

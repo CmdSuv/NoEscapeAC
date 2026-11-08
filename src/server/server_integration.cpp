@@ -4,41 +4,272 @@
 #include <algorithm>
 #include <sstream>
 #include <ctime>
+#include <numeric>
+
+#if (defined(__x86_64__) || defined(_M_X64))
+#include <immintrin.h>
+#endif
 
 namespace noescape::server {
 
+namespace {
+
+#if (defined(__x86_64__) || defined(_M_X64)) && defined(__AVX2__)
+inline bool Intersect8AabbsAvx2(
+    float x0, float y0, float z0,
+    float dx, float dy, float dz,
+    const float* min_x, const float* max_x,
+    const float* min_y, const float* max_y,
+    const float* min_z, const float* max_z,
+    int count
+) {
+    __m256 tmin = _mm256_set1_ps(0.0f);
+    __m256 tmax = _mm256_set1_ps(1.0f);
+    __m256 parallel_ok = _mm256_castsi256_ps(_mm256_set1_epi32(-1));
+
+    auto clipAxisSimd = [&](float start, float dir, const float* bmin_ptr, const float* bmax_ptr) {
+        __m256 bmin = _mm256_loadu_ps(bmin_ptr);
+        __m256 bmax = _mm256_loadu_ps(bmax_ptr);
+        if (std::abs(dir) < 1e-6f) {
+            __m256 s = _mm256_set1_ps(start);
+            __m256 ge = _mm256_cmp_ps(s, bmin, _CMP_GE_OQ);
+            __m256 le = _mm256_cmp_ps(s, bmax, _CMP_LE_OQ);
+            parallel_ok = _mm256_and_ps(parallel_ok, _mm256_and_ps(ge, le));
+        } else {
+            float invD = 1.0f / dir;
+            __m256 invD_vec = _mm256_set1_ps(invD);
+            __m256 s = _mm256_set1_ps(start);
+            __m256 t0 = _mm256_mul_ps(_mm256_sub_ps(bmin, s), invD_vec);
+            __m256 t1 = _mm256_mul_ps(_mm256_sub_ps(bmax, s), invD_vec);
+            __m256 real_t0 = _mm256_min_ps(t0, t1);
+            __m256 real_t1 = _mm256_max_ps(t0, t1);
+            tmin = _mm256_max_ps(tmin, real_t0);
+            tmax = _mm256_min_ps(tmax, real_t1);
+        }
+    };
+
+    clipAxisSimd(x0, dx, min_x, max_x);
+    clipAxisSimd(y0, dy, min_y, max_y);
+    clipAxisSimd(z0, dz, min_z, max_z);
+
+    __m256 valid = _mm256_and_ps(parallel_ok, _mm256_cmp_ps(tmin, tmax, _CMP_LE_OQ));
+    __m256 condRange = _mm256_and_ps(_mm256_cmp_ps(tmax, _mm256_set1_ps(0.0f), _CMP_GE_OQ),
+                                     _mm256_cmp_ps(tmin, _mm256_set1_ps(1.0f), _CMP_LE_OQ));
+    valid = _mm256_and_ps(valid, condRange);
+
+    int mask = _mm256_movemask_ps(valid);
+    int validMask = (1 << count) - 1;
+    return (mask & validMask) != 0;
+}
+#endif
+
+} // namespace
+
 void ServerEspFilter::SetVisibilityAdapter(std::shared_ptr<IAuthoritativeVisibilityAdapter> adapter) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::unique_lock<std::shared_mutex> lock(mutex_);
     visibility_adapter_ = std::move(adapter);
 }
 
 std::shared_ptr<IAuthoritativeVisibilityAdapter> ServerEspFilter::GetVisibilityAdapter() const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::shared_lock<std::shared_mutex> lock(mutex_);
     return visibility_adapter_;
 }
 
 void ServerEspFilter::AddOccluder(const OccluderBox& box) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::unique_lock<std::shared_mutex> lock(mutex_);
     OccluderBox normalized = box;
     if (normalized.min_x > normalized.max_x) std::swap(normalized.min_x, normalized.max_x);
     if (normalized.min_y > normalized.max_y) std::swap(normalized.min_y, normalized.max_y);
     if (normalized.min_z > normalized.max_z) std::swap(normalized.min_z, normalized.max_z);
     occluders_.push_back(normalized);
+    bvh_dirty_.store(true, std::memory_order_release);
 }
 
 void ServerEspFilter::ClearOccluders() {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::unique_lock<std::shared_mutex> lock(mutex_);
+    std::lock_guard<std::mutex> buildLock(bvh_build_mutex_);
     occluders_.clear();
+    bvh_nodes_.clear();
+    bvh_box_indices_.clear();
+    bvh_dirty_.store(false, std::memory_order_release);
 }
 
 size_t ServerEspFilter::GetOccluderCount() const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::shared_lock<std::shared_mutex> lock(mutex_);
     return occluders_.size();
 }
 
 bool ServerEspFilter::HasOcclusionData() const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::shared_lock<std::shared_mutex> lock(mutex_);
     return !occluders_.empty() || (visibility_adapter_ != nullptr);
+}
+
+float ServerEspFilter::ComputeBoxSurfaceArea(const OccluderBox& b) {
+    float dx = std::max(0.0f, b.max_x - b.min_x);
+    float dy = std::max(0.0f, b.max_y - b.min_y);
+    float dz = std::max(0.0f, b.max_z - b.min_z);
+    return 2.0f * (dx * dy + dy * dz + dz * dx);
+}
+
+OccluderBox ServerEspFilter::UnionBoxes(const OccluderBox& a, const OccluderBox& b) {
+    return OccluderBox{
+        std::min(a.min_x, b.min_x), std::min(a.min_y, b.min_y), std::min(a.min_z, b.min_z),
+        std::max(a.max_x, b.max_x), std::max(a.max_y, b.max_y), std::max(a.max_z, b.max_z),
+        a.penetrable && b.penetrable
+    };
+}
+
+void ServerEspFilter::RebuildBvh() {
+    std::unique_lock<std::shared_mutex> lock(mutex_);
+    std::lock_guard<std::mutex> buildLock(bvh_build_mutex_);
+    bvh_dirty_.store(true, std::memory_order_release);
+    EnsureBvhBuilt();
+}
+
+void ServerEspFilter::EnsureBvhBuilt() const {
+    if (!bvh_dirty_.load(std::memory_order_acquire) && !bvh_nodes_.empty()) return;
+    std::lock_guard<std::mutex> buildLock(bvh_build_mutex_);
+    if (!bvh_dirty_.load(std::memory_order_relaxed) && !bvh_nodes_.empty()) return;
+
+    if (occluders_.empty()) {
+        bvh_nodes_.clear();
+        bvh_box_indices_.clear();
+        bvh_dirty_.store(false, std::memory_order_release);
+        return;
+    }
+
+    bvh_nodes_.clear();
+    bvh_nodes_.reserve(occluders_.size() * 2);
+    bvh_box_indices_.resize(occluders_.size());
+    std::iota(bvh_box_indices_.begin(), bvh_box_indices_.end(), 0);
+
+    SubdivideBvh(0, occluders_.size());
+    bvh_dirty_.store(false, std::memory_order_release);
+}
+
+int32_t ServerEspFilter::SubdivideBvh(size_t first, size_t count) const {
+    if (count == 0) return -1;
+
+    int32_t nodeIdx = static_cast<int32_t>(bvh_nodes_.size());
+    bvh_nodes_.emplace_back();
+
+    // Compute bounding box for primitives [first, first + count)
+    OccluderBox bbox = occluders_[bvh_box_indices_[first]];
+    for (size_t i = 1; i < count; ++i) {
+        bbox = UnionBoxes(bbox, occluders_[bvh_box_indices_[first + i]]);
+    }
+    bvh_nodes_[nodeIdx].bounds = bbox;
+
+    // Leaf threshold: <= 4 primitives
+    if (count <= 4) {
+        bvh_nodes_[nodeIdx].left_child = -1;
+        bvh_nodes_[nodeIdx].right_child = -1;
+        bvh_nodes_[nodeIdx].first_box_idx = static_cast<int32_t>(first);
+        bvh_nodes_[nodeIdx].box_count = static_cast<int32_t>(count);
+        return nodeIdx;
+    }
+
+    // SAH: Surface Area Heuristic split evaluation
+    float extentX = bbox.max_x - bbox.min_x;
+    float extentY = bbox.max_y - bbox.min_y;
+    float extentZ = bbox.max_z - bbox.min_z;
+
+    int splitAxis = 0;
+    if (extentY > extentX && extentY > extentZ) splitAxis = 1;
+    else if (extentZ > extentX && extentZ > extentY) splitAxis = 2;
+
+    auto getCentroid = [this](size_t idx, int axis) -> float {
+        const auto& b = occluders_[idx];
+        if (axis == 0) return 0.5f * (b.min_x + b.max_x);
+        if (axis == 1) return 0.5f * (b.min_y + b.max_y);
+        return 0.5f * (b.min_z + b.max_z);
+    };
+
+    size_t mid = first + count / 2;
+    std::nth_element(
+        bvh_box_indices_.begin() + first,
+        bvh_box_indices_.begin() + mid,
+        bvh_box_indices_.begin() + first + count,
+        [&](size_t a, size_t b) {
+            return getCentroid(a, splitAxis) < getCentroid(b, splitAxis);
+        }
+    );
+
+    size_t leftCount = mid - first;
+    size_t rightCount = count - leftCount;
+
+    int32_t leftChild = SubdivideBvh(first, leftCount);
+    int32_t rightChild = SubdivideBvh(mid, rightCount);
+
+    bvh_nodes_[nodeIdx].left_child = leftChild;
+    bvh_nodes_[nodeIdx].right_child = rightChild;
+    bvh_nodes_[nodeIdx].first_box_idx = -1;
+    bvh_nodes_[nodeIdx].box_count = 0;
+
+    return nodeIdx;
+}
+
+bool ServerEspFilter::RayIntersectsBvh(float x0, float y0, float z0, float x1, float y1, float z1) const {
+    if (occluders_.empty()) return false;
+    EnsureBvhBuilt();
+    if (bvh_nodes_.empty()) return false;
+
+#if (defined(__x86_64__) || defined(_M_X64)) && defined(__AVX2__)
+    float dx = x1 - x0;
+    float dy = y1 - y0;
+    float dz = z1 - z0;
+#endif
+
+    int32_t stack[64];
+    int stackPtr = 0;
+    stack[stackPtr++] = 0; // Root node
+
+    while (stackPtr > 0) {
+        int32_t nodeIdx = stack[--stackPtr];
+        const auto& node = bvh_nodes_[nodeIdx];
+
+        if (!SegmentIntersectsAabb(x0, y0, z0, x1, y1, z1, node.bounds)) {
+            continue;
+        }
+
+        if (node.IsLeaf()) {
+            int32_t first = node.first_box_idx;
+            int32_t count = node.box_count;
+
+#if (defined(__x86_64__) || defined(_M_X64)) && defined(__AVX2__)
+            alignas(32) float min_x[8]{}, max_x[8]{};
+            alignas(32) float min_y[8]{}, max_y[8]{};
+            alignas(32) float min_z[8]{}, max_z[8]{};
+
+            int batch = std::min(count, 8);
+            for (int i = 0; i < batch; ++i) {
+                const auto& b = occluders_[bvh_box_indices_[first + i]];
+                min_x[i] = b.min_x; max_x[i] = b.max_x;
+                min_y[i] = b.min_y; max_y[i] = b.max_y;
+                min_z[i] = b.min_z; max_z[i] = b.max_z;
+            }
+            if (Intersect8AabbsAvx2(x0, y0, z0, dx, dy, dz, min_x, max_x, min_y, max_y, min_z, max_z, batch)) {
+                return true;
+            }
+            for (int i = 8; i < count; ++i) {
+                const auto& b = occluders_[bvh_box_indices_[first + i]];
+                if (SegmentIntersectsAabb(x0, y0, z0, x1, y1, z1, b)) return true;
+            }
+#else
+            for (int i = 0; i < count; ++i) {
+                const auto& b = occluders_[bvh_box_indices_[first + i]];
+                if (SegmentIntersectsAabb(x0, y0, z0, x1, y1, z1, b)) {
+                    return true;
+                }
+            }
+#endif
+        } else {
+            if (node.left_child != -1 && stackPtr < 63) stack[stackPtr++] = node.left_child;
+            if (node.right_child != -1 && stackPtr < 63) stack[stackPtr++] = node.right_child;
+        }
+    }
+
+    return false;
 }
 
 bool ServerEspFilter::SegmentIntersectsAabb(
@@ -75,7 +306,7 @@ bool ServerEspFilter::SegmentIntersectsAabb(
 bool ServerEspFilter::IsLineOfSightOccluded(
     const ObserverState& observer,
     const TargetEntityState& target) const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::shared_lock<std::shared_mutex> lock(mutex_);
     if (occluders_.empty() && !visibility_adapter_) return false;
 
     // Test center-of-mass plus 4 lateral/vertical bounding offsets to prevent pop-in artifacts on corner peeks
@@ -98,12 +329,7 @@ bool ServerEspFilter::IsLineOfSightOccluded(
             rayBlocked = visibility_adapter_->LineOfSightBlocked(
                 observer.x, observer.y, observer.z, tx, ty, tz, false);
         } else {
-            for (const auto& box : occluders_) {
-                if (SegmentIntersectsAabb(observer.x, observer.y, observer.z, tx, ty, tz, box)) {
-                    rayBlocked = true;
-                    break;
-                }
-            }
+            rayBlocked = RayIntersectsBvh(observer.x, observer.y, observer.z, tx, ty, tz);
         }
         if (!rayBlocked) {
             // At least one point on the target's bounding volume has clear line-of-sight
@@ -207,7 +433,7 @@ std::optional<core::DetectionEvent> ServerEspFilter::ValidateTargetEngagement(
     // Check if any blocking occluder is non-penetrable
     bool blockedBySolidWall = false;
     {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::shared_lock<std::shared_mutex> lock(mutex_);
         if (visibility_adapter_) {
             blockedBySolidWall = visibility_adapter_->LineOfSightBlocked(
                 attacker.x, attacker.y, attacker.z, target.x, target.y, target.z, true);

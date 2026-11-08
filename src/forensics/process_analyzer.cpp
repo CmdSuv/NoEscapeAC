@@ -292,6 +292,9 @@ std::vector<ProcessRecord> ProcessAnalyzer::DetectExternalMemoryReaders() {
     };
 
     constexpr ULONG kSystemExtendedHandleInformation = 64;
+    DWORD selfPid = GetCurrentProcessId();
+    HANDLE hSelf = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, selfPid);
+
     constexpr LONG kStatusInfoLengthMismatch = static_cast<LONG>(0xC0000004L);
 
     ULONG bufSize = 1024 * 1024;
@@ -305,13 +308,29 @@ std::vector<ProcessRecord> ProcessAnalyzer::DetectExternalMemoryReaders() {
             bufSize = (retLen > bufSize) ? (retLen + 65536) : (bufSize * 2);
         }
     }
-    if (status != 0 || buffer.size() < sizeof(SYSTEM_HANDLE_INFORMATION_EX)) return readers;
+    if (status != 0 || buffer.size() < sizeof(SYSTEM_HANDLE_INFORMATION_EX)) {
+        if (hSelf) CloseHandle(hSelf);
+        return readers;
+    }
 
-    DWORD selfPid = GetCurrentProcessId();
     auto* info = reinterpret_cast<const SYSTEM_HANDLE_INFORMATION_EX*>(buffer.data());
     size_t maxEntries = (buffer.size() - offsetof(SYSTEM_HANDLE_INFORMATION_EX, Handles)) /
                         sizeof(SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX);
     size_t count = std::min<size_t>(static_cast<size_t>(info->NumberOfHandles), maxEntries);
+
+    // Identify our own kernel EPROCESS object pointer from our handle table
+    PVOID selfEProcess = nullptr;
+    if (hSelf) {
+        for (size_t i = 0; i < count; ++i) {
+            const auto& h = info->Handles[i];
+            if (static_cast<DWORD>(h.UniqueProcessId) == selfPid &&
+                h.HandleValue == reinterpret_cast<ULONG_PTR>(hSelf)) {
+                selfEProcess = h.Object;
+                break;
+            }
+        }
+        CloseHandle(hSelf);
+    }
 
     constexpr ULONG kInvasiveAccess = PROCESS_VM_READ | PROCESS_VM_WRITE | PROCESS_VM_OPERATION | PROCESS_CREATE_THREAD;
     for (size_t i = 0; i < count; ++i) {
@@ -321,7 +340,33 @@ std::vector<ProcessRecord> ProcessAnalyzer::DetectExternalMemoryReaders() {
         if ((h.GrantedAccess & kInvasiveAccess) == 0) continue;
 
         HANDLE hOwner = OpenProcess(PROCESS_DUP_HANDLE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, ownerPid);
-        if (!hOwner) continue;
+        if (!hOwner) {
+            // Elevated or DACL-restricted external cheat process: OpenProcess fails with ERROR_ACCESS_DENIED.
+            // When h.Object == selfEProcess, we verify with 100% certainty that this external handle targets our process!
+            if (selfEProcess != nullptr && h.Object == selfEProcess) {
+                std::string baseName = "ElevatedProcess_" + std::to_string(ownerPid);
+                std::string fullPath = "";
+                HANDLE hQuery = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, ownerPid);
+                if (hQuery) {
+                    char pathBuf[MAX_PATH * 2]{};
+                    DWORD pathLen = sizeof(pathBuf);
+                    if (QueryFullProcessImageNameA(hQuery, 0, pathBuf, &pathLen)) {
+                        fullPath = pathBuf;
+                        baseName = core::BaseName(fullPath);
+                    }
+                    CloseHandle(hQuery);
+                }
+                if (InspectExternalHandle(ownerPid, baseName, fullPath, h.GrantedAccess).has_value()) {
+                    ProcessRecord rec;
+                    rec.pid = ownerPid;
+                    rec.name = baseName;
+                    rec.path = fullPath;
+                    rec.granted_access_mask = h.GrantedAccess;
+                    readers.push_back(std::move(rec));
+                }
+            }
+            continue;
+        }
 
         HANDLE hDup = nullptr;
         if (DuplicateHandle(hOwner, reinterpret_cast<HANDLE>(h.HandleValue), GetCurrentProcess(),

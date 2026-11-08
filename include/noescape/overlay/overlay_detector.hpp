@@ -87,6 +87,7 @@ public:
     std::optional<core::DetectionEvent> InspectRenderingPointer(const char* routine_name, void* function_ptr);
 
     // Dynamic vtable swapchain inspection
+    bool InitializeSwapchainFingerprint();
     void RegisterSwapchainVTable(void** vtable, size_t entry_count);
     void ClearRegisteredVTables();
 

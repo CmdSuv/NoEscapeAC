@@ -2,6 +2,8 @@
 #include "noescape/network/crypto_util.hpp"
 #include "noescape/network/ed25519.hpp"
 #include "noescape/core/blackbox.hpp"
+#include "noescape/security/integrity.hpp"
+#include "noescape/network/panel_client.hpp"
 
 using namespace noescape::network;
 
@@ -272,4 +274,93 @@ TEST(Blackbox, AeadV2FlightRecorderRoundtrip) {
     // Wrong secret key must fail decryption
     ASSERT_FALSE(BlackboxDumper::Instance().DecryptAndDeserialize(encrypted, "WrongKey", failRec));
 }
+
+TEST(Crypto, X25519HpkeWriteOnlyBlackbox) {
+    using namespace noescape::core;
+
+    // Generate server's static X25519 keypair
+    auto serverKp = CryptoUtil::GenerateX25519KeyPair();
+    ASSERT_EQ(serverKp.public_key_hex.length(), 64);
+    ASSERT_EQ(serverKp.private_key_hex.length(), 64);
+
+    // Generate another unrelated keypair
+    auto attackerKp = CryptoUtil::GenerateX25519KeyPair();
+
+    BlackboxRecord recIn;
+    recIn.timestamp = 1730500000;
+    recIn.threat_score = 100;
+    recIn.violation_type = 7;
+    recIn.hwid = "write-only-hpke-hwid-999";
+    recIn.violating_component = "ThreadStackInspector";
+    recIn.violation_reason = "Unbacked RIP execution in thread context";
+    recIn.backtrace_addrs = {0x7ffff7001000, 0x7ffff7002500};
+    recIn.recent_input_trail = {{12.0f, 45.0f, 1000}, {14.0f, 46.0f, 1016}};
+    recIn.loaded_modules_sample = {"target_game.exe", "libc.so.6"};
+
+    // Client performs write-only HPKE encryption with server's PUBLIC key only
+    auto hpkeCiphertext = BlackboxDumper::Instance().SerializeAndEncryptHpke(recIn, serverKp.public_key_hex);
+    // Envelope size: 4 (magic) + 1 (ver 3) + 32 (ephemeral pubkey) + 12 (nonce) + 16 (tag) + ciphertext
+    ASSERT_GT(hpkeCiphertext.size(), 65);
+
+    // Server decrypts with server's PRIVATE key
+    BlackboxRecord recOut;
+    bool ok = BlackboxDumper::Instance().DecryptAndDeserializeHpke(hpkeCiphertext, serverKp.private_key_hex, recOut);
+    ASSERT_TRUE(ok);
+    ASSERT_EQ(recOut.timestamp, recIn.timestamp);
+    ASSERT_EQ(recOut.threat_score, recIn.threat_score);
+    ASSERT_EQ(recOut.violation_type, recIn.violation_type);
+    ASSERT_EQ(recOut.hwid, recIn.hwid);
+    ASSERT_EQ(recOut.violating_component, recIn.violating_component);
+    ASSERT_EQ(recOut.violation_reason, recIn.violation_reason);
+    ASSERT_EQ(recOut.backtrace_addrs.size(), recIn.backtrace_addrs.size());
+
+    // Attacker without server's private key cannot decrypt
+    BlackboxRecord failRec;
+    ASSERT_FALSE(BlackboxDumper::Instance().DecryptAndDeserializeHpke(hpkeCiphertext, attackerKp.private_key_hex, failRec));
+
+    // Tampered payload fails AEAD verification
+    auto tampered = hpkeCiphertext;
+    tampered.back() ^= 0x55;
+    ASSERT_FALSE(BlackboxDumper::Instance().DecryptAndDeserializeHpke(tampered, serverKp.private_key_hex, failRec));
+}
+
+TEST(Crypto, HardwareIdentityFingerprintFormat) {
+    std::string hwid1 = CryptoUtil::GetMachineHWID();
+    std::string hwid2 = CryptoUtil::GetMachineHWID();
+
+    ASSERT_FALSE(hwid1.empty());
+    ASSERT_EQ(hwid1.length(), 64); // 256-bit hex digest
+    ASSERT_EQ(hwid1, hwid2);       // Deterministic caching across calls
+}
+
+TEST(Crypto, AttestEd25519AsymmetricSigning) {
+    auto kp = CryptoUtil::GenerateAsymmetricKeyPair();
+    ASSERT_EQ(kp.private_key_hex.length(), 64);
+    ASSERT_EQ(kp.public_key_hex.length(), 64);
+
+    std::string sigHex;
+    bool ok = noescape::security::IntegrityChecker::Instance().AttestEd25519(
+        kp.private_key_hex, "agent-007", "nonce-999", 0, 64, sigHex
+    );
+    ASSERT_TRUE(ok);
+    ASSERT_FALSE(sigHex.empty());
+    ASSERT_EQ(sigHex.length(), 128); // 64-byte Ed25519 signature in hex
+}
+
+TEST(Crypto, PanelClientEphemeralHeartbeat) {
+    PanelClient client("http://127.0.0.1:8080", "test-secret-key", "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff");
+    HeartbeatPacket pkt = client.ConstructHeartbeat(25, "ACTIVE");
+
+    ASSERT_FALSE(pkt.client_ephemeral_pubkey.empty());
+    ASSERT_EQ(pkt.client_ephemeral_pubkey.length(), 64);
+    ASSERT_FALSE(pkt.ed25519_signature.empty());
+    ASSERT_EQ(pkt.ed25519_signature.length(), 128);
+
+    std::ostringstream ss;
+    ss << pkt.hwid << ":" << pkt.timestamp << ":" << pkt.threat_score << ":" << pkt.status << ":" << pkt.nonce;
+    std::string payload = ss.str();
+    bool sigValid = CryptoUtil::VerifyAsymmetric(pkt.client_ephemeral_pubkey, payload, pkt.ed25519_signature);
+    ASSERT_TRUE(sigValid);
+}
+
 

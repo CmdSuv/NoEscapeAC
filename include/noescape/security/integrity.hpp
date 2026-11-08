@@ -29,6 +29,8 @@ public:
     // without keeping an unpatched copy of its code around.
     bool Attest(const std::string& secret_key, const std::string& id, const std::string& nonce,
                 uint64_t offset, uint64_t length, std::string& out_hex);
+    bool AttestEd25519(const std::string& private_key_hex, const std::string& id, const std::string& nonce,
+                       uint64_t offset, uint64_t length, std::string& out_sig_hex);
     size_t TextSize() const { std::lock_guard<std::recursive_mutex> l(mutex_); return text_size_; }
 
 private:

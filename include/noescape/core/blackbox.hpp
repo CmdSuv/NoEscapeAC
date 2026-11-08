@@ -38,18 +38,34 @@ public:
         uint32_t violation_type = 0
     );
 
-    // Serializes snapshot and encrypts with HMAC authentication
+    // Serializes snapshot and encrypts with AEAD (Version 2 symmetric or Version 3 HPKE)
     std::vector<uint8_t> SerializeAndEncrypt(
         const BlackboxRecord& record,
-        const std::string& secret_key
+        const std::string& secret_key = ""
     );
 
-    // Decrypts and deserializes snapshot; verifies HMAC signature
+    // Decrypts and deserializes snapshot; verifies AEAD tag
     bool DecryptAndDeserialize(
         const std::vector<uint8_t>& encrypted_data,
         const std::string& secret_key,
         BlackboxRecord& out_record
     );
+
+    // RFC 9180 HPKE Write-Only encryption (client encrypts with server X25519 public key)
+    std::vector<uint8_t> SerializeAndEncryptHpke(
+        const BlackboxRecord& record,
+        const std::string& server_public_key_hex
+    );
+
+    // RFC 9180 HPKE Decryption (server decrypts with server X25519 private key)
+    bool DecryptAndDeserializeHpke(
+        const std::vector<uint8_t>& encrypted_data,
+        const std::string& server_private_key_hex,
+        BlackboxRecord& out_record
+    );
+
+    void SetServerPublicKey(std::string pubkey_hex);
+    std::string GetServerPublicKey() const;
 
     // Writes encrypted dump payload to disk
     bool SaveDumpToFile(const std::string& file_path, const std::vector<uint8_t>& encrypted_data);
@@ -81,6 +97,7 @@ private:
 
     mutable std::mutex mutex_;
     std::string dump_dir_{""};
+    std::string server_public_key_{""};
     std::deque<kinematics::AngleSample> input_trail_;
     size_t trail_capacity_{64};
 };

@@ -92,15 +92,23 @@ std::optional<core::DetectionEvent> AimAnalyzer::PushSample(const AngleSample& s
     auto snapEvent = CheckInstantSnap();
     if (snapEvent) return recordAndPromote(snapEvent);
 
+    // Check 2: Phase-Space Angular Curvature (Instant velocity cusp / 180-deg reversal at high speed)
+    auto phaseEvent = CheckPhaseSpaceCurvature();
+    if (phaseEvent) return recordAndPromote(phaseEvent);
+
     // Checks requiring a longer trajectory window
     if (history_.size() >= min_samples_) {
-        // Check 2: Perfect Linearity
+        // Check 3: Perfect Linearity
         auto linearEvent = CheckPerfectLinearity();
         if (linearEvent) return recordAndPromote(linearEvent);
 
-        // Check 3: Artificial Smoothing
+        // Check 4: Artificial Smoothing
         auto smoothEvent = CheckArtificialSmoothing();
         if (smoothEvent) return recordAndPromote(smoothEvent);
+
+        // Check 5: Flash & Hogan Minimum-Jerk Model
+        auto jerkEvent = CheckMinimumJerkViolation();
+        if (jerkEvent) return recordAndPromote(jerkEvent);
     }
 
     return std::nullopt;
@@ -285,6 +293,119 @@ std::optional<core::DetectionEvent> AimAnalyzer::CheckArtificialSmoothing() {
         ev.timestamp_utc_ms = core::DetectionEvent::NowUtcMs();
         ev.threat_score = 80;
         return ev;
+    }
+
+    return std::nullopt;
+}
+
+std::optional<core::DetectionEvent> AimAnalyzer::CheckMinimumJerkViolation() {
+    size_t n = history_.size();
+    if (n < min_samples_) return std::nullopt;
+
+    float totalTime = static_cast<float>(history_.back().timestamp_ms - history_[n - min_samples_].timestamp_ms) / 1000.0f;
+    if (totalTime < 0.05f || totalTime > 2.0f) return std::nullopt;
+
+    float totalDist = 0.0f;
+    std::vector<float> vels;
+    vels.reserve(min_samples_);
+
+    for (size_t i = n - min_samples_ + 1; i < n; ++i) {
+        float dt = static_cast<float>(history_[i].timestamp_ms - history_[i - 1].timestamp_ms) / 1000.0f;
+        if (dt <= 0.0f) continue;
+        float d = CalculateAngleDistance(history_[i - 1], history_[i]);
+        totalDist += d;
+        vels.push_back(d / dt);
+    }
+
+    if (totalDist < 8.0f || vels.size() < 6) return std::nullopt;
+
+    std::vector<float> accels;
+    accels.reserve(vels.size() - 1);
+    for (size_t i = 1; i < vels.size(); ++i) {
+        float dt = static_cast<float>(history_[n - min_samples_ + 1 + i].timestamp_ms -
+                                      history_[n - min_samples_ + i].timestamp_ms) / 1000.0f;
+        if (dt <= 0.0f) dt = 0.016f;
+        accels.push_back((vels[i] - vels[i - 1]) / dt);
+    }
+
+    float jerkIntegral = 0.0f;
+    float maxJerk = 0.0f;
+    for (size_t i = 1; i < accels.size(); ++i) {
+        float dt = static_cast<float>(history_[n - min_samples_ + 2 + i].timestamp_ms -
+                                      history_[n - min_samples_ + 1 + i].timestamp_ms) / 1000.0f;
+        if (dt <= 0.0f) dt = 0.016f;
+        float j = (accels[i] - accels[i - 1]) / dt;
+        float absJ = std::abs(j);
+        if (absJ > maxJerk) maxJerk = absJ;
+        jerkIntegral += j * j * dt;
+    }
+
+    float t5 = totalTime * totalTime * totalTime * totalTime * totalTime;
+    float d2 = totalDist * totalDist;
+    if (d2 <= 0.01f) return std::nullopt;
+
+    float jNorm = std::sqrt(0.5f * jerkIntegral * (t5 / d2));
+
+    // Flash & Hogan minimum-jerk violation: unnatural jerk discontinuities
+    if (jNorm > 95.0f && maxJerk > 40000.0f) {
+        core::DetectionEvent ev;
+        ev.type = core::DetectionType::KINEMATICS_AIMBOT_SNAP;
+        ev.severity = core::Severity::HIGH;
+        ev.component = "Kinematics::MinimumJerkModel";
+
+        std::ostringstream ss;
+        ss << "Flash-Hogan minimum-jerk violation: normalized_jerk=" << jNorm
+           << " (human <= 35), max_jerk=" << maxJerk << " deg/s^3 over "
+           << totalDist << " deg in " << (totalTime * 1000.0f) << " ms";
+        ev.details = ss.str();
+        ev.timestamp = core::DetectionEvent::NowMonotonicMs();
+        ev.timestamp_utc_ms = core::DetectionEvent::NowUtcMs();
+        ev.threat_score = 70;
+        return ev;
+    }
+
+    return std::nullopt;
+}
+
+std::optional<core::DetectionEvent> AimAnalyzer::CheckPhaseSpaceCurvature() {
+    size_t n = history_.size();
+    if (n < 3) return std::nullopt;
+
+    const auto& s0 = history_[n - 3];
+    const auto& s1 = history_[n - 2];
+    const auto& s2 = history_[n - 1];
+
+    float dt1 = static_cast<float>(s1.timestamp_ms - s0.timestamp_ms) / 1000.0f;
+    float dt2 = static_cast<float>(s2.timestamp_ms - s1.timestamp_ms) / 1000.0f;
+    if (dt1 <= 0.0f || dt2 <= 0.0f || dt1 > 0.065f || dt2 > 0.065f) return std::nullopt;
+
+    float vp1 = (s1.pitch - s0.pitch) / dt1;
+    float vy1 = NormalizeAngleDelta(s1.yaw - s0.yaw) / dt1;
+    float speed1 = std::sqrt(vp1 * vp1 + vy1 * vy1);
+
+    float vp2 = (s2.pitch - s1.pitch) / dt2;
+    float vy2 = NormalizeAngleDelta(s2.yaw - s1.yaw) / dt2;
+    float speed2 = std::sqrt(vp2 * vp2 + vy2 * vy2);
+
+    if (speed1 > 350.0f && speed2 > 200.0f) {
+        float dot = (vp1 * vp2 + vy1 * vy2) / (speed1 * speed2);
+        // Instant 180-degree phase-space cusp at high angular velocity
+        if (dot < -0.75f) {
+            core::DetectionEvent ev;
+            ev.type = core::DetectionType::KINEMATICS_AIMBOT_SNAP;
+            ev.severity = core::Severity::HIGH;
+            ev.component = "Kinematics::PhaseSpaceCurvature";
+
+            std::ostringstream ss;
+            ss << "Phase-space angular cusp anomaly: dot=" << dot
+               << ", pre_vel=" << speed1 << " deg/s, post_vel=" << speed2
+               << " deg/s in " << (dt2 * 1000.0f) << " ms";
+            ev.details = ss.str();
+            ev.timestamp = core::DetectionEvent::NowMonotonicMs();
+            ev.timestamp_utc_ms = core::DetectionEvent::NowUtcMs();
+            ev.threat_score = 75;
+            return ev;
+        }
     }
 
     return std::nullopt;
@@ -505,11 +626,42 @@ std::optional<core::DetectionEvent> AimAnalyzer::CheckTriggerbotTiming() {
         double diff = static_cast<double>(reaction_delays_ms_[i]) - meanMs;
         var += diff * diff;
     }
-    double stddevMs = std::sqrt(var / kMinTriggerSamples);
+    var /= kMinTriggerSamples;
+    double stddevMs = std::sqrt(var);
+
+    // Ex-Gaussian response latency modeling:
+    // Models reaction time as the convolution of a Gaussian (visual motor latency: mu, sigma)
+    // and an Exponential distribution (attentional decision latency: tau).
+    // Skewness S = mu3 / (var ^ 1.5). For Ex-Gaussian: mu3 = 2 * tau^3.
+    double mu3 = 0.0;
+    for (size_t i = n - kMinTriggerSamples; i < n; ++i) {
+        double diff = static_cast<double>(reaction_delays_ms_[i]) - meanMs;
+        mu3 += diff * diff * diff;
+    }
+    mu3 /= kMinTriggerSamples;
+
+    double tau = 0.0;
+    if (mu3 > 0.0) {
+        tau = std::cbrt(mu3 / 2.0);
+        if (tau * tau > var) {
+            tau = std::sqrt(var);
+        }
+    }
+    double sigma = std::sqrt(std::max(0.0, var - (tau * tau)));
+    double mu = meanMs - tau;
 
     // Human visual reaction times average 150-250ms with >= 12ms standard deviation.
-    // Triggerbots either fire sub-45ms consistently or use a fixed sleep timer (e.g. 60ms +/- 2ms).
-    if (meanMs < 45.0 || (meanMs < 95.0 && stddevMs < 3.0)) {
+    // Triggerbots either:
+    // 1. Fire sub-45ms consistently (inhuman motor conduction)
+    // 2. Use a fixed sleep timer (e.g. 60ms +/- 2ms, low variance)
+    // 3. Have Ex-Gaussian base latency mu < 70ms (below human physiological sensory conduction limit)
+    // 4. Have an unnatural absence of exponential attentional tail and low motor variance (sigma < 3.0ms && tau < 4.0ms)
+    bool isTriggerbot = (meanMs < 45.0) ||
+                        (meanMs < 95.0 && stddevMs < 3.0) ||
+                        (mu < 70.0) ||
+                        (sigma < 3.0 && tau < 4.0 && meanMs < 140.0);
+
+    if (isTriggerbot) {
         ++session_anomaly_count_;
         core::DetectionEvent ev;
         ev.type = core::DetectionType::KINEMATICS_TRIGGERBOT;
@@ -522,7 +674,9 @@ std::optional<core::DetectionEvent> AimAnalyzer::CheckTriggerbotTiming() {
 
         std::ostringstream ss;
         ss << "Automated triggerbot reaction profile over " << kMinTriggerSamples
-           << " engagements: mean_delay=" << meanMs << " ms, stddev=" << stddevMs << " ms";
+           << " engagements: mean_delay=" << meanMs << " ms, stddev=" << stddevMs
+           << " ms, ex-gaussian(mu=" << mu << " ms, sigma=" << sigma
+           << " ms, tau=" << tau << " ms)";
         ev.details = ss.str();
         return ev;
     }

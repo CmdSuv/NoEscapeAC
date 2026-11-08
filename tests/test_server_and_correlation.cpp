@@ -2,6 +2,7 @@
 #include "noescape/core/evidence_correlator.hpp"
 #include "noescape/server/server_integration.hpp"
 #include <cmath>
+#include <thread>
 
 using namespace noescape::core;
 using namespace noescape::server;
@@ -177,3 +178,90 @@ TEST(ServerIntegration, MovementAndEngagementValidation) {
     ASSERT_EQ(ev_speedhack->type, DetectionType::SERVER_ESP_VIOLATION);
     ASSERT_EQ(ev_speedhack->severity, Severity::CRITICAL);
 }
+
+TEST(ServerIntegration, BvhRayIntersectionMultiBox) {
+    ServerEspFilter filter;
+
+    // Create an array of 16 distinct occluder boxes (triggering BVH building and AVX2 8-way slabs)
+    for (int i = 0; i < 16; ++i) {
+        float x = static_cast<float>(i * 10);
+        OccluderBox b{
+            x - 2.0f, 10.0f, -2.0f,
+            x + 2.0f, 12.0f,  2.0f,
+            false
+        };
+        filter.AddOccluder(b);
+    }
+    ASSERT_EQ(filter.GetOccluderCount(), 16);
+
+    ObserverState obs;
+    obs.player_id = 1;
+    obs.x = 40.0f; obs.y = 0.0f; obs.z = 0.0f;
+
+    TargetEntityState target_box5;
+    target_box5.entity_id = 10;
+    target_box5.x = 40.0f; target_box5.y = 20.0f; target_box5.z = 0.0f;
+
+    // Ray shooting through the 5th box at x = 40 (from 40, 0, 0 to 40, 20, 0)
+    bool hit_box5 = filter.IsLineOfSightOccluded(obs, target_box5);
+    ASSERT_TRUE(hit_box5);
+
+    // Ray passing cleanly through the corridor between box 0 and box 1 at x = 5 (from 5, 0, 0 to 5, 20, 0)
+    obs.x = 5.0f;
+    TargetEntityState target_corridor;
+    target_corridor.entity_id = 11;
+    target_corridor.x = 5.0f; target_corridor.y = 20.0f; target_corridor.z = 0.0f;
+    bool miss_corridor = filter.IsLineOfSightOccluded(obs, target_corridor);
+    ASSERT_FALSE(miss_corridor);
+
+    // Ray above all boxes at z = 10 (from 40, 0, 10 to 40, 20, 10)
+    obs.x = 40.0f; obs.z = 10.0f;
+    TargetEntityState target_height;
+    target_height.entity_id = 12;
+    target_height.x = 40.0f; target_height.y = 20.0f; target_height.z = 10.0f;
+    bool miss_height = filter.IsLineOfSightOccluded(obs, target_height);
+    ASSERT_FALSE(miss_height);
+}
+
+TEST(ServerIntegration, ConcurrentMultiThreadedBvhQueries) {
+    ServerEspFilter filter;
+    for (int i = 0; i < 32; ++i) {
+        float x = static_cast<float>(i * 5);
+        filter.AddOccluder(OccluderBox{x - 1.0f, 10.0f, -1.0f, x + 1.0f, 12.0f, 1.0f, false});
+    }
+
+    constexpr int kNumThreads = 8;
+    constexpr int kQueriesPerThread = 150;
+    std::vector<std::thread> workers;
+    std::atomic<int> occludedHits{0};
+    std::atomic<int> corridorMisses{0};
+
+    for (int t = 0; t < kNumThreads; ++t) {
+        workers.emplace_back([&filter, &occludedHits, &corridorMisses]() {
+            for (int q = 0; q < kQueriesPerThread; ++q) {
+                // Query 1: hit box at x = 20
+                ObserverState obsHit{1, 20.0f, 0.0f, 0.0f};
+                TargetEntityState tgtHit{10, 20.0f, 20.0f, 0.0f};
+                if (filter.IsLineOfSightOccluded(obsHit, tgtHit)) {
+                    occludedHits.fetch_add(1, std::memory_order_relaxed);
+                }
+
+                // Query 2: corridor at x = 2.5
+                ObserverState obsMiss{2, 2.5f, 0.0f, 0.0f};
+                TargetEntityState tgtMiss{11, 2.5f, 20.0f, 0.0f};
+                if (!filter.IsLineOfSightOccluded(obsMiss, tgtMiss)) {
+                    corridorMisses.fetch_add(1, std::memory_order_relaxed);
+                }
+            }
+        });
+    }
+
+    for (auto& w : workers) {
+        w.join();
+    }
+
+    ASSERT_EQ(occludedHits.load(), kNumThreads * kQueriesPerThread);
+    ASSERT_EQ(corridorMisses.load(), kNumThreads * kQueriesPerThread);
+}
+
+

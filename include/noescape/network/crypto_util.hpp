@@ -53,6 +53,13 @@ public:
         const std::string& signature_hex
     );
 
+    // X25519 Key Exchange (RFC 7748 / RFC 9180 HPKE)
+    static AsymmetricKeyPair GenerateX25519KeyPair();
+    static std::string DiffieHellmanX25519(
+        const std::string& private_key_hex,
+        const std::string& peer_public_key_hex
+    );
+
     // RFC 8439 ChaCha20-Poly1305 AEAD authenticated encryption & decryption
     // key: 32 bytes, nonce: 12 bytes, tag: 16 bytes
     static bool AeadChaCha20Poly1305Encrypt(

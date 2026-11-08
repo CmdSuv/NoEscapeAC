@@ -406,6 +406,58 @@ inline int unpackneg(gf r[4], const u8 p[32]) {
     return 0;
 }
 
+static const u8 basepoint_x25519[32] = {9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+static const gf a24 = {0xdb41, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+
+inline int crypto_scalarmult(u8 *q, const u8 *s, const u8 *p) {
+    u8 e[32];
+    for (int i = 0; i < 32; ++i) e[i] = s[i];
+    e[0] &= 248;
+    e[31] &= 127;
+    e[31] |= 64;
+
+    gf x1, x2, z2, x3, z3, tmp0, tmp1;
+    unpack25519(x1, p);
+    set25519(x2, gf1);
+    set25519(z2, gf0);
+    set25519(x3, x1);
+    set25519(z3, gf1);
+
+    for (int pos = 254; pos >= 0; --pos) {
+        u8 b = (e[pos / 8] >> (pos & 7)) & 1;
+        sel25519(x2, x3, b);
+        sel25519(z2, z3, b);
+        A(tmp0, x2, z2);
+        Z(tmp1, x2, z2);
+        A(x2, x3, z3);
+        Z(z2, x3, z3);
+        M(z3, tmp0, z2);
+        M(z2, tmp1, x2);
+        A(x3, z3, z2);
+        Z(z3, z3, z2);
+        S(x3, x3);
+        S(z3, z3);
+        M(z3, z3, x1);
+        S(tmp0, tmp0);
+        S(tmp1, tmp1);
+        M(x2, tmp0, tmp1);
+        Z(tmp0, tmp0, tmp1);
+        M(z2, tmp0, a24);
+        A(z2, z2, tmp1);
+        M(z2, z2, tmp0);
+        sel25519(x2, x3, b);
+        sel25519(z2, z3, b);
+    }
+    inv25519(z2, z2);
+    M(x2, x2, z2);
+    pack25519(q, x2);
+    return 0;
+}
+
+inline int crypto_scalarmult_base(u8 *q, const u8 *s) {
+    return crypto_scalarmult(q, s, basepoint_x25519);
+}
+
 } // namespace
 
 bool CreateKeyPair(const uint8_t* seed, uint8_t* out_public_key, uint8_t* out_private_key) {
@@ -567,3 +619,49 @@ bool Verify(const uint8_t* public_key,
 }
 
 } // namespace noescape::network::ed25519
+
+namespace noescape::network::x25519 {
+
+bool CreateKeyPair(const uint8_t* seed, uint8_t* out_public_key, uint8_t* out_private_key) {
+    if (!seed || !out_public_key || !out_private_key) return false;
+    std::memcpy(out_private_key, seed, 32);
+#if defined(NOESCAPE_HAS_OPENSSL)
+    EVP_PKEY* pkey = EVP_PKEY_new_raw_private_key(EVP_PKEY_X25519, nullptr, seed, 32);
+    if (pkey) {
+        size_t publen = 32;
+        bool ok = (EVP_PKEY_get_raw_public_key(pkey, out_public_key, &publen) == 1 && publen == 32);
+        EVP_PKEY_free(pkey);
+        if (ok) return true;
+    }
+#endif
+    return ed25519::crypto_scalarmult_base(out_public_key, seed) == 0;
+}
+
+bool DiffieHellman(const uint8_t* private_key, const uint8_t* peer_public_key, uint8_t* out_shared_secret) {
+    if (!private_key || !peer_public_key || !out_shared_secret) return false;
+#if defined(NOESCAPE_HAS_OPENSSL)
+    EVP_PKEY* priv = EVP_PKEY_new_raw_private_key(EVP_PKEY_X25519, nullptr, private_key, 32);
+    EVP_PKEY* pub = EVP_PKEY_new_raw_public_key(EVP_PKEY_X25519, nullptr, peer_public_key, 32);
+    bool ok = false;
+    if (priv && pub) {
+        EVP_PKEY_CTX* ctx = EVP_PKEY_CTX_new(priv, nullptr);
+        if (ctx) {
+            if (EVP_PKEY_derive_init(ctx) == 1 &&
+                EVP_PKEY_derive_set_peer(ctx, pub) == 1) {
+                size_t secret_len = 32;
+                if (EVP_PKEY_derive(ctx, out_shared_secret, &secret_len) == 1 && secret_len == 32) {
+                    ok = true;
+                }
+            }
+            EVP_PKEY_CTX_free(ctx);
+        }
+    }
+    if (priv) EVP_PKEY_free(priv);
+    if (pub) EVP_PKEY_free(pub);
+    if (ok) return true;
+#endif
+    return ed25519::crypto_scalarmult(out_shared_secret, private_key, peer_public_key) == 0;
+}
+
+} // namespace noescape::network::x25519
+

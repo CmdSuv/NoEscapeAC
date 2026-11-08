@@ -329,6 +329,9 @@ PanelClient::PanelClient(std::string base_url, std::string secret_key, std::stri
       secret_key_(std::move(secret_key)),
       pin_(NormalizePin(spki_pin_sha256_hex)),
       hwid_(CryptoUtil::GetMachineHWID()) {
+    auto kp = CryptoUtil::GenerateAsymmetricKeyPair();
+    client_ephemeral_priv_hex_ = std::move(kp.private_key_hex);
+    client_ephemeral_pub_hex_ = std::move(kp.public_key_hex);
     EnsureNetworkInit();
 #if !defined(_WIN32)
     // OpenSSL writes cannot pass MSG_NOSIGNAL: make sure a peer reset never kills the game.
@@ -428,7 +431,9 @@ PanelClient::HttpResult PanelClient::Request(const ParsedUrl& target, const char
     EnsureNetworkInit();
     // Hard deadline for the whole exchange (name resolution excluded, see ConnectTcp)
     const auto deadline = Clock::now() + std::chrono::milliseconds(timeout_ms);
-    const std::string signature = body.empty() ? std::string() : CryptoUtil::HmacSha256(secret_key_, body);
+    const std::string signature = body.empty() ? std::string() :
+        (!secret_key_.empty() ? CryptoUtil::HmacSha256(secret_key_, body)
+                              : CryptoUtil::SignAsymmetric(client_ephemeral_priv_hex_, body));
 
 #if defined(_WIN32)
     if (target.secure) {
@@ -604,7 +609,11 @@ HeartbeatPacket PanelClient::ConstructHeartbeat(uint32_t current_threat_score, c
 
     std::ostringstream payload;
     payload << pkt.hwid << ":" << pkt.timestamp << ":" << pkt.threat_score << ":" << pkt.status << ":" << pkt.nonce;
-    pkt.hmac_signature = CryptoUtil::HmacSha256(secret_key_, payload.str());
+    pkt.hmac_signature = !secret_key_.empty() ? CryptoUtil::HmacSha256(secret_key_, payload.str()) : "";
+    pkt.client_ephemeral_pubkey = client_ephemeral_pub_hex_;
+    if (!client_ephemeral_priv_hex_.empty()) {
+        pkt.ed25519_signature = CryptoUtil::SignAsymmetric(client_ephemeral_priv_hex_, payload.str());
+    }
     return pkt;
 }
 
@@ -623,7 +632,9 @@ HeartbeatResult PanelClient::Heartbeat(uint32_t current_threat_score, const std:
          << "\"status\":\"" << JsonEscape(pkt.status) << "\","
          << "\"nonce\":\"" << pkt.nonce << "\","
          << "\"key_id\":\"" << JsonEscape(key_id_) << "\","
-         << "\"build_version\":\"" << JsonEscape(client_build_version_) << "\""
+         << "\"build_version\":\"" << JsonEscape(client_build_version_) << "\","
+         << "\"client_ephemeral_pubkey\":\"" << JsonEscape(pkt.client_ephemeral_pubkey) << "\","
+         << "\"ed25519_signature\":\"" << JsonEscape(pkt.ed25519_signature) << "\""
          << "}";
     auto res = Request(ParseUrl(base_url_ + "/heartbeat"), "POST", json.str(), 2000);
     out.ok = res.status >= 200 && res.status < 300;

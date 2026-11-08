@@ -383,43 +383,74 @@ void ScanPatternGroup(
 #if defined(NOESCAPE_X86)
     const bool useAvx2 = CpuHasAvx2();
 #endif
+    constexpr size_t kCacheBlockSize = 32768; // 32 KiB L1 cache-resident streaming block
+
+    size_t maxPatternLen = 0;
     for (const auto& b : buckets) {
-        if (out_hits.size() >= max_results) break;
-        if (b.patterns.size() == 1) {
-            const Pattern* pat = b.patterns[0];
-            const size_t idx = b.indices[0];
-            const uint8_t* current = data;
-            size_t remaining = size;
-            while (remaining >= pat->Length() && out_hits.size() < max_results) {
+        for (const auto* pat : b.patterns) {
+            maxPatternLen = std::max(maxPatternLen, pat->Length());
+        }
+    }
+
+    for (size_t blockStart = 0; blockStart < size && out_hits.size() < max_results; blockStart += kCacheBlockSize) {
+        size_t blockSpan = std::min(kCacheBlockSize + maxPatternLen, size - blockStart);
+        size_t blockValidSize = (blockStart + kCacheBlockSize <= size) ? kCacheBlockSize : (size - blockStart);
+        const uint8_t* blockData = data + blockStart;
+        uintptr_t blockBase = base_address + blockStart;
+
+        for (const auto& b : buckets) {
+            if (out_hits.size() >= max_results) break;
+            if (b.first_offset >= blockSpan || blockSpan < b.min_len) continue;
+
+            if (b.patterns.size() == 1) {
+                const Pattern* pat = b.patterns[0];
+                const size_t idx = b.indices[0];
+                const uint8_t* current = blockData;
+                size_t remaining = blockSpan;
+                while (remaining >= pat->Length() && out_hits.size() < max_results) {
+                    size_t offsetInBlock = static_cast<size_t>(current - blockData);
+                    if (offsetInBlock >= blockValidSize) break;
 #if defined(NOESCAPE_X86)
-                const uint8_t* match = useAvx2
-                    ? ScanAvx2Impl(current, remaining, *pat)
-                    : ScanSse2Impl(current, remaining, *pat);
+                    const uint8_t* match = useAvx2
+                        ? ScanAvx2Impl(current, remaining, *pat)
+                        : ScanSse2Impl(current, remaining, *pat);
 #else
-                const uint8_t* match = ScanScalarFree(current, remaining, *pat);
+                    const uint8_t* match = ScanScalarFree(current, remaining, *pat);
 #endif
-                if (!match) break;
-                out_hits.push_back({idx, base_address + static_cast<uintptr_t>(match - data)});
-                size_t consumed = static_cast<size_t>(match - current) + 1;
-                current += consumed;
-                remaining -= consumed;
-            }
-        } else {
-#if defined(NOESCAPE_X86)
-            if (useAvx2) {
-                ScanBucketAvx2Impl(data, size, b.first_byte, b.first_offset, b.min_len,
-                                   b.patterns.data(), b.indices.data(), b.patterns.size(),
-                                   base_address, max_results, out_hits);
+                    if (!match) break;
+                    size_t matchOffsetInBlock = static_cast<size_t>(match - blockData);
+                    if (matchOffsetInBlock < blockValidSize) {
+                        out_hits.push_back({idx, blockBase + matchOffsetInBlock});
+                    }
+                    size_t consumed = static_cast<size_t>(match - current) + 1;
+                    current += consumed;
+                    remaining -= consumed;
+                }
             } else {
-                ScanBucketSse2Impl(data, size, b.first_byte, b.first_offset, b.min_len,
-                                   b.patterns.data(), b.indices.data(), b.patterns.size(),
-                                   base_address, max_results, out_hits);
-            }
+                size_t startHitCount = out_hits.size();
+#if defined(NOESCAPE_X86)
+                if (useAvx2) {
+                    ScanBucketAvx2Impl(blockData, blockSpan, b.first_byte, b.first_offset, b.min_len,
+                                       b.patterns.data(), b.indices.data(), b.patterns.size(),
+                                       blockBase, max_results, out_hits);
+                } else {
+                    ScanBucketSse2Impl(blockData, blockSpan, b.first_byte, b.first_offset, b.min_len,
+                                       b.patterns.data(), b.indices.data(), b.patterns.size(),
+                                       blockBase, max_results, out_hits);
+                }
 #else
-            ScanBucketScalarFree(data, size, b.first_byte, b.first_offset, b.min_len,
-                                 b.patterns.data(), b.indices.data(), b.patterns.size(),
-                                 base_address, max_results, out_hits);
+                ScanBucketScalarFree(blockData, blockSpan, b.first_byte, b.first_offset, b.min_len,
+                                     b.patterns.data(), b.indices.data(), b.patterns.size(),
+                                     blockBase, max_results, out_hits);
 #endif
+                for (size_t h = startHitCount; h < out_hits.size(); ) {
+                    if (out_hits[h].address >= blockBase + blockValidSize) {
+                        out_hits.erase(out_hits.begin() + h);
+                    } else {
+                        ++h;
+                    }
+                }
+            }
         }
     }
 }

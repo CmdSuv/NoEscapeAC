@@ -284,6 +284,20 @@ bool IntegrityChecker::Attest(const std::string& secret_key, const std::string& 
     return true;
 }
 
+bool IntegrityChecker::AttestEd25519(const std::string& private_key_hex, const std::string& id, const std::string& nonce,
+                                     uint64_t offset, uint64_t length, std::string& out_sig_hex) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    if (!initialized_ && !Initialize()) return false;
+    constexpr uint64_t kMaxAttestBytes = 1u << 20;
+    if (length == 0 || length > kMaxAttestBytes || offset > text_size_ || length > text_size_ - offset) {
+        return false;
+    }
+    std::string msg = id + ":" + nonce + ":";
+    msg.append(reinterpret_cast<const char*>(text_start_ + offset), static_cast<size_t>(length));
+    out_sig_hex = network::CryptoUtil::SignAsymmetric(private_key_hex, msg);
+    return !out_sig_hex.empty();
+}
+
 std::optional<core::DetectionEvent> IntegrityChecker::VerifyIntegrity() {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (!initialized_) {

@@ -14,6 +14,7 @@
 #include <set>
 #include <filesystem>
 #include <chrono>
+#include <thread>
 
 #if defined(_WIN32)
 #include <windows.h>
@@ -29,91 +30,60 @@
 #include <pthread.h>
 #include <sys/mman.h>
 #include <elf.h>
+#include <sys/uio.h>
+#include <sys/syscall.h>
+#include <ucontext.h>
 #endif
 
 namespace noescape::memory {
 
 namespace {
 #if !defined(_WIN32)
-    thread_local sigjmp_buf g_scanJmpBuf;
-    thread_local volatile sig_atomic_t g_scanActive = 0;
+static std::atomic<uint32_t> g_targetTid{0};
+static std::atomic<uintptr_t> g_capturedRip{0};
+static std::atomic<uintptr_t> g_capturedRsp{0};
+static std::atomic<bool> g_captureDone{false};
+static std::mutex g_signalCaptureMutex;
+static struct sigaction g_oldUrg{};
+static std::atomic<bool> g_urgOldInstalled{false};
 
-    static struct sigaction g_oldSegv{};
-    static struct sigaction g_oldBus{};
-    static std::atomic<bool> g_guardInstalled{false};
-    static std::mutex g_scanGuardMutex;
-
-    void ScanSigHandler(int sig, siginfo_t* info, void* ucontext) {
-        if (g_scanActive) {
-            g_scanActive = 0;
-            siglongjmp(g_scanJmpBuf, 1);
+static void ThreadProvenanceSignalHandler(int sig, siginfo_t* info, void* uctx) {
+    if (uctx) {
+        pid_t curTid = static_cast<pid_t>(syscall(SYS_gettid));
+        if (curTid == static_cast<pid_t>(g_targetTid.load(std::memory_order_acquire))) {
+            auto* uc = reinterpret_cast<ucontext_t*>(uctx);
+#if defined(__x86_64__)
+            g_capturedRip.store(static_cast<uintptr_t>(uc->uc_mcontext.gregs[REG_RIP]), std::memory_order_release);
+            g_capturedRsp.store(static_cast<uintptr_t>(uc->uc_mcontext.gregs[REG_RSP]), std::memory_order_release);
+#elif defined(__i386__)
+            g_capturedRip.store(static_cast<uintptr_t>(uc->uc_mcontext.gregs[REG_EIP]), std::memory_order_release);
+            g_capturedRsp.store(static_cast<uintptr_t>(uc->uc_mcontext.gregs[REG_ESP]), std::memory_order_release);
+#endif
+            g_captureDone.store(true, std::memory_order_release);
+            return;
         }
-        if (sig == SIGSEGV && g_guardInstalled.load(std::memory_order_acquire)) {
-            if ((g_oldSegv.sa_flags & SA_SIGINFO) && g_oldSegv.sa_sigaction) {
-                g_oldSegv.sa_sigaction(sig, info, ucontext);
-                return;
-            } else if (g_oldSegv.sa_handler == SIG_IGN) {
-                return;
-            } else if (g_oldSegv.sa_handler && g_oldSegv.sa_handler != SIG_DFL) {
-                g_oldSegv.sa_handler(sig);
-                return;
-            }
-        } else if (sig == SIGBUS && g_guardInstalled.load(std::memory_order_acquire)) {
-            if ((g_oldBus.sa_flags & SA_SIGINFO) && g_oldBus.sa_sigaction) {
-                g_oldBus.sa_sigaction(sig, info, ucontext);
-                return;
-            } else if (g_oldBus.sa_handler == SIG_IGN) {
-                return;
-            } else if (g_oldBus.sa_handler && g_oldBus.sa_handler != SIG_DFL) {
-                g_oldBus.sa_handler(sig);
-                return;
-            }
-        }
-        struct sigaction dfl{};
-        dfl.sa_handler = SIG_DFL;
-        sigemptyset(&dfl.sa_mask);
-        sigaction(sig, &dfl, nullptr);
-        raise(sig);
     }
-
-    struct SafeScanGuard {
-        std::unique_lock<std::mutex> lock;
-        bool segvInstalled{false};
-        bool busInstalled{false};
-
-        SafeScanGuard() : lock(g_scanGuardMutex) {
-            // Keep SA_ONSTACK if the host (JVM, Go, Mono, crash reporters) uses an alternate signal
-            // stack, otherwise stack-overflow faults could no longer be handled.
-            struct sigaction cur{};
-            struct sigaction sa{};
-            sa.sa_sigaction = ScanSigHandler;
-            sigemptyset(&sa.sa_mask);
-            sa.sa_flags = SA_SIGINFO;
-            if (sigaction(SIGSEGV, nullptr, &cur) == 0) sa.sa_flags |= (cur.sa_flags & SA_ONSTACK);
-            if (sigaction(SIGSEGV, &sa, &g_oldSegv) == 0) {
-                segvInstalled = true;
-            }
-            sa.sa_flags = SA_SIGINFO;
-            if (sigaction(SIGBUS, nullptr, &cur) == 0) sa.sa_flags |= (cur.sa_flags & SA_ONSTACK);
-            if (sigaction(SIGBUS, &sa, &g_oldBus) == 0) {
-                busInstalled = true;
-            }
-            if (segvInstalled || busInstalled) {
-                g_guardInstalled.store(true, std::memory_order_release);
-            }
+    if (g_urgOldInstalled.load(std::memory_order_acquire)) {
+        if ((g_oldUrg.sa_flags & SA_SIGINFO) && g_oldUrg.sa_sigaction) {
+            g_oldUrg.sa_sigaction(sig, info, uctx);
+        } else if (g_oldUrg.sa_handler && g_oldUrg.sa_handler != SIG_DFL && g_oldUrg.sa_handler != SIG_IGN) {
+            g_oldUrg.sa_handler(sig);
         }
+    }
+}
 
-        ~SafeScanGuard() {
-            g_guardInstalled.store(false, std::memory_order_release);
-            if (segvInstalled) {
-                sigaction(SIGSEGV, &g_oldSegv, nullptr);
-            }
-            if (busInstalled) {
-                sigaction(SIGBUS, &g_oldBus, nullptr);
-            }
-            g_scanActive = 0;
+static void EnsureThreadSignalHandlerInstalled() {
+    static std::once_flag flag;
+    std::call_once(flag, []() {
+        struct sigaction sa{};
+        sa.sa_sigaction = ThreadProvenanceSignalHandler;
+        sigemptyset(&sa.sa_mask);
+        sa.sa_flags = SA_SIGINFO | SA_RESTART;
+        if (sigaction(SIGURG, &sa, &g_oldUrg) == 0) {
+            g_urgOldInstalled.store(true, std::memory_order_release);
         }
-    };
+    });
+}
 #endif
 
 static bool ScanChunkSafe(uintptr_t chunkStart,
@@ -121,61 +91,16 @@ static bool ScanChunkSafe(uintptr_t chunkStart,
                           const std::vector<const CheatSignature*>& applicable,
                           std::vector<PatternScanner::SignatureMatchResult>& outMatches) {
 #if !defined(_WIN32)
-    static const size_t pageSize = []() {
-        long sz = sysconf(_SC_PAGESIZE);
-        return (sz > 0) ? static_cast<size_t>(sz) : 4096UL;
-    }();
-    uintptr_t pageMask = ~(pageSize - 1);
-    uintptr_t pageStart = chunkStart & pageMask;
-    size_t span = ((chunkStart + chunkSize - pageStart) + pageSize - 1) & pageMask;
-
-    // One mincore() over the whole chunk: fails if any page is unmapped (region changed under
-    // us) and tells us which pages are resident. Non-resident pages are either never-touched
-    // reservations (reads as zeros) or swapped out: skip them at page granularity instead of
-    // faulting in megabytes of zero pages.
-    thread_local std::vector<unsigned char> residency;
-    const size_t numPages = span / pageSize;
-    residency.assign(numPages, 0);
-    if (mincore(reinterpret_cast<void*>(pageStart), span, residency.data()) != 0) {
+    thread_local std::vector<uint8_t> localBuf;
+    if (localBuf.size() < chunkSize) localBuf.resize(chunkSize);
+    struct iovec local_iov { localBuf.data(), chunkSize };
+    struct iovec remote_iov { reinterpret_cast<void*>(chunkStart), chunkSize };
+    ssize_t nread = process_vm_readv(getpid(), &local_iov, 1, &remote_iov, 1, 0);
+    if (nread <= 0) {
         return false;
     }
-    outMatches.clear();
-    bool anyResident = false;
-    for (unsigned char v : residency) {
-        if (v & 1) { anyResident = true; break; }
-    }
-    if (!anyResident) {
-        return true;
-    }
-
-    if (sigsetjmp(g_scanJmpBuf, 1) != 0) {
-        g_scanActive = 0;
-        return false;
-    }
-    g_scanActive = 1;
-    const uintptr_t chunkEnd = chunkStart + chunkSize;
-    size_t p = 0;
-    while (p < numPages && outMatches.size() < 16) {
-        while (p < numPages && (residency[p] & 1) == 0) ++p;
-        if (p >= numPages) break;
-        size_t runEndPage = p + 1;
-        while (runEndPage < numPages && (residency[runEndPage] & 1) != 0) ++runEndPage;
-
-        uintptr_t runStart = std::max(chunkStart, pageStart + p * pageSize);
-        uintptr_t runEnd = std::min(chunkEnd, pageStart + runEndPage * pageSize);
-        if (runEnd > runStart) {
-            auto subMatches = PatternScanner::ScanSignatures(
-                reinterpret_cast<const uint8_t*>(runStart),
-                runEnd - runStart,
-                applicable,
-                runStart,
-                16 - outMatches.size()
-            );
-            outMatches.insert(outMatches.end(), subMatches.begin(), subMatches.end());
-        }
-        p = runEndPage;
-    }
-    g_scanActive = 0;
+    size_t validBytes = static_cast<size_t>(nread);
+    outMatches = PatternScanner::ScanSignatures(localBuf.data(), validBytes, applicable, chunkStart, 16);
     return true;
 #else
     // Windows: never dereference foreign pages directly. Copy the chunk with ReadProcessMemory,
@@ -563,9 +488,7 @@ std::vector<core::DetectionEvent> MemoryScanner::ScanSignatures(const std::vecto
     // JIT engines legitimately emit "mov rax, imm64; jmp rax"-style stubs into anonymous code
     const bool jitHost = IsJitRuntime(regions);
 
-#if !defined(_WIN32)
-    SafeScanGuard safeGuard;
-#endif
+
 
     const auto scanStartTp = std::chrono::steady_clock::now();
     size_t budget = 0;
@@ -1112,43 +1035,56 @@ std::vector<ThreadExecutionInfo> MemoryScanner::QueryActiveThreads() {
             ThreadExecutionInfo info{};
             info.tid = te.th32ThreadID;
 
-            HANDLE hThread = OpenThread(THREAD_QUERY_INFORMATION | THREAD_GET_CONTEXT, FALSE, te.th32ThreadID);
+            HANDLE hThread = OpenThread(THREAD_QUERY_INFORMATION | THREAD_GET_CONTEXT | THREAD_SUSPEND_RESUME, FALSE, te.th32ThreadID);
             if (hThread) {
                 uintptr_t startAddr = 0;
                 if (fnNtQueryThread &&
                     fnNtQueryThread(hThread, kThreadQuerySetWin32StartAddress, &startAddr, sizeof(startAddr), nullptr) == 0) {
                     info.start_address = startAddr;
                 }
-                CONTEXT ctx{};
-                ctx.ContextFlags = CONTEXT_CONTROL;
-                if (GetThreadContext(hThread, &ctx)) {
+                DWORD prev = SuspendThread(hThread);
+                if (prev != (DWORD)-1) {
+                    CONTEXT ctx{};
+                    ctx.ContextFlags = CONTEXT_CONTROL;
+                    if (GetThreadContext(hThread, &ctx)) {
 #if defined(_M_X64) || defined(__x86_64__)
-                    info.instruction_pointer = static_cast<uintptr_t>(ctx.Rip);
-                    info.stack_pointer = static_cast<uintptr_t>(ctx.Rsp);
+                        info.instruction_pointer = static_cast<uintptr_t>(ctx.Rip);
+                        info.stack_pointer = static_cast<uintptr_t>(ctx.Rsp);
 #elif defined(_M_IX86) || defined(__i386__)
-                    info.instruction_pointer = static_cast<uintptr_t>(ctx.Eip);
-                    info.stack_pointer = static_cast<uintptr_t>(ctx.Esp);
+                        info.instruction_pointer = static_cast<uintptr_t>(ctx.Eip);
+                        info.stack_pointer = static_cast<uintptr_t>(ctx.Esp);
 #endif
+                    }
+                    ResumeThread(hThread);
                 }
                 CloseHandle(hThread);
             }
 
-            uintptr_t checkAddr = (info.start_address != 0) ? info.start_address : info.instruction_pointer;
-            if (checkAddr >= 0x10000ULL) {
-                info.ip_in_backed_module = false;
+            info.ip_in_backed_module = true;
+            auto checkModule = [&](uintptr_t addr) {
+                if (addr < 0x10000ULL) return;
+                bool backed = false;
                 for (const auto& r : regions) {
-                    if (checkAddr >= r.start && checkAddr < r.end) {
-                        info.module_path = r.pathname;
-                        info.ip_in_backed_module = (r.is_backed_by_file || jitHost) && r.executable;
+                    if (addr >= r.start && addr < r.end) {
+                        if (info.module_path.empty()) info.module_path = r.pathname;
+                        backed = (r.is_backed_by_file || jitHost) && r.executable;
                         break;
                     }
                 }
-            }
+                if (!backed) {
+                    info.ip_in_backed_module = false;
+                }
+            };
+            if (info.start_address != 0) checkModule(info.start_address);
+            if (info.instruction_pointer != 0) checkModule(info.instruction_pointer);
+
             threads.push_back(std::move(info));
         } while (Thread32Next(hSnap, &te));
     }
     CloseHandle(hSnap);
 #else
+    EnsureThreadSignalHandlerInstalled();
+    pid_t myTid = static_cast<pid_t>(syscall(SYS_gettid));
     std::error_code ec;
     for (const auto& entry : std::filesystem::directory_iterator("/proc/self/task", ec)) {
         if (ec) break;
@@ -1163,61 +1099,86 @@ std::vector<ThreadExecutionInfo> MemoryScanner::QueryActiveThreads() {
         ThreadExecutionInfo info{};
         info.tid = tid;
 
-        // 1. Inspect /proc/self/task/<tid>/syscall for user-space RSP and RIP when in syscall
-        std::ifstream sysFile(entry.path() / "syscall");
-        if (sysFile.is_open()) {
-            std::string line;
-            if (std::getline(sysFile, line) && line.rfind("running", 0) != 0) {
-                std::istringstream iss(line);
-                std::vector<std::string> tokens;
-                std::string tok;
-                while (iss >> tok) tokens.push_back(tok);
-                if (tokens.size() >= 3) {
-                    try {
-                        info.stack_pointer = static_cast<uintptr_t>(std::stoull(tokens[tokens.size() - 2], nullptr, 0));
-                        info.instruction_pointer = static_cast<uintptr_t>(std::stoull(tokens.back(), nullptr, 0));
-                    } catch (...) {}
+        // 1. Live thread context capture via unprivileged SIGURG reading ucontext_t (avoiding "running" skips)
+        bool capturedViaSignal = false;
+        if (static_cast<pid_t>(tid) != myTid) {
+            std::lock_guard<std::mutex> lk(g_signalCaptureMutex);
+            g_targetTid.store(tid, std::memory_order_release);
+            g_captureDone.store(false, std::memory_order_release);
+            if (syscall(SYS_tgkill, getpid(), tid, SIGURG) == 0) {
+                for (int spin = 0; spin < 50; ++spin) {
+                    if (g_captureDone.load(std::memory_order_acquire)) {
+                        info.instruction_pointer = g_capturedRip.load(std::memory_order_relaxed);
+                        info.stack_pointer = g_capturedRsp.load(std::memory_order_relaxed);
+                        capturedViaSignal = true;
+                        break;
+                    }
+                    std::this_thread::yield();
                 }
             }
         }
 
-        // 2. Check /proc/self/task/<tid>/stat for startstack (field 28) and kstkeip (field 30)
-        std::ifstream statFile(entry.path() / "stat");
-        if (statFile.is_open()) {
-            std::string statLine;
-            if (std::getline(statFile, statLine)) {
-                size_t closeParen = statLine.rfind(')');
-                if (closeParen != std::string::npos && closeParen + 2 < statLine.size()) {
-                    std::istringstream iss(statLine.substr(closeParen + 2));
+        // 2. Fall back to /proc/self/task/<tid>/syscall and stat if not captured via signal
+        if (!capturedViaSignal) {
+            std::ifstream sysFile(entry.path() / "syscall");
+            if (sysFile.is_open()) {
+                std::string line;
+                if (std::getline(sysFile, line) && line.rfind("running", 0) != 0) {
+                    std::istringstream iss(line);
+                    std::vector<std::string> tokens;
                     std::string tok;
-                    // Field 3 is state; field 28 is 26th token after ')'; field 30 is 28th token after ')'
-                    for (int idx = 3; idx <= 30 && (iss >> tok); ++idx) {
-                        if (idx == 28 && info.stack_pointer == 0) {
-                            try { info.stack_pointer = static_cast<uintptr_t>(std::stoull(tok)); } catch (...) {}
-                        } else if (idx == 30 && info.instruction_pointer == 0) {
-                            try { info.instruction_pointer = static_cast<uintptr_t>(std::stoull(tok)); } catch (...) {}
+                    while (iss >> tok) tokens.push_back(tok);
+                    if (tokens.size() >= 3) {
+                        try {
+                            info.stack_pointer = static_cast<uintptr_t>(std::stoull(tokens[tokens.size() - 2], nullptr, 0));
+                            info.instruction_pointer = static_cast<uintptr_t>(std::stoull(tokens.back(), nullptr, 0));
+                        } catch (...) {}
+                    }
+                }
+            }
+
+            std::ifstream statFile(entry.path() / "stat");
+            if (statFile.is_open()) {
+                std::string statLine;
+                if (std::getline(statFile, statLine)) {
+                    size_t closeParen = statLine.rfind(')');
+                    if (closeParen != std::string::npos && closeParen + 2 < statLine.size()) {
+                        std::istringstream iss(statLine.substr(closeParen + 2));
+                        std::string tok;
+                        for (int idx = 3; idx <= 30 && (iss >> tok); ++idx) {
+                            if (idx == 28 && info.stack_pointer == 0) {
+                                try { info.stack_pointer = static_cast<uintptr_t>(std::stoull(tok)); } catch (...) {}
+                            } else if (idx == 30 && info.instruction_pointer == 0) {
+                                try { info.instruction_pointer = static_cast<uintptr_t>(std::stoull(tok)); } catch (...) {}
+                            }
                         }
                     }
                 }
             }
         }
 
-        if (info.instruction_pointer >= 0x10000ULL && info.instruction_pointer < 0x0000800000000000ULL) {
-            info.ip_in_backed_module = false;
+        info.ip_in_backed_module = true;
+        auto checkLinuxModule = [&](uintptr_t addr) {
+            if (addr < 0x10000ULL || addr >= 0x0000800000000000ULL) return;
+            bool backed = false;
             for (const auto& r : regions) {
-                if (info.instruction_pointer >= r.start && info.instruction_pointer < r.end) {
-                    info.module_path = r.pathname;
+                if (addr >= r.start && addr < r.end) {
+                    if (info.module_path.empty()) info.module_path = r.pathname;
                     bool isKernelProvided = (r.pathname == "[vdso]" || r.pathname == "[vsyscall]" || r.pathname.rfind("[vvar", 0) == 0);
                     bool genuineFile = r.is_backed_by_file && !r.pathname.empty() && r.pathname[0] == '/' &&
                                        r.pathname.find("(deleted)") == std::string::npos &&
                                        r.pathname.rfind("/memfd:", 0) != 0;
-                    info.ip_in_backed_module = (genuineFile || isKernelProvided || jitHost) && r.executable;
+                    backed = (genuineFile || isKernelProvided || jitHost) && r.executable;
                     break;
                 }
             }
-        } else {
-            info.ip_in_backed_module = true;
-        }
+            if (!backed) {
+                info.ip_in_backed_module = false;
+            }
+        };
+        if (info.instruction_pointer != 0) checkLinuxModule(info.instruction_pointer);
+        if (info.start_address != 0) checkLinuxModule(info.start_address);
+
         threads.push_back(std::move(info));
     }
 #endif
@@ -1227,13 +1188,154 @@ std::vector<ThreadExecutionInfo> MemoryScanner::QueryActiveThreads() {
 std::vector<core::DetectionEvent> MemoryScanner::AuditThreadProvenance() {
     std::vector<core::DetectionEvent> events;
     auto threads = QueryActiveThreads();
+    auto regions = QueryMemoryRegions();
+    const bool jitHost = IsJitRuntime(regions);
+
     for (const auto& t : threads) {
-        uintptr_t checkAddr = (t.start_address != 0) ? t.start_address : t.instruction_pointer;
-        if (checkAddr >= 0x10000ULL) {
-            auto ev = InspectThreadAddress(t.tid, checkAddr);
+        // Inspect BOTH start_address AND instruction_pointer!
+        if (t.start_address >= 0x10000ULL) {
+            auto ev = InspectThreadAddress(t.tid, t.start_address);
             if (ev.has_value()) {
                 events.push_back(*ev);
             }
+        }
+        if (t.instruction_pointer >= 0x10000ULL && t.instruction_pointer != t.start_address) {
+            auto ev = InspectThreadAddress(t.tid, t.instruction_pointer);
+            if (ev.has_value()) {
+                events.push_back(*ev);
+            }
+        }
+
+        // Stack Walk & Inspection: scan stack memory words for unbacked executable return addresses
+        if (t.stack_pointer >= 0x10000ULL) {
+#if !defined(_WIN32)
+            uintptr_t stackWords[32]{};
+            struct iovec local_iov{ stackWords, sizeof(stackWords) };
+            struct iovec remote_iov{ reinterpret_cast<void*>(t.stack_pointer), sizeof(stackWords) };
+            ssize_t nread = process_vm_readv(getpid(), &local_iov, 1, &remote_iov, 1, 0);
+            if (nread > 0) {
+                size_t words = static_cast<size_t>(nread) / sizeof(uintptr_t);
+                for (size_t wi = 0; wi < words; ++wi) {
+                    uintptr_t frameAddr = stackWords[wi];
+                    if (frameAddr >= 0x10000ULL && frameAddr < 0x0000800000000000ULL) {
+                        for (const auto& r : regions) {
+                            if (frameAddr >= r.start && frameAddr < r.end) {
+                                if (r.executable && !r.is_backed_by_file && !jitHost &&
+                                    r.pathname != "[vdso]" && r.pathname != "[vsyscall]") {
+                                    core::DetectionEvent ev;
+                                    ev.type = core::DetectionType::THREAD_PROVENANCE_ANOMALY;
+                                    ev.severity = core::Severity::CRITICAL;
+                                    ev.component = "MemoryScanner::StackWalk";
+                                    std::ostringstream ss;
+                                    ss << "Thread TID " << t.tid << " stack return address 0x" << std::hex
+                                       << frameAddr << " points to unbacked executable memory [0x" << r.start
+                                       << " - 0x" << r.end << "]";
+                                    ev.details = ss.str();
+                                    ev.timestamp = core::DetectionEvent::NowMonotonicMs();
+                                    ev.timestamp_utc_ms = core::DetectionEvent::NowUtcMs();
+                                    ev.threat_score = 95;
+                                    events.push_back(ev);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+#else
+            HANDLE hThread = OpenThread(THREAD_QUERY_INFORMATION | THREAD_GET_CONTEXT | THREAD_SUSPEND_RESUME, FALSE, t.tid);
+            if (hThread) {
+                DWORD prev = SuspendThread(hThread);
+                if (prev != (DWORD)-1) {
+                    CONTEXT ctx{};
+                    ctx.ContextFlags = CONTEXT_ALL;
+                    if (GetThreadContext(hThread, &ctx)) {
+#if defined(_M_X64) || defined(__x86_64__)
+                        CONTEXT walkCtx = ctx;
+                        for (int frameIdx = 0; frameIdx < 64 && walkCtx.Rip != 0; ++frameIdx) {
+                            uintptr_t frameAddr = static_cast<uintptr_t>(walkCtx.Rip);
+                            if (frameAddr >= 0x10000ULL && frameAddr < 0x7FFFFFFFFFFFULL) {
+                                for (const auto& r : regions) {
+                                    if (frameAddr >= r.start && frameAddr < r.end) {
+                                        if (r.executable && !r.is_backed_by_file && !jitHost) {
+                                            core::DetectionEvent ev;
+                                            ev.type = core::DetectionType::THREAD_PROVENANCE_ANOMALY;
+                                            ev.severity = core::Severity::CRITICAL;
+                                            ev.component = "MemoryScanner::StackWalk";
+                                            std::ostringstream ss;
+                                            ss << "Thread TID " << t.tid << " stack return address 0x" << std::hex
+                                               << frameAddr << " points to unbacked executable memory [0x" << r.start
+                                               << " - 0x" << r.end << "]";
+                                            ev.details = ss.str();
+                                            ev.timestamp = core::DetectionEvent::NowMonotonicMs();
+                                            ev.timestamp_utc_ms = core::DetectionEvent::NowUtcMs();
+                                            ev.threat_score = 95;
+                                            events.push_back(ev);
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                            DWORD64 imageBase = 0;
+                            PRUNTIME_FUNCTION fn = RtlLookupFunctionEntry(walkCtx.Rip, &imageBase, nullptr);
+                            if (!fn) {
+                                if (walkCtx.Rsp >= 0x10000ULL) {
+                                    DWORD64 retAddr = 0;
+                                    SIZE_T readBytes = 0;
+                                    if (ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<LPCVOID>(walkCtx.Rsp), &retAddr, sizeof(retAddr), &readBytes) && readBytes == sizeof(retAddr)) {
+                                        walkCtx.Rip = retAddr;
+                                        walkCtx.Rsp += 8;
+                                    } else {
+                                        break;
+                                    }
+                                } else {
+                                    break;
+                                }
+                            } else {
+                                PVOID handlerData = nullptr;
+                                DWORD64 establisherFrame = 0;
+                                RtlVirtualUnwind(UNW_FLAG_NHANDLER, imageBase, walkCtx.Rip, fn, &walkCtx, &handlerData, &establisherFrame, nullptr);
+                            }
+                        }
+#else
+                        uintptr_t bp = static_cast<uintptr_t>(ctx.Ebp);
+                        for (int frameIdx = 0; frameIdx < 32 && bp >= 0x10000ULL; ++frameIdx) {
+                            uintptr_t frameData[2]{};
+                            SIZE_T readBytes = 0;
+                            if (ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<LPCVOID>(bp), frameData, sizeof(frameData), &readBytes) && readBytes == sizeof(frameData)) {
+                                uintptr_t retAddr = frameData[1];
+                                for (const auto& r : regions) {
+                                    if (retAddr >= r.start && retAddr < r.end) {
+                                        if (r.executable && !r.is_backed_by_file && !jitHost) {
+                                            core::DetectionEvent ev;
+                                            ev.type = core::DetectionType::THREAD_PROVENANCE_ANOMALY;
+                                            ev.severity = core::Severity::CRITICAL;
+                                            ev.component = "MemoryScanner::StackWalk";
+                                            std::ostringstream ss;
+                                            ss << "Thread TID " << t.tid << " stack return address 0x" << std::hex
+                                               << retAddr << " points to unbacked executable memory [0x" << r.start
+                                               << " - 0x" << r.end << "]";
+                                            ev.details = ss.str();
+                                            ev.timestamp = core::DetectionEvent::NowMonotonicMs();
+                                            ev.timestamp_utc_ms = core::DetectionEvent::NowUtcMs();
+                                            ev.threat_score = 95;
+                                            events.push_back(ev);
+                                            break;
+                                        }
+                                    }
+                                }
+                                bp = frameData[0];
+                            } else {
+                                break;
+                            }
+                        }
+#endif
+                    }
+                    ResumeThread(hThread);
+                }
+                CloseHandle(hThread);
+            }
+#endif
         }
     }
     return events;

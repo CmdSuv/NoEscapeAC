@@ -4,6 +4,8 @@
 #include <vector>
 #include <optional>
 #include <mutex>
+#include <shared_mutex>
+#include <atomic>
 #include <memory>
 #include "noescape/core/types.hpp"
 
@@ -53,6 +55,16 @@ public:
         bool check_penetrable = false) const = 0;
 };
 
+struct BvhNode {
+    OccluderBox bounds;
+    int32_t left_child{-1};
+    int32_t right_child{-1};
+    int32_t first_box_idx{-1};
+    int32_t box_count{0};
+
+    bool IsLeaf() const { return left_child == -1 && right_child == -1; }
+};
+
 // Server-side ESP/Radar countermeasure & authoritative gameplay validation helper.
 // NOTE: ServerEspFilter is a server-side helper library and does not automatically attach to
 // your game server's networking loop. It must be explicitly driven in the game server's
@@ -69,6 +81,12 @@ public:
     void ClearOccluders();
     size_t GetOccluderCount() const;
     bool HasOcclusionData() const;
+
+    // Explicitly rebuilds the Surface Area Heuristic (SAH) BVH acceleration structure
+    void RebuildBvh();
+
+    // Queries BVH ray-occlusion (accelerated by AVX2 8-way parallel slab intersection)
+    bool RayIntersectsBvh(float x0, float y0, float z0, float x1, float y1, float z1) const;
 
     void SetMaxReplicationDistance(float dist) { max_replication_distance_ = dist; }
     void SetCloseProximityRadius(float radius) { close_proximity_radius_ = radius; }
@@ -101,11 +119,20 @@ public:
         uint32_t consecutive_occluded_engagements) const;
 
 private:
-    mutable std::mutex mutex_;
+    mutable std::shared_mutex mutex_;
     std::vector<OccluderBox> occluders_;
+    mutable std::vector<BvhNode> bvh_nodes_;
+    mutable std::vector<size_t> bvh_box_indices_;
+    mutable std::atomic<bool> bvh_dirty_{false};
+    mutable std::mutex bvh_build_mutex_;
     std::shared_ptr<IAuthoritativeVisibilityAdapter> visibility_adapter_;
     float max_replication_distance_{150.0f};
     float close_proximity_radius_{6.0f};
+
+    void EnsureBvhBuilt() const;
+    int32_t SubdivideBvh(size_t first, size_t count) const;
+    static float ComputeBoxSurfaceArea(const OccluderBox& b);
+    static OccluderBox UnionBoxes(const OccluderBox& a, const OccluderBox& b);
 };
 
 } // namespace noescape::server

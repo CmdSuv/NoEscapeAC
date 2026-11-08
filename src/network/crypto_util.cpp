@@ -13,10 +13,13 @@
 #if defined(_WIN32)
 #include <windows.h>
 #include <bcrypt.h>
+#include <ncrypt.h>
 #else
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/random.h>
+#include <sys/statvfs.h>
+#include <cpuid.h>
 #include <fcntl.h>
 #include <cerrno>
 #endif
@@ -235,39 +238,156 @@ bool CryptoUtil::ConstantTimeEquals(const std::string& a, const std::string& b) 
 }
 
 std::string CryptoUtil::GetMachineHWID() {
+    static const std::string cachedHwid = []() -> std::string {
 #if defined(_WIN32)
-    HKEY hKey = nullptr;
+#pragma pack(push, 1)
+    struct RawSMBIOSData {
+        BYTE Used20CallingMethod;
+        BYTE SMBIOSMajorVersion;
+        BYTE SMBIOSMinorVersion;
+        BYTE DmiRevision;
+        DWORD Length;
+        BYTE SMBIOSTableData[1];
+    };
+    struct SMBIOSHeader {
+        BYTE Type;
+        BYTE Length;
+        WORD Handle;
+    };
+#pragma pack(pop)
+
+    std::string smbiosUuid, boardSerial, chassisSerial, tpmStatus;
+    const DWORD sig = 'RSMB';
+    DWORD bufSize = GetSystemFirmwareTable(sig, 0, nullptr, 0);
+    if (bufSize > 0 && bufSize <= 64 * 1024 * 1024) {
+        std::vector<BYTE> buf(bufSize);
+        if (GetSystemFirmwareTable(sig, 0, buf.data(), bufSize) == bufSize) {
+            const auto* smb = reinterpret_cast<const RawSMBIOSData*>(buf.data());
+            const BYTE* data = smb->SMBIOSTableData;
+            const BYTE* end = data + smb->Length;
+            while (data + sizeof(SMBIOSHeader) <= end) {
+                const auto* hdr = reinterpret_cast<const SMBIOSHeader*>(data);
+                if (hdr->Length < sizeof(SMBIOSHeader) || data + hdr->Length > end) break;
+                const BYTE* strSection = data + hdr->Length;
+                auto getSmbiosStr = [strSection, end](BYTE idx) -> std::string {
+                    if (idx == 0) return "";
+                    const BYTE* cur = strSection;
+                    BYTE count = 1;
+                    while (cur < end && *cur) {
+                        const void* nullPos = std::memchr(cur, '\0', static_cast<size_t>(end - cur));
+                        if (!nullPos) return "";
+                        size_t strLen = static_cast<const BYTE*>(nullPos) - cur;
+                        if (count == idx) return std::string(reinterpret_cast<const char*>(cur), strLen);
+                        cur += strLen + 1;
+                        count++;
+                    }
+                    return "";
+                };
+                if (hdr->Type == 1 && hdr->Length >= 0x18) { // System Info UUID
+                    char uuidBuf[64];
+                    const BYTE* u = data + 8;
+                    std::snprintf(uuidBuf, sizeof(uuidBuf),
+                        "%02X%02X%02X%02X-%02X%02X-%02X%02X-%02X%02X-%02X%02X%02X%02X%02X%02X",
+                        u[0], u[1], u[2], u[3], u[4], u[5], u[6], u[7],
+                        u[8], u[9], u[10], u[11], u[12], u[13], u[14], u[15]);
+                    smbiosUuid = uuidBuf;
+                } else if (hdr->Type == 2 && hdr->Length >= 8) { // Base Board Serial
+                    boardSerial = getSmbiosStr(data[7]);
+                } else if (hdr->Type == 3 && hdr->Length >= 8) { // Chassis Serial
+                    chassisSerial = getSmbiosStr(data[7]);
+                }
+                const BYTE* next = strSection;
+                while (next + 1 < end && !(next[0] == 0 && next[1] == 0)) next++;
+                data = next + 2;
+            }
+        }
+    }
+    // Win32 CNG TPM 2.0 Check (MS_PLATFORM_CRYPTO_PROVIDER)
+    NCRYPT_PROV_HANDLE hProv = 0;
+    if (NCryptOpenStorageProvider(&hProv, MS_PLATFORM_CRYPTO_PROVIDER, 0) == ERROR_SUCCESS) {
+        tpmStatus = "TPM2:SUPPORTED;";
+        NCryptFreeObject(hProv);
+    }
+    // MachineGuid fallback
     char szHwid[256] = {0};
     DWORD dwSize = sizeof(szHwid);
+    HKEY hKey = nullptr;
     if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, "SOFTWARE\\Microsoft\\Cryptography", 0, KEY_READ | KEY_WOW64_64KEY, &hKey) == ERROR_SUCCESS) {
         RegQueryValueExA(hKey, "MachineGuid", nullptr, nullptr, reinterpret_cast<LPBYTE>(szHwid), &dwSize);
         RegCloseKey(hKey);
     }
-    if (strlen(szHwid) > 0) {
-        return Sha256(szHwid);
-    }
-    char compName[MAX_COMPUTERNAME_LENGTH + 1]{};
-    DWORD compLen = sizeof(compName);
-    GetComputerNameA(compName, &compLen);
-    DWORD volSerial = 0;
-    GetVolumeInformationA("C:\\", nullptr, 0, &volSerial, nullptr, nullptr, nullptr, 0);
-    return Sha256(std::string("WIN32-FALLBACK-") + compName + ":" + std::to_string(volSerial));
+    std::ostringstream oss;
+    oss << "WIN32-HWID-V2:UUID:" << smbiosUuid << ":BOARD:" << boardSerial
+        << ":CHASSIS:" << chassisSerial << ":TPM:" << tpmStatus
+        << ":MGUID:" << szHwid;
+    return HmacSha256("NoEscape-Ring3-HardwareIdentity-v2", oss.str());
 #else
-    // Linux HWID: Read /etc/machine-id or fallback to /var/lib/dbus/machine-id
-    std::ifstream mid(NOESCAPE_XOR("/etc/machine-id"));
-    std::string id;
-    if (mid.is_open() && std::getline(mid, id) && !id.empty()) {
-        return Sha256(id);
+    // 1. Unprivileged CPUID topology
+    std::string cpuidInfo;
+    unsigned int eax = 0, ebx = 0, ecx = 0, edx = 0;
+    if (__get_cpuid(1, &eax, &ebx, &ecx, &edx)) {
+        char buf[64];
+        std::snprintf(buf, sizeof(buf), "CPUID1:%08x-%08x-%08x-%08x;", eax, ebx, ecx, edx);
+        cpuidInfo += buf;
     }
-    std::ifstream dbusMid(NOESCAPE_XOR("/var/lib/dbus/machine-id"));
-    if (dbusMid.is_open() && std::getline(dbusMid, id) && !id.empty()) {
-        return Sha256(id);
+    char brand[49] = {0};
+    if (__get_cpuid(0x80000002, &eax, &ebx, &ecx, &edx)) {
+        std::memcpy(brand, &eax, 4); std::memcpy(brand + 4, &ebx, 4);
+        std::memcpy(brand + 8, &ecx, 4); std::memcpy(brand + 12, &edx, 4);
     }
-    // Fallback: hostname
-    char hostname[256]{};
-    gethostname(hostname, sizeof(hostname) - 1);
-    return Sha256(std::string("LINUX-HWID-") + hostname);
+    if (__get_cpuid(0x80000003, &eax, &ebx, &ecx, &edx)) {
+        std::memcpy(brand + 16, &eax, 4); std::memcpy(brand + 20, &ebx, 4);
+        std::memcpy(brand + 24, &ecx, 4); std::memcpy(brand + 28, &edx, 4);
+    }
+    if (__get_cpuid(0x80000004, &eax, &ebx, &ecx, &edx)) {
+        std::memcpy(brand + 32, &eax, 4); std::memcpy(brand + 36, &ebx, 4);
+        std::memcpy(brand + 40, &ecx, 4); std::memcpy(brand + 44, &edx, 4);
+    }
+    cpuidInfo += "BRAND:" + std::string(brand) + ";";
+
+    // 2. Unprivileged statvfs root filesystem superblock ID
+    std::string fsInfo;
+    struct statvfs sv{};
+    if (statvfs("/", &sv) == 0) {
+        char buf[64];
+        std::snprintf(buf, sizeof(buf), "FSID:%lx-%lx;", static_cast<unsigned long>(sv.f_fsid), static_cast<unsigned long>(sv.f_type));
+        fsInfo = buf;
+    }
+
+    // 3. DMI sysfs identifiers
+    auto readDmiFile = [](const char* path) -> std::string {
+        std::ifstream f(path);
+        std::string s;
+        if (f.is_open() && std::getline(f, s)) {
+            while (!s.empty() && (s.back() == '\r' || s.back() == '\n' || s.back() == ' ')) s.pop_back();
+            return s;
+        }
+        return "";
+    };
+    std::string prodUuid = readDmiFile("/sys/class/dmi/id/product_uuid");
+    std::string boardSerial = readDmiFile("/sys/class/dmi/id/board_serial");
+    std::string chassisSerial = readDmiFile("/sys/class/dmi/id/chassis_serial");
+    std::string prodSerial = readDmiFile("/sys/class/dmi/id/product_serial");
+    std::string modalias = readDmiFile("/sys/class/dmi/id/modalias");
+
+    // 4. Linux machine-id fallbacks
+    std::string mid;
+    std::ifstream midF(NOESCAPE_XOR("/etc/machine-id"));
+    if (midF.is_open()) std::getline(midF, mid);
+    if (mid.empty()) {
+        std::ifstream dbusMid(NOESCAPE_XOR("/var/lib/dbus/machine-id"));
+        if (dbusMid.is_open()) std::getline(dbusMid, mid);
+    }
+
+    std::ostringstream oss;
+    oss << "LINUX-HWID-V2:" << cpuidInfo << fsInfo
+        << "DMI:[" << prodUuid << ":" << boardSerial << ":" << chassisSerial << ":" << prodSerial << ":" << modalias << "]"
+        << ":MID:" << mid;
+
+    return HmacSha256("NoEscape-Ring3-HardwareIdentity-v2", oss.str());
 #endif
+    }();
+    return cachedHwid;
 }
 
 std::vector<uint8_t> CryptoUtil::FromHex(const std::string& hex) {
@@ -479,6 +599,35 @@ bool CryptoUtil::VerifyAsymmetric(
     return ed25519::Verify(pubBytes.data(),
                            reinterpret_cast<const uint8_t*>(message.data()), message.size(),
                            sigBytes.data());
+}
+
+CryptoUtil::AsymmetricKeyPair CryptoUtil::GenerateX25519KeyPair() {
+    AsymmetricKeyPair kp{};
+    uint8_t seed[32]{};
+    if (!GenerateRandomBytes(seed, sizeof(seed))) {
+        return kp;
+    }
+    uint8_t pubKey[32]{};
+    uint8_t privKey[32]{};
+    if (x25519::CreateKeyPair(seed, pubKey, privKey)) {
+        kp.private_key_hex = ToHex(privKey, 32);
+        kp.public_key_hex = ToHex(pubKey, 32);
+    }
+    return kp;
+}
+
+std::string CryptoUtil::DiffieHellmanX25519(
+    const std::string& private_key_hex,
+    const std::string& peer_public_key_hex
+) {
+    auto privBytes = FromHex(private_key_hex);
+    auto pubBytes = FromHex(peer_public_key_hex);
+    if (privBytes.size() != 32 || pubBytes.size() != 32) return "";
+    uint8_t secret[32]{};
+    if (x25519::DiffieHellman(privBytes.data(), pubBytes.data(), secret)) {
+        return ToHex(secret, 32);
+    }
+    return "";
 }
 
 bool CryptoUtil::AeadChaCha20Poly1305Encrypt(

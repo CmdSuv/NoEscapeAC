@@ -6,6 +6,7 @@
 #include <windows.h>
 #else
 #include <sys/mman.h>
+#include <dlfcn.h>
 #endif
 
 using namespace noescape::memory;
@@ -116,3 +117,48 @@ TEST(Memory, UnhookerRestoration) {
     munmap(mockPage, 4096);
 #endif
 }
+
+TEST(Memory, TableIntegrityAndModuleStomping) {
+#if !defined(_WIN32)
+    uintptr_t genuineAddr = reinterpret_cast<uintptr_t>(&::malloc);
+    Dl_info dli{};
+    ASSERT_TRUE(dladdr(reinterpret_cast<void*>(genuineAddr), &dli) != 0);
+    ASSERT_TRUE(dli.dli_fname != nullptr);
+
+    std::string genuineMod = dli.dli_fname;
+
+    // 1. Expected module matches actual file-backed module -> CLEAN
+    auto cleanEv = Unhooker::Instance().InspectTableEntry(
+        "ELF_GOT", "libc!malloc", 0x7ffff7001000ULL, genuineAddr, genuineMod
+    );
+    ASSERT_FALSE(cleanEv.has_value());
+
+    // 2. Expected module does NOT match actual file-backed module (Module Stomping) -> DETECTED
+    auto stompEv = Unhooker::Instance().InspectTableEntry(
+        "ELF_GOT", "libc!malloc", 0x7ffff7001000ULL, genuineAddr, "libCheatingModule.so"
+    );
+    ASSERT_TRUE(stompEv.has_value());
+    ASSERT_EQ(stompEv->type, DetectionType::IAT_GOT_HOOK_DETECTED);
+    ASSERT_NE(stompEv->details.find("module stomping detected"), std::string::npos);
+#endif
+}
+
+TEST(Memory, ThreadProvenanceAndLiveSignalContext) {
+    auto threads = MemoryScanner::Instance().QueryActiveThreads();
+    ASSERT_FALSE(threads.empty());
+
+    bool foundCurrentOrOther = false;
+    for (const auto& th : threads) {
+        if (th.tid > 0) {
+            foundCurrentOrOther = true;
+            // Instruction pointer must be non-zero (either via live SIGURG signal capture or procfs/GetThreadContext)
+            ASSERT_NE(th.instruction_pointer, 0ULL);
+        }
+    }
+    ASSERT_TRUE(foundCurrentOrOther);
+
+    // AuditThreadProvenance should execute cleanly and inspect both start_address and instruction_pointer
+    auto provEvents = MemoryScanner::Instance().AuditThreadProvenance();
+    (void)provEvents;
+}
+

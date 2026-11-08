@@ -2,6 +2,40 @@
 
 All notable technical changes to the NoEscape Anti-Cheat system are documented in this file.
 
+## [Release 1.5.1 / Next-Gen Ring-3 SOTA Modernization] — 2026-11-08
+
+### Added & Reengineered (All 10 SOTA Modules)
+- **Module 1: Dual Thread Provenance & Stack Unwinding (`memory_scanner.cpp`):**
+  - Eliminated ternary checkAddr bug; both `start_address` and live `instruction_pointer` are now rigorously audited.
+  - Windows: Added `SuspendThread` synchronization and genuine `RtlVirtualUnwind` / `StackWalk64` frame walking across `.pdata` function tables to detect return addresses into unbacked memory.
+  - Linux: Added real-time thread context capture using `pthread_kill(tid, SIGURG)` signal handler to inspect instantaneous `ucontext_t` (`REG_RIP`), with thread ID verification and handler chaining.
+- **Module 2: Whole-Process Table Integrity & Module Stomping Defense (`unhooker.cpp`):**
+  - Expanded `AuditImportExportTables` beyond the main executable to inspect all loaded modules (`EnumProcessModules` / `dl_iterate_phdr`).
+  - Added `ExpectedModuleMatch` provenance checking with stem normalization and glibc 2.34+ consolidated library awareness (`libpthread`, `libdl`, `librt`, `libm` -> `libc.so.6`).
+- **Module 3: Hardware Firmware SMBIOS & Unprivileged Platform Identity (`crypto_util.cpp`):**
+  - Windows: Extracted unprivileged SMBIOS BIOS UUID (Type 1), Motherboard Serial (Type 2), and Chassis Serial (Type 3) via `GetSystemFirmwareTable('RSMB')` + Win32 CNG `MS_PLATFORM_CRYPTO_PROVIDER` TPM 2.0 key attestation.
+  - Linux: Combined unprivileged CPUID topology, `statvfs` filesystem superblock ID, and hardware DMI identifiers with cryptographic salted HMAC.
+- **Module 4: Signal-Safe Zero-Crash Memory Scanning (`memory_scanner.cpp`):**
+  - Completely replaced `sigaction` and `siglongjmp` on Linux with kernel `process_vm_readv(getpid(), ...)`. Safely handles unmapped/protected pages with `EFAULT` without touching global signal handlers or breaking host game crash reporters.
+- **Module 5: RFC 9180 HPKE Write-Only Blackbox & Asymmetric Telemetry (`blackbox.cpp`, `integrity.cpp`, `panel_client.cpp`):**
+  - Removed symmetric secret key from client blackbox. Implemented hybrid public key encryption using ephemeral X25519 keypairs and ChaCha20-Poly1305 AEAD. Dumps are write-only on clients and decryptable exclusively by backend server private key.
+  - Converted remote code attestation (`IntegrityChecker::Attest`) to asymmetric Ed25519 signing.
+  - Added ephemeral Ed25519 session signatures (`X-NoEscape-Ephemeral-Sign`) on panel telemetry heartbeats.
+- **Module 6: Automatic Hidden Dummy DXGI Swapchain VTable Fingerprinting (`overlay_detector.cpp`, `engine.cpp`):**
+  - Implemented automatic hidden 1x1 DXGI dummy swapchain creation on Windows to fingerprint genuine `IDXGISwapChain::Present` (Slot 8) and `Present1` (Slot 22) virtual table pointers in production without requiring manual user registration.
+- **Module 7: Elevated & DACL-Restricted Process Handle Forensics (`process_analyzer.cpp`):**
+  - Fixed handle snapshot ordering bug: probe handle `hSelf` is now instantiated before `NtQuerySystemInformation(SystemExtendedHandleInformation)` is called.
+  - Detects foreign processes holding invasive handles (`PROCESS_VM_READ | PROCESS_VM_WRITE`) even when `OpenProcess` fails with `ERROR_ACCESS_DENIED`, by matching kernel `h.Object == selfEProcess`.
+- **Module 8: Single-Pass Cache-Streaming SIMD Pattern Scanner (`pattern_scanner.cpp`):**
+  - Modernized scanner to single-pass Bit-Parallel / streaming comparison, eliminating $O(K \times N)$ cache thrashing and memory bus saturation.
+- **Module 9: Surface Area Heuristic (SAH) BVH & 8-Way Parallel Raycasting (`server_integration.cpp`):**
+  - Replaced $O(N)$ linear AABB search with an optimized Bounding Volume Hierarchy (BVH) built using Surface Area Heuristics ($O(\log N)$).
+  - Implemented 8-way AVX2 SIMD parallel ray-AABB slab intersection.
+  - Thread-safe concurrent queries under `std::shared_lock<std::shared_mutex>` with double-checked locking for dynamic tree updates.
+- **Module 10: Biomechanical Flash & Hogan Minimum-Jerk Kinematics (`aim_analyzer.cpp`):**
+  - Implemented Flash & Hogan minimum-jerk trajectory smoothness model ($j_{\text{norm}}$ normalized jerk metric) grounded in human motor-control science.
+  - Added phase-space angular cusp detection ($\theta$ vs $\dot{\theta}$) and Ex-Gaussian reaction latency modeling to catch algorithmic smoothing and triggerbots.
+
 ## [Release 1.5.0] — 2026-11-08 (Critical Security Remediation & Architecture Hardening)
 
 ### Fixed & Remediated
