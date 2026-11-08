@@ -1,19 +1,21 @@
 #!/usr/bin/env python3
 """
-NoEscape Anti-Cheat - Standalone Crimson Ban Warning Screen
+NoEscape Anti-Cheat - Minimalist Crimson Ban Screen
 Designed for KDE Plasma on Wayland / X11 (Qt6 / PySide6)
 """
 
 import sys
 import os
 import argparse
-import datetime
 
 # Ensure display environment variables are set if running from detached daemon
 uid = os.getuid() if hasattr(os, "getuid") else 1000
 run_dir = f"/run/user/{uid}"
-if not os.environ.get("WAYLAND_DISPLAY") and os.path.exists(f"{run_dir}/wayland-0"):
-    os.environ["WAYLAND_DISPLAY"] = "wayland-0"
+if not os.environ.get("WAYLAND_DISPLAY"):
+    if os.path.exists(f"{run_dir}/wayland-1"):
+        os.environ["WAYLAND_DISPLAY"] = "wayland-1"
+    elif os.path.exists(f"{run_dir}/wayland-0"):
+        os.environ["WAYLAND_DISPLAY"] = "wayland-0"
 if not os.environ.get("XDG_RUNTIME_DIR") and os.path.exists(run_dir):
     os.environ["XDG_RUNTIME_DIR"] = run_dir
 if not os.environ.get("DISPLAY"):
@@ -22,261 +24,288 @@ os.environ.setdefault("QT_QPA_PLATFORM", "wayland;xcb")
 
 from PySide6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-    QPushButton, QFrame, QScrollArea, QGraphicsDropShadowEffect
+    QPushButton, QGraphicsDropShadowEffect
 )
-from PySide6.QtCore import Qt, QPoint
-from PySide6.QtGui import QColor, QFont, QPalette, QLinearGradient, QBrush, QPainter, QPainterPath
+from PySide6.QtCore import Qt, QPointF, QTimer
+from PySide6.QtGui import (
+    QColor, QFont, QLinearGradient, QRadialGradient, QBrush, QPen,
+    QPainter, QPainterPath
+)
 
-class BanWindow(QWidget):
-    def __init__(self, hwid, score, reason, component, violation_type, timestamp_str):
+class NoEscapeLogo(QWidget):
+    """Custom high-precision vector emblem for NoEscape Anti-Cheat."""
+    def __init__(self, size=220, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(size, size)
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setRenderHint(QPainter.SmoothPixmapTransform)
+
+        w = self.width()
+        h = self.height()
+        cx = w / 2.0
+        cy = h / 2.0
+        scale = w / 220.0
+
+        # 1. Radiant Ambient Halo Flare
+        glow = QRadialGradient(cx, cy, 105 * scale)
+        glow.setColorAt(0.0, QColor(255, 255, 255, 95))
+        glow.setColorAt(0.25, QColor(255, 45, 60, 85))
+        glow.setColorAt(0.7, QColor(160, 0, 15, 30))
+        glow.setColorAt(1.0, QColor(0, 0, 0, 0))
+        p.setPen(Qt.NoPen)
+        p.setBrush(QBrush(glow))
+        p.drawEllipse(QPointF(cx, cy), 105 * scale, 105 * scale)
+
+        # 2. Outer Shield Geometry (Aerodynamic Cyber Shield)
+        outer_path = QPainterPath()
+        outer_path.moveTo(cx, cy - 88 * scale)
+        outer_path.lineTo(cx + 74 * scale, cy - 74 * scale)
+        outer_path.lineTo(cx + 74 * scale, cy + 8 * scale)
+        outer_path.cubicTo(
+            cx + 74 * scale, cy + 50 * scale,
+            cx + 28 * scale, cy + 80 * scale,
+            cx, cy + 94 * scale
+        )
+        outer_path.cubicTo(
+            cx - 28 * scale, cy + 80 * scale,
+            cx - 74 * scale, cy + 50 * scale,
+            cx - 74 * scale, cy + 8 * scale
+        )
+        outer_path.lineTo(cx - 74 * scale, cy - 74 * scale)
+        outer_path.closeSubpath()
+
+        # Shield Fill: Deep obsidian-crimson gradient
+        shield_grad = QLinearGradient(cx, cy - 88 * scale, cx, cy + 94 * scale)
+        shield_grad.setColorAt(0.0, QColor(50, 2, 8))
+        shield_grad.setColorAt(0.5, QColor(28, 1, 4))
+        shield_grad.setColorAt(1.0, QColor(12, 0, 2))
+        p.setBrush(QBrush(shield_grad))
+
+        # Shield Edge: Beveled Silver/Chrome with Crimson Reflection
+        border_pen = QPen()
+        border_pen.setWidthF(4.0 * scale)
+        border_grad = QLinearGradient(cx - 74 * scale, cy - 88 * scale, cx + 74 * scale, cy + 94 * scale)
+        border_grad.setColorAt(0.0, QColor(255, 255, 255, 250))
+        border_grad.setColorAt(0.35, QColor(255, 90, 90, 255))
+        border_grad.setColorAt(0.7, QColor(180, 15, 25, 240))
+        border_grad.setColorAt(1.0, QColor(255, 240, 240, 255))
+        border_pen.setBrush(QBrush(border_grad))
+        p.setPen(border_pen)
+        p.drawPath(outer_path)
+
+        # 3. Inner Decorative Crest Accent Line
+        inner_path = QPainterPath()
+        inner_path.moveTo(cx, cy - 76 * scale)
+        inner_path.lineTo(cx + 60 * scale, cy - 65 * scale)
+        inner_path.lineTo(cx + 60 * scale, cy + 6 * scale)
+        inner_path.cubicTo(
+            cx + 60 * scale, cy + 40 * scale,
+            cx + 22 * scale, cy + 68 * scale,
+            cx, cy + 80 * scale
+        )
+        inner_path.cubicTo(
+            cx - 22 * scale, cy + 68 * scale,
+            cx - 60 * scale, cy + 40 * scale,
+            cx - 60 * scale, cy + 6 * scale
+        )
+        inner_path.lineTo(cx - 60 * scale, cy - 65 * scale)
+        inner_path.closeSubpath()
+
+        p.setPen(QPen(QColor(255, 60, 75, 110), 1.6 * scale))
+        p.setBrush(Qt.NoBrush)
+        p.drawPath(inner_path)
+
+        # 4. Heavy Steel Security Shackle
+        shackle_path = QPainterPath()
+        shackle_path.moveTo(cx - 24 * scale, cy - 8 * scale)
+        shackle_path.lineTo(cx - 24 * scale, cy - 36 * scale)
+        shackle_path.arcTo(cx - 24 * scale, cy - 60 * scale, 48 * scale, 48 * scale, 180, -180)
+        shackle_path.lineTo(cx + 24 * scale, cy - 8 * scale)
+
+        shackle_pen = QPen(QColor(250, 250, 255), 7.5 * scale, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+        p.setPen(shackle_pen)
+        p.drawPath(shackle_path)
+
+        # 5. Crimson Vault Padlock Body
+        body_path = QPainterPath()
+        body_path.addRoundedRect(cx - 34 * scale, cy - 10 * scale, 68 * scale, 52 * scale, 8 * scale, 8 * scale)
+
+        body_grad = QLinearGradient(cx, cy - 10 * scale, cx, cy + 42 * scale)
+        body_grad.setColorAt(0.0, QColor(240, 25, 40))
+        body_grad.setColorAt(0.6, QColor(170, 10, 22))
+        body_grad.setColorAt(1.0, QColor(95, 4, 10))
+        p.setBrush(QBrush(body_grad))
+
+        body_pen = QPen(QColor(255, 255, 255, 230), 2.2 * scale)
+        p.setPen(body_pen)
+        p.drawPath(body_path)
+
+        # 6. Laser Core Keyhole Aperture
+        p.setPen(Qt.NoPen)
+        p.setBrush(QBrush(QColor(255, 255, 255, 255)))
+        p.drawEllipse(QPointF(cx, cy + 9 * scale), 6.5 * scale, 6.5 * scale)
+
+        slit = QPainterPath()
+        slit.moveTo(cx - 3.5 * scale, cy + 10 * scale)
+        slit.lineTo(cx + 3.5 * scale, cy + 10 * scale)
+        slit.lineTo(cx + 5.5 * scale, cy + 27 * scale)
+        slit.lineTo(cx - 5.5 * scale, cy + 27 * scale)
+        slit.closeSubpath()
+        p.drawPath(slit)
+
+        p.end()
+
+class MinimalistBanWindow(QWidget):
+    def __init__(self, is_fullscreen=True):
         super().__init__()
-        self.hwid = hwid or "UNKNOWN-HWID-DEVICE"
-        self.score = str(score) if score is not None else "100"
-        self.reason = reason or "Critical security policy violation detected"
-        self.component = component or "AntiCheatEngine::Enforcement"
-        self.violation_type = violation_type or "FATAL_BAN"
-        self.timestamp_str = timestamp_str or datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+        self.setWindowTitle("NOESCAPE // SECURITY ENFORCEMENT")
+        self.setWindowFlags(Qt.Window | Qt.WindowStaysOnTopHint | Qt.FramelessWindowHint)
+        self.setAttribute(Qt.WA_TranslucentBackground, False)
 
-        self.setWindowTitle("NOESCAPE ANTI-CHEAT // SECURITY VIOLATION")
-
-        # Determine prominent, commanding screen size ("kocaman")
+        # Size: Full Screen or commanding 1200x750
         screen = QApplication.primaryScreen()
         if screen:
-            screen_geo = screen.availableGeometry()
-            target_w = min(1280, max(1000, int(screen_geo.width() * 0.72)))
-            target_h = min(820, max(680, int(screen_geo.height() * 0.72)))
-            self.resize(target_w, target_h)
-            self.setMinimumSize(880, 620)
-            self.move(
-                screen_geo.x() + (screen_geo.width() - self.width()) // 2,
-                screen_geo.y() + (screen_geo.height() - self.height()) // 2
-            )
-        else:
-            self.resize(1100, 720)
-            self.setMinimumSize(880, 620)
-
-        # Keep on top so user cannot miss it
-        self.setWindowFlags(Qt.Window | Qt.WindowStaysOnTopHint | Qt.WindowTitleHint | Qt.WindowCloseButtonHint)
-        self.init_ui()
-
-    def init_ui(self):
-        # Master dark crimson / red aesthetic
-        self.setStyleSheet("""
-            QWidget#MainBackground {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-                    stop:0 #1a0306, stop:0.35 #0f0203, stop:0.7 #170305, stop:1 #080102);
-            }
-            QLabel {
-                color: #e0e0e0;
-                font-family: 'Segoe UI', 'Ubuntu', 'Liberation Sans', sans-serif;
-            }
-            QFrame#HeaderCard {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                    stop:0 #42080e, stop:0.5 #2b0509, stop:1 #1c0305);
-                border: 2px solid #ff4655;
-                border-radius: 8px;
-            }
-            QFrame#InfoCard {
-                background: #140608;
-                border: 1px solid #380e13;
-                border-radius: 8px;
-            }
-            QFrame#FieldBox {
-                background: #1e090c;
-                border: 1px solid #4a131a;
-                border-radius: 6px;
-            }
-            QPushButton#AcknowledgeBtn {
-                background-color: #ff4655;
-                color: #ffffff;
-                font-weight: bold;
-                font-size: 15px;
-                letter-spacing: 1.5px;
-                border: 1px solid #ff6e7b;
-                border-radius: 6px;
-                padding: 14px 40px;
-            }
-            QPushButton#AcknowledgeBtn:hover {
-                background-color: #ff5e6c;
-                border: 1px solid #ffffff;
-            }
-            QPushButton#AcknowledgeBtn:pressed {
-                background-color: #d92d3c;
-            }
-        """)
-
-        self.setObjectName("MainBackground")
-        main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(36, 32, 36, 32)
-        main_layout.setSpacing(20)
-
-        # ---------------- HEADER CARD ----------------
-        header_card = QFrame()
-        header_card.setObjectName("HeaderCard")
-        header_layout = QHBoxLayout(header_card)
-        header_layout.setContentsMargins(24, 20, 24, 20)
-        header_layout.setSpacing(20)
-
-        # Security Symbol / Shield Icon
-        icon_label = QLabel("⛔")
-        icon_label.setStyleSheet("font-size: 48px; color: #ff4655; background: transparent;")
-        icon_label.setAlignment(Qt.AlignCenter)
-        header_layout.addWidget(icon_label, 0)
-
-        title_vbox = QVBoxLayout()
-        title_vbox.setSpacing(4)
-
-        top_tag = QLabel("NOESCAPE ANTI-CHEAT // RING-3 SECURITY ENFORCEMENT")
-        top_tag.setStyleSheet("color: #ff8c96; font-size: 12px; font-weight: 800; letter-spacing: 2px;")
-        title_vbox.addWidget(top_tag)
-
-        main_title = QLabel("SECURITY VIOLATION DETECTED")
-        main_title.setStyleSheet("color: #ffffff; font-size: 26px; font-weight: 900; letter-spacing: 1px;")
-        title_vbox.addWidget(main_title)
-
-        sub_title = QLabel("HARDWARE-LEVEL SECURITY ENFORCEMENT // ACCESS REVOKED")
-        sub_title.setStyleSheet("color: #ff4655; font-size: 13px; font-weight: 700; letter-spacing: 1.2px;")
-        title_vbox.addWidget(sub_title)
-
-        header_layout.addLayout(title_vbox, 1)
-
-        # Status badge on right
-        badge_frame = QFrame()
-        badge_frame.setStyleSheet("""
-            background: #ff1744;
-            border-radius: 4px;
-            padding: 8px 16px;
-        """)
-        badge_layout = QVBoxLayout(badge_frame)
-        badge_layout.setContentsMargins(12, 6, 12, 6)
-        b_label1 = QLabel("STATUS")
-        b_label1.setStyleSheet("color: #ffffff; font-size: 10px; font-weight: 900; letter-spacing: 1px;")
-        b_label1.setAlignment(Qt.AlignCenter)
-        b_label2 = QLabel("BANNED")
-        b_label2.setStyleSheet("color: #ffffff; font-size: 18px; font-weight: 900;")
-        b_label2.setAlignment(Qt.AlignCenter)
-        badge_layout.addWidget(b_label1)
-        badge_layout.addWidget(b_label2)
-        header_layout.addWidget(badge_frame, 0)
-
-        main_layout.addWidget(header_card)
-
-        # ---------------- CONTENT CARD ----------------
-        info_card = QFrame()
-        info_card.setObjectName("InfoCard")
-        info_layout = QVBoxLayout(info_card)
-        info_layout.setContentsMargins(24, 20, 24, 20)
-        info_layout.setSpacing(14)
-
-        desc_label = QLabel(
-            "The NoEscape Anti-Cheat subsystem identified an unauthorized memory anomaly, debugger, "
-            "or integrity violation during execution. The active game session has been terminated to "
-            "protect game integrity. Below are the forensic enforcement parameters:"
-        )
-        desc_label.setWordWrap(True)
-        desc_label.setStyleSheet("color: #c4b5b7; font-size: 13px; line-height: 1.4;")
-        info_layout.addWidget(desc_label)
-
-        def make_field(label_text, val_text, is_mono=False, is_highlight=False):
-            fbox = QFrame()
-            fbox.setObjectName("FieldBox")
-            flayout = QVBoxLayout(fbox)
-            flayout.setContentsMargins(14, 8, 14, 8)
-            flayout.setSpacing(2)
-
-            lbl = QLabel(label_text)
-            lbl.setStyleSheet("color: #ff949f; font-size: 11px; font-weight: 700; letter-spacing: 1px;")
-            flayout.addWidget(lbl)
-
-            val = QLabel(val_text)
-            val.setTextInteractionFlags(Qt.TextSelectableByMouse)
-            val.setWordWrap(True)
-            if is_mono:
-                val.setStyleSheet("color: #ffffff; font-family: 'Consolas', 'DejaVu Sans Mono', monospace; font-size: 12px; font-weight: bold;")
-            elif is_highlight:
-                val.setStyleSheet("color: #ff4655; font-size: 14px; font-weight: 800;")
+            geo = screen.availableGeometry()
+            if is_fullscreen:
+                self.resize(geo.width(), geo.height())
+                self.move(geo.x(), geo.y())
             else:
-                val.setStyleSheet("color: #ffffff; font-size: 13px; font-weight: 600;")
-            flayout.addWidget(val)
-            return fbox
+                w = min(1200, int(geo.width() * 0.8))
+                h = min(750, int(geo.height() * 0.8))
+                self.resize(w, h)
+                self.move(geo.x() + (geo.width() - w) // 2, geo.y() + (geo.height() - h) // 2)
+        else:
+            self.resize(1280, 720)
 
-        # Fields row 1: HWID (full width)
-        info_layout.addWidget(make_field("DEVICE HARDWARE IDENTIFIER (HWID)", self.hwid, is_mono=True))
+        # Main Layout
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(40, 40, 40, 40)
+        main_layout.setSpacing(0)
 
-        # Fields row 2: Violation Reason & Component
-        r2_layout = QHBoxLayout()
-        r2_layout.setSpacing(12)
-        r2_layout.addWidget(make_field("DETECTED VIOLATION", self.reason, is_highlight=True), 3)
-        r2_layout.addWidget(make_field("COMPONENT", self.component, is_mono=True), 2)
-        info_layout.addLayout(r2_layout)
+        # Top Bar with sleek Close '✕' Button
+        top_bar = QHBoxLayout()
+        top_bar.addStretch()
+        self.close_btn = QPushButton("✕")
+        self.close_btn.setFixedSize(50, 50)
+        self.close_btn.setCursor(Qt.PointingHandCursor)
+        self.close_btn.setStyleSheet("""
+            QPushButton {
+                background: rgba(0, 0, 0, 0.28);
+                color: #ffffff;
+                border: 1px solid rgba(255, 255, 255, 0.25);
+                border-radius: 25px;
+                font-size: 22px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background: rgba(0, 0, 0, 0.65);
+                border-color: #ffffff;
+            }
+        """)
+        self.close_btn.clicked.connect(self.close)
+        top_bar.addWidget(self.close_btn)
+        main_layout.addLayout(top_bar)
 
-        # Fields row 3: Threat Score, Type, Action, Timestamp
-        r3_layout = QHBoxLayout()
-        r3_layout.setSpacing(12)
-        r3_layout.addWidget(make_field("THREAT SCORE", f"{self.score} / 100 [CRITICAL]", is_highlight=True), 1)
-        r3_layout.addWidget(make_field("VIOLATION TYPE", self.violation_type), 1)
-        r3_layout.addWidget(make_field("ENFORCEMENT ACTION", "SESSION TERMINATED", is_highlight=True), 1)
-        r3_layout.addWidget(make_field("TIMESTAMP", self.timestamp_str), 1)
-        info_layout.addLayout(r3_layout)
+        main_layout.addStretch(1)
 
-        main_layout.addWidget(info_card)
+        # Center Content Container
+        center_layout = QVBoxLayout()
+        center_layout.setAlignment(Qt.AlignCenter)
+        center_layout.setSpacing(32)
 
-        # ---------------- BOTTOM ACTION BAR ----------------
-        bottom_layout = QHBoxLayout()
-        bottom_layout.setContentsMargins(8, 6, 8, 6)
+        # 1. Custom Designed Logo
+        self.logo = NoEscapeLogo(size=230)
+        center_layout.addWidget(self.logo, 0, Qt.AlignCenter)
 
-        footer_warning = QLabel("WARNING: Tampering with game memory or running illicit tools is strictly prohibited.")
-        footer_warning.setStyleSheet("color: #8c5d63; font-size: 11px; font-style: italic;")
-        bottom_layout.addWidget(footer_warning, 1)
+        # 2. Main Title: "YOU HAVE BEEN BANNED"
+        self.text_label = QLabel("YOU HAVE BEEN BANNED")
+        self.text_label.setAlignment(Qt.AlignCenter)
 
-        ack_btn = QPushButton("ACKNOWLEDGE && CLOSE")
-        ack_btn.setObjectName("AcknowledgeBtn")
-        ack_btn.setCursor(Qt.PointingHandCursor)
-        ack_btn.clicked.connect(self.close)
-        bottom_layout.addWidget(ack_btn, 0)
+        # Prefer modern high-impact fonts with crisp letter-spacing
+        font = QFont("Cantarell", 44, QFont.Bold)
+        font.setLetterSpacing(QFont.AbsoluteSpacing, 9.0)
+        self.text_label.setFont(font)
+        self.text_label.setStyleSheet("""
+            QLabel {
+                color: #FFFFFF;
+                background: transparent;
+            }
+        """)
 
-        main_layout.addLayout(bottom_layout)
+        # Glow / Shadow for Impact
+        shadow = QGraphicsDropShadowEffect(self)
+        shadow.setBlurRadius(36)
+        shadow.setColor(QColor(0, 0, 0, 230))
+        shadow.setOffset(0, 6)
+        self.text_label.setGraphicsEffect(shadow)
+        center_layout.addWidget(self.text_label, 0, Qt.AlignCenter)
+
+        # 3. Minimalist Subtitle Pill
+        self.sub_label = QLabel("NOESCAPE ANTI-CHEAT")
+        self.sub_label.setAlignment(Qt.AlignCenter)
+        sub_font = QFont("Liberation Sans", 13, QFont.Bold)
+        sub_font.setLetterSpacing(QFont.AbsoluteSpacing, 6.0)
+        self.sub_label.setFont(sub_font)
+        self.sub_label.setStyleSheet("""
+            QLabel {
+                color: rgba(255, 255, 255, 0.75);
+                background: rgba(0, 0, 0, 0.25);
+                padding: 7px 22px;
+                border-radius: 14px;
+                border: 1px solid rgba(255, 255, 255, 0.18);
+            }
+        """)
+        center_layout.addWidget(self.sub_label, 0, Qt.AlignCenter)
+
+        main_layout.addLayout(center_layout)
+        main_layout.addStretch(1)
 
     def keyPressEvent(self, event):
-        if event.key() in (Qt.Key_Escape, Qt.Key_Return, Qt.Key_Enter, Qt.Key_Space):
+        if event.key() in (Qt.Key_Escape, Qt.Key_Q, Qt.Key_Space, Qt.Key_Return):
             self.close()
         else:
             super().keyPressEvent(event)
 
-def main():
-    parser = argparse.ArgumentParser(description="NoEscape Crimson Ban Screen")
-    parser.add_argument("--hwid", type=str, default="", help="Device HWID fingerprint")
-    parser.add_argument("--score", type=int, default=100, help="Threat score")
-    parser.add_argument("--reason", type=str, default="Critical security violation detected", help="Violation details")
-    parser.add_argument("--component", type=str, default="AntiCheatEngine::Enforcement", help="Violating module")
-    parser.add_argument("--type", type=str, default="FATAL_BAN", help="Detection type name")
-    parser.add_argument("--timestamp", type=str, default="", help="Detection timestamp string")
-    parser.add_argument("--fullscreen", action="store_true", help="Launch in fullscreen mode")
-    parser.add_argument("--auto-close", type=int, default=0, help="Auto-close after N seconds (for testing)")
-    parser.add_argument("--screenshot", type=str, default="", help="Save rendered window screenshot to file path")
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
 
+        # Full Red Radial Gradient with Vignette
+        w = self.width()
+        h = self.height()
+        cx = w / 2.0
+        cy = h / 2.0
+        radius = max(w, h) * 0.75
+
+        grad = QRadialGradient(cx, cy, radius)
+        grad.setColorAt(0.0, QColor(200, 16, 28))   # Rich vibrant crimson red in center
+        grad.setColorAt(0.55, QColor(140, 6, 14))  # Deep blood red
+        grad.setColorAt(1.0, QColor(60, 2, 6))     # Dark dramatic vignette edge
+
+        p.fillRect(0, 0, w, h, QBrush(grad))
+        p.end()
+
+def main():
+    parser = argparse.ArgumentParser(description="NoEscape Anti-Cheat Ban UI")
+    parser.add_argument("--hwid", type=str, default="")
+    parser.add_argument("--score", type=int, default=100)
+    parser.add_argument("--reason", type=str, default="")
+    parser.add_argument("--component", type=str, default="")
+    parser.add_argument("--type", type=str, default="")
+    parser.add_argument("--timestamp", type=str, default="")
+    parser.add_argument("--fullscreen", action="store_true", default=True)
+    parser.add_argument("--windowed", action="store_true", default=False)
+    parser.add_argument("--screenshot", type=str, default="")
+    parser.add_argument("--auto-close", type=int, default=0)
     args = parser.parse_args()
 
-    # Fallback to local HWID if not supplied
-    hwid = args.hwid
-    if not hwid:
-        try:
-            with open("/etc/machine-id", "r") as f:
-                import hashlib
-                hwid = hashlib.sha256(f.read().strip().encode()).hexdigest()
-        except Exception:
-            hwid = "2d70541832a1cb00855e97f183c6a5053a7b666bc5043648970f977710c3fb80"
-
     app = QApplication(sys.argv)
-    window = BanWindow(
-        hwid=hwid,
-        score=args.score,
-        reason=args.reason,
-        component=args.component,
-        violation_type=args.type,
-        timestamp_str=args.timestamp
-    )
-    if args.fullscreen:
+    is_fs = not args.windowed
+    window = MinimalistBanWindow(is_fullscreen=is_fs)
+    if is_fs:
         window.showFullScreen()
     else:
         window.show()
@@ -284,15 +313,13 @@ def main():
     window.activateWindow()
 
     if args.screenshot:
-        from PySide6.QtCore import QTimer
         def capture():
             pix = window.grab()
             pix.save(args.screenshot, "PNG")
             print(f"Screenshot saved to: {args.screenshot}")
-        QTimer.singleShot(600, capture)
+        QTimer.singleShot(500, capture)
 
     if args.auto_close > 0:
-        from PySide6.QtCore import QTimer
         QTimer.singleShot(args.auto_close * 1000, window.close)
 
     sys.exit(app.exec())
