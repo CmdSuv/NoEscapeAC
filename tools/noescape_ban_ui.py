@@ -182,32 +182,8 @@ class MinimalistBanWindow(QWidget):
 
         # Main Layout
         main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(40, 40, 40, 40)
+        main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
-
-        # Top Bar with sleek Close '✕' Button
-        top_bar = QHBoxLayout()
-        top_bar.addStretch()
-        self.close_btn = QPushButton("✕")
-        self.close_btn.setFixedSize(50, 50)
-        self.close_btn.setCursor(Qt.PointingHandCursor)
-        self.close_btn.setStyleSheet("""
-            QPushButton {
-                background: rgba(0, 0, 0, 0.28);
-                color: #ffffff;
-                border: 1px solid rgba(255, 255, 255, 0.25);
-                border-radius: 25px;
-                font-size: 22px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background: rgba(0, 0, 0, 0.65);
-                border-color: #ffffff;
-            }
-        """)
-        self.close_btn.clicked.connect(self.close)
-        top_bar.addWidget(self.close_btn)
-        main_layout.addLayout(top_bar)
 
         main_layout.addStretch(1)
 
@@ -217,7 +193,7 @@ class MinimalistBanWindow(QWidget):
         center_layout.setSpacing(32)
 
         # 1. Custom Designed Logo
-        self.logo = NoEscapeLogo(size=230)
+        self.logo = NoEscapeLogo(size=240)
         center_layout.addWidget(self.logo, 0, Qt.AlignCenter)
 
         # 2. Main Title: "YOU HAVE BEEN BANNED"
@@ -225,8 +201,8 @@ class MinimalistBanWindow(QWidget):
         self.text_label.setAlignment(Qt.AlignCenter)
 
         # Prefer modern high-impact fonts with crisp letter-spacing
-        font = QFont("Cantarell", 44, QFont.Bold)
-        font.setLetterSpacing(QFont.AbsoluteSpacing, 9.0)
+        font = QFont("Cantarell", 46, QFont.Bold)
+        font.setLetterSpacing(QFont.AbsoluteSpacing, 9.5)
         self.text_label.setFont(font)
         self.text_label.setStyleSheet("""
             QLabel {
@@ -262,6 +238,9 @@ class MinimalistBanWindow(QWidget):
 
         main_layout.addLayout(center_layout)
         main_layout.addStretch(1)
+
+    def mousePressEvent(self, event):
+        self.close()
 
     def keyPressEvent(self, event):
         if event.key() in (Qt.Key_Escape, Qt.Key_Q, Qt.Key_Space, Qt.Key_Return):
