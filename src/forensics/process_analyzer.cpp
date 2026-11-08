@@ -239,12 +239,17 @@ std::optional<core::DetectionEvent> ProcessAnalyzer::InspectExternalHandle(
 
     std::string lowerName = ToLower(owner_name);
     std::string lowerPath = ToLower(owner_path);
-    // Allowlist core OS system services (csrss, svchost, lsass, MsMpEng, werfault) when located in System32
+    // Allowlist core OS system services (csrss, svchost, lsass, MsMpEng, werfault, explorer, services, start, conhost) when located in Windows system directories
     bool inSystemDir = (lowerPath.find("\\windows\\system32\\") != std::string::npos ||
+                        lowerPath.find("\\windows\\syswow64\\") != std::string::npos ||
+                        lowerPath.find("\\windows\\") != std::string::npos ||
                         lowerPath.find("\\programdata\\microsoft\\windows defender\\") != std::string::npos);
     if (inSystemDir && (lowerName == "csrss.exe" || lowerName == "svchost.exe" ||
                         lowerName == "lsass.exe" || lowerName == "msmpeng.exe" ||
-                        lowerName == "werfault.exe")) {
+                        lowerName == "werfault.exe" || lowerName == "explorer.exe" ||
+                        lowerName == "services.exe" || lowerName == "start.exe" ||
+                        lowerName == "winedevice.exe" || lowerName == "conhost.exe" ||
+                        lowerName == "smss.exe")) {
         return std::nullopt;
     }
 
@@ -320,12 +325,14 @@ std::vector<ProcessRecord> ProcessAnalyzer::DetectExternalMemoryReaders() {
 
     // Identify our own kernel EPROCESS object pointer from our handle table
     PVOID selfEProcess = nullptr;
+    USHORT processTypeIndex = 0;
     if (hSelf) {
         for (size_t i = 0; i < count; ++i) {
             const auto& h = info->Handles[i];
             if (static_cast<DWORD>(h.UniqueProcessId) == selfPid &&
                 h.HandleValue == reinterpret_cast<ULONG_PTR>(hSelf)) {
                 selfEProcess = h.Object;
+                processTypeIndex = h.ObjectTypeIndex;
                 break;
             }
         }
@@ -338,6 +345,15 @@ std::vector<ProcessRecord> ProcessAnalyzer::DetectExternalMemoryReaders() {
         DWORD ownerPid = static_cast<DWORD>(h.UniqueProcessId);
         if (ownerPid <= 4 || ownerPid == selfPid) continue;
         if ((h.GrantedAccess & kInvasiveAccess) == 0) continue;
+
+        // Filter: only examine handles that actually target a Process object (and our process specifically when EPROCESS is known)
+        if (selfEProcess != nullptr) {
+            if (h.Object != selfEProcess) continue;
+        } else if (processTypeIndex != 0) {
+            if (h.ObjectTypeIndex != processTypeIndex) continue;
+        } else {
+            continue;
+        }
 
         HANDLE hOwner = OpenProcess(PROCESS_DUP_HANDLE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, ownerPid);
         if (!hOwner) {

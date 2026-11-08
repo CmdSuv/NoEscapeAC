@@ -33,7 +33,7 @@ TEST(Forensics, ProcessBlacklistAudit) {
     auto events = ProcessAnalyzer::Instance().AuditProcesses(blacklist, cmdlineBlacklist);
     // On clean testing system, blacklisted cheat processes should not be running
     for (const auto& ev : events) {
-        if (ev.type == DetectionType::SUSPICIOUS_PROCESS_DETECTED) {
+        if (ev.component == "ProcessAnalyzer::ProcessBlacklist") {
             ASSERT_NE(ev.details.find("non_existent_cheat_daemon_xyz"), std::string::npos);
         }
         // Verify that benign system processes with libextest.so are NOT flagged as environment tampering

@@ -12,6 +12,7 @@
 
 #if defined(_WIN32)
 #include <windows.h>
+#include <psapi.h>
 #else
 #include <dlfcn.h>
 #include <elf.h>
@@ -617,15 +618,27 @@ std::optional<core::DetectionEvent> Unhooker::InspectTableEntry(
 
                 // Check for forwarders / API set mappings / version differences
                 bool isApiSet = (expMod.rfind("api-ms-", 0) == 0 || expMod.rfind("ext-ms-", 0) == 0);
-                bool isKernelForwarder = (expMod == "kernel32.dll" && (targetMod == "kernelbase.dll" || targetMod == "ntdll.dll"));
-                bool isMsvcrtForwarder = (expMod == "msvcrt.dll" && targetMod.rfind("ucrtbase", 0) == 0);
+                bool isKernelForwarder = ((expMod == "kernel32.dll" || expMod == "kernelbase.dll") &&
+                                          (targetMod == "kernelbase.dll" || targetMod == "ntdll.dll" || targetMod == "kernel32.dll"));
+                bool isUserForwarder = (expMod == "user32.dll" &&
+                                        (targetMod == "win32u.dll" || targetMod == "ntdll.dll" || targetMod == "gdi32.dll" || targetMod == "imm32.dll"));
+                bool isComForwarder = ((expMod == "ole32.dll" || expMod == "combase.dll") &&
+                                       (targetMod == "combase.dll" || targetMod == "ole32.dll" || targetMod == "rpcrt4.dll" || targetMod == "kernelbase.dll" || targetMod == "ntdll.dll"));
+                bool isAdvapiForwarder = (expMod == "advapi32.dll" &&
+                                          (targetMod == "sechost.dll" || targetMod == "ntdll.dll" || targetMod == "kernelbase.dll" || targetMod == "cryptbase.dll" || targetMod == "cryptsp.dll" || targetMod == "bcrypt.dll"));
+                bool isGdiForwarder = (expMod == "gdi32.dll" &&
+                                       (targetMod == "gdi32full.dll" || targetMod == "win32u.dll" || targetMod == "ntdll.dll"));
+                bool isWs2Forwarder = (expMod == "ws2_32.dll" &&
+                                       (targetMod == "mswsock.dll" || targetMod == "ntdll.dll" || targetMod == "kernelbase.dll"));
+                bool isMsvcrtForwarder = ((expMod == "msvcrt.dll" || expMod.rfind("ucrtbase", 0) == 0) &&
+                                          (targetMod.rfind("ucrtbase", 0) == 0 || targetMod == "ntdll.dll" || targetMod == "msvcrt.dll"));
                 // glibc 2.34+ merges libpthread, libdl, librt, libm, libutil into libc.so.6
                 bool isGlibcMerged = (targetStem == "libc" &&
                     (expStem == "libpthread" || expStem == "libdl" || expStem == "librt" || expStem == "libm" || expStem == "libutil" || expStem == "ld-linux-x86-64"));
 
                 bool stemsMatch = (targetStem == expStem);
 
-                if (!stemsMatch && !isApiSet && !isKernelForwarder && !isMsvcrtForwarder && !isGlibcMerged && targetMod != expMod) {
+                if (!stemsMatch && !isApiSet && !isKernelForwarder && !isUserForwarder && !isComForwarder && !isAdvapiForwarder && !isGdiForwarder && !isWs2Forwarder && !isMsvcrtForwarder && !isGlibcMerged && targetMod != expMod) {
                     core::DetectionEvent ev;
                     ev.type = core::DetectionType::IAT_GOT_HOOK_DETECTED;
                     ev.severity = core::Severity::CRITICAL;

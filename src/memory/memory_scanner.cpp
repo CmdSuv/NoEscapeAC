@@ -181,8 +181,10 @@ std::vector<MemoryRegion> MemoryScanner::QueryMemoryRegionsInternal() {
     while (p < maxAddr) {
         MEMORY_BASIC_INFORMATION mbi{};
         if (VirtualQuery(p, &mbi, sizeof(mbi)) == 0) {
-            p += 0x1000;
-            continue;
+            break;
+        }
+        if (mbi.RegionSize == 0) {
+            break;
         }
 
         if (mbi.State == MEM_COMMIT) {
@@ -214,7 +216,11 @@ std::vector<MemoryRegion> MemoryScanner::QueryMemoryRegionsInternal() {
             regions.push_back(reg);
         }
 
-        p = static_cast<uint8_t*>(mbi.BaseAddress) + mbi.RegionSize;
+        uint8_t* nextP = static_cast<uint8_t*>(mbi.BaseAddress) + mbi.RegionSize;
+        if (nextP <= p) {
+            break;
+        }
+        p = nextP;
     }
 
 #else
@@ -1042,20 +1048,34 @@ std::vector<ThreadExecutionInfo> MemoryScanner::QueryActiveThreads() {
                     fnNtQueryThread(hThread, kThreadQuerySetWin32StartAddress, &startAddr, sizeof(startAddr), nullptr) == 0) {
                     info.start_address = startAddr;
                 }
-                DWORD prev = SuspendThread(hThread);
-                if (prev != (DWORD)-1) {
+                const bool isSelfThread = (te.th32ThreadID == GetCurrentThreadId());
+                if (isSelfThread) {
                     CONTEXT ctx{};
                     ctx.ContextFlags = CONTEXT_CONTROL;
-                    if (GetThreadContext(hThread, &ctx)) {
+                    RtlCaptureContext(&ctx);
 #if defined(_M_X64) || defined(__x86_64__)
-                        info.instruction_pointer = static_cast<uintptr_t>(ctx.Rip);
-                        info.stack_pointer = static_cast<uintptr_t>(ctx.Rsp);
+                    info.instruction_pointer = static_cast<uintptr_t>(ctx.Rip);
+                    info.stack_pointer = static_cast<uintptr_t>(ctx.Rsp);
 #elif defined(_M_IX86) || defined(__i386__)
-                        info.instruction_pointer = static_cast<uintptr_t>(ctx.Eip);
-                        info.stack_pointer = static_cast<uintptr_t>(ctx.Esp);
+                    info.instruction_pointer = static_cast<uintptr_t>(ctx.Eip);
+                    info.stack_pointer = static_cast<uintptr_t>(ctx.Esp);
 #endif
+                } else {
+                    DWORD prev = SuspendThread(hThread);
+                    if (prev != (DWORD)-1) {
+                        CONTEXT ctx{};
+                        ctx.ContextFlags = CONTEXT_CONTROL;
+                        if (GetThreadContext(hThread, &ctx)) {
+#if defined(_M_X64) || defined(__x86_64__)
+                            info.instruction_pointer = static_cast<uintptr_t>(ctx.Rip);
+                            info.stack_pointer = static_cast<uintptr_t>(ctx.Rsp);
+#elif defined(_M_IX86) || defined(__i386__)
+                            info.instruction_pointer = static_cast<uintptr_t>(ctx.Eip);
+                            info.stack_pointer = static_cast<uintptr_t>(ctx.Esp);
+#endif
+                        }
+                        ResumeThread(hThread);
                     }
-                    ResumeThread(hThread);
                 }
                 CloseHandle(hThread);
             }
@@ -1243,13 +1263,25 @@ std::vector<core::DetectionEvent> MemoryScanner::AuditThreadProvenance() {
                 }
             }
 #else
+            const bool isSelf = (t.tid == GetCurrentThreadId());
             HANDLE hThread = OpenThread(THREAD_QUERY_INFORMATION | THREAD_GET_CONTEXT | THREAD_SUSPEND_RESUME, FALSE, t.tid);
             if (hThread) {
-                DWORD prev = SuspendThread(hThread);
-                if (prev != (DWORD)-1) {
-                    CONTEXT ctx{};
-                    ctx.ContextFlags = CONTEXT_ALL;
-                    if (GetThreadContext(hThread, &ctx)) {
+                CONTEXT ctx{};
+                ctx.ContextFlags = CONTEXT_ALL;
+                bool gotContext = false;
+                if (isSelf) {
+                    RtlCaptureContext(&ctx);
+                    gotContext = true;
+                } else {
+                    DWORD prev = SuspendThread(hThread);
+                    if (prev != (DWORD)-1) {
+                        gotContext = (GetThreadContext(hThread, &ctx) != 0);
+                        if (!gotContext) {
+                            ResumeThread(hThread);
+                        }
+                    }
+                }
+                if (gotContext) {
 #if defined(_M_X64) || defined(__x86_64__)
                         CONTEXT walkCtx = ctx;
                         for (int frameIdx = 0; frameIdx < 64 && walkCtx.Rip != 0; ++frameIdx) {
@@ -1330,8 +1362,9 @@ std::vector<core::DetectionEvent> MemoryScanner::AuditThreadProvenance() {
                             }
                         }
 #endif
+                    if (!isSelf) {
+                        ResumeThread(hThread);
                     }
-                    ResumeThread(hThread);
                 }
                 CloseHandle(hThread);
             }

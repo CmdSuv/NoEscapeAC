@@ -1,0 +1,58 @@
+name: CI Matrix (Linux & Windows)
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build-and-test:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: "Linux (Ubuntu / GCC)"
+            os: ubuntu-latest
+            compiler_cc: gcc
+            compiler_cxx: g++
+            cmake_flags: "-DCMAKE_BUILD_TYPE=Release -DNOESCAPE_BUILD_TESTS=ON -DNOESCAPE_SECURE_BUILD=OFF"
+          - name: "Linux (Ubuntu / Clang)"
+            os: ubuntu-latest
+            compiler_cc: clang
+            compiler_cxx: clang++
+            cmake_flags: "-DCMAKE_BUILD_TYPE=Release -DNOESCAPE_BUILD_TESTS=ON -DNOESCAPE_SECURE_BUILD=OFF"
+          - name: "Windows (MSVC 2022)"
+            os: windows-latest
+            compiler_cc: cl
+            compiler_cxx: cl
+            cmake_flags: "-DCMAKE_BUILD_TYPE=Release -DNOESCAPE_BUILD_TESTS=ON -DNOESCAPE_SECURE_BUILD=OFF"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libssl-dev
+
+      - name: Configure CMake
+        env:
+          CC: ${{ matrix.compiler_cc }}
+          CXX: ${{ matrix.compiler_cxx }}
+        run: |
+          cmake -B build ${{ matrix.cmake_flags }}
+
+      - name: Build
+        run: |
+          cmake --build build --config Release -j
+
+      - name: Execute Tests
+        env:
+          NOESCAPE_TEST_MODE: "1"
+        run: |
+          ctest --test-dir build -C Release --output-on-failure
