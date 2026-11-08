@@ -1027,6 +1027,11 @@ std::optional<core::DetectionEvent> MemoryScanner::InspectThreadAddress(uint32_t
         return std::nullopt;
     }
 #endif
+    if (jitHost) {
+        // JIT hosts (Java JVM / Minecraft / .NET) dynamically allocate, recycle, and free
+        // method call stubs and runtime trampolines outside normal static PE section boundaries.
+        return std::nullopt;
+    }
     core::DetectionEvent ev;
     ev.type = core::DetectionType::THREAD_PROVENANCE_ANOMALY;
     ev.severity = core::Severity::HIGH;
