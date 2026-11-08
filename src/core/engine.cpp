@@ -567,6 +567,9 @@ void AntiCheatEngine::SpawnBanScreen(const std::string& reason,
     if (!uiPath.empty()) candidatePaths.push_back(uiPath);
     candidatePaths.push_back("./noescape_ban_ui");
     candidatePaths.push_back("./tools/noescape_ban_ui.py");
+    candidatePaths.push_back("C:\\NoEscapeAC\\noescape_ban_ui.py");
+    candidatePaths.push_back("Z:\\home\\COSMOS\\NoEscapeAC\\tools\\noescape_ban_ui.py");
+    candidatePaths.push_back("/home/COSMOS/NoEscapeAC/tools/noescape_ban_ui.py");
 
     std::string resolvedPath;
     for (const auto& cp : candidatePaths) {
