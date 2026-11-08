@@ -600,11 +600,24 @@ void AntiCheatEngine::SpawnBanScreen(const std::string& reason,
         for (char& c : v) if (c == '"' || c == '\\' || c == '%' || c < 0x20) c = '\'';
         return v;
     };
-    std::string cmd = "python.exe \"" + sanitize(resolvedPath) + "\" --hwid \"" + sanitize(hwid) +
-                      "\" --score " + scoreStr +
-                      " --reason \"" + sanitize(reason) +
-                      "\" --component \"" + sanitize(compStr) +
-                      "\" --type \"" + sanitize(typeStr) + "\"";
+
+    HMODULE ntdll = GetModuleHandleA("ntdll.dll");
+    bool isWine = (ntdll && GetProcAddress(ntdll, "wine_get_version") != nullptr);
+
+    std::string cmd;
+    if (isWine) {
+        cmd = "start.exe /unix /usr/bin/python3 /home/COSMOS/NoEscapeAC/tools/noescape_ban_ui.py --hwid \"" + sanitize(hwid) +
+              "\" --score " + scoreStr +
+              " --reason \"" + sanitize(reason) +
+              "\" --component \"" + sanitize(compStr) +
+              "\" --type \"" + sanitize(typeStr) + "\"";
+    } else {
+        cmd = "python.exe \"" + sanitize(resolvedPath) + "\" --hwid \"" + sanitize(hwid) +
+              "\" --score " + scoreStr +
+              " --reason \"" + sanitize(reason) +
+              "\" --component \"" + sanitize(compStr) +
+              "\" --type \"" + sanitize(typeStr) + "\"";
+    }
     STARTUPINFOA si{}; si.cb = sizeof(si);
     PROCESS_INFORMATION pi{};
     CreateProcessA(nullptr, cmd.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW | DETACHED_PROCESS, nullptr, nullptr, &si, &pi);

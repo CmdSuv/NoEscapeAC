@@ -625,7 +625,9 @@ std::optional<core::DetectionEvent> Unhooker::InspectTableEntry(
                 bool isComForwarder = ((expMod == "ole32.dll" || expMod == "combase.dll") &&
                                        (targetMod == "combase.dll" || targetMod == "ole32.dll" || targetMod == "rpcrt4.dll" || targetMod == "kernelbase.dll" || targetMod == "ntdll.dll"));
                 bool isAdvapiForwarder = (expMod == "advapi32.dll" &&
-                                          (targetMod == "sechost.dll" || targetMod == "ntdll.dll" || targetMod == "kernelbase.dll" || targetMod == "cryptbase.dll" || targetMod == "cryptsp.dll" || targetMod == "bcrypt.dll"));
+                                          (targetMod == "sechost.dll" || targetMod == "ntdll.dll" || targetMod == "kernelbase.dll" || targetMod == "kernel32.dll" || targetMod == "cryptbase.dll" || targetMod == "cryptsp.dll" || targetMod == "bcrypt.dll"));
+                bool isShlwapiForwarder = ((expMod == "shlwapi.dll" || expMod == "shell32.dll") &&
+                                           (targetMod == "shcore.dll" || targetMod == "shlwapi.dll" || targetMod == "shell32.dll" || targetMod == "kernelbase.dll" || targetMod == "kernel32.dll" || targetMod == "ntdll.dll" || targetMod == "combase.dll"));
                 bool isGdiForwarder = (expMod == "gdi32.dll" &&
                                        (targetMod == "gdi32full.dll" || targetMod == "win32u.dll" || targetMod == "ntdll.dll"));
                 bool isWs2Forwarder = (expMod == "ws2_32.dll" &&
@@ -638,7 +640,18 @@ std::optional<core::DetectionEvent> Unhooker::InspectTableEntry(
 
                 bool stemsMatch = (targetStem == expStem);
 
-                if (!stemsMatch && !isApiSet && !isKernelForwarder && !isUserForwarder && !isComForwarder && !isAdvapiForwarder && !isGdiForwarder && !isWs2Forwarder && !isMsvcrtForwarder && !isGlibcMerged && targetMod != expMod) {
+#if defined(_WIN32)
+                // If GetProcAddress on expected module points directly to resolved target, it is a genuine OS export forwarder
+                HMODULE hExp = GetModuleHandleA(expMod.c_str());
+                if (hExp && !symbol_name.empty()) {
+                    FARPROC proc = GetProcAddress(hExp, symbol_name.c_str());
+                    if (proc && reinterpret_cast<uintptr_t>(proc) == resolved_target) {
+                        return std::nullopt;
+                    }
+                }
+#endif
+
+                if (!stemsMatch && !isApiSet && !isKernelForwarder && !isUserForwarder && !isComForwarder && !isAdvapiForwarder && !isShlwapiForwarder && !isGdiForwarder && !isWs2Forwarder && !isMsvcrtForwarder && !isGlibcMerged && targetMod != expMod) {
                     core::DetectionEvent ev;
                     ev.type = core::DetectionType::IAT_GOT_HOOK_DETECTED;
                     ev.severity = core::Severity::CRITICAL;
@@ -657,6 +670,16 @@ std::optional<core::DetectionEvent> Unhooker::InspectTableEntry(
             return std::nullopt;
         }
     }
+
+#if defined(_WIN32)
+    HMODULE ntdll = GetModuleHandleA("ntdll.dll");
+    bool isWine = (ntdll && GetProcAddress(ntdll, "wine_get_version") != nullptr);
+    if (isWine && (resolved_target >= 0x600000000000ULL || resolved_target < 0x10000ULL)) {
+        // Under Wine/Proton, builtin Windows DLLs (mpr.dll, ntdll, etc.) route directly into
+        // host Linux .so memory which Win32 VirtualQuery does not track as Win32 memory.
+        return std::nullopt;
+    }
+#endif
 
     core::DetectionEvent ev;
     ev.type = core::DetectionType::IAT_GOT_HOOK_DETECTED;

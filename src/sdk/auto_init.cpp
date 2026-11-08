@@ -67,14 +67,21 @@ DWORD WINAPI WindowsAutoInitWorker(LPVOID lpParam) {
         }
     }
 
-    NoEscapeConfig cfg = NoEscape_GetDefaultConfig();
+    NoEscapeConfig cfg;
 
     // Stack buffers for environment overrides (NoEscape_Init copies into std::string immediately)
     DWORD len = 0;
     char urlBuf[256]{};
     len = GetEnvironmentVariableA("NOESCAPE_PANEL_URL", urlBuf, sizeof(urlBuf));
-    if (len > 0) {
+    if (len > 0 && urlBuf[0] != '\0') {
+        cfg = NoEscape_GetDefaultConfig();
         cfg.panel_url = urlBuf;
+    } else {
+        // Standalone client auto-init (e.g. game launcher / Minecraft): enforce locally
+        cfg = NoEscape_GetProfileConfig(NOESCAPE_PROFILE_TESTING);
+        cfg.enforce_ban = true;
+        cfg.terminate_on_ban = true;
+        cfg.show_ban_ui = true;
     }
 
     char keyBuf[256]{};
@@ -309,12 +316,19 @@ void* LinuxAutoInitWorker(void* arg) {
         }
     }
 
-    NoEscapeConfig cfg = NoEscape_GetDefaultConfig();
+    NoEscapeConfig cfg;
 
     // Support runtime environment variable overrides for headless / preloaded deployments
     const char* panelUrlEnv = std::getenv("NOESCAPE_PANEL_URL");
-    if (panelUrlEnv && std::strlen(panelUrlEnv) > 0) {
+    if (panelUrlEnv && panelUrlEnv[0] != '\0') {
+        cfg = NoEscape_GetDefaultConfig();
         cfg.panel_url = panelUrlEnv;
+    } else {
+        // Standalone client auto-init (e.g. game launcher / Minecraft): enforce locally
+        cfg = NoEscape_GetProfileConfig(NOESCAPE_PROFILE_TESTING);
+        cfg.enforce_ban = true;
+        cfg.terminate_on_ban = true;
+        cfg.show_ban_ui = true;
     }
 
     const char* secretKeyEnv = std::getenv("NOESCAPE_SECRET_KEY");
@@ -472,5 +486,29 @@ void NoEscape_AutoInit_Destructor() {
 } // namespace
 
 #endif
+
+// ============================================================================
+// JVM Agent Compatibility Hooks (HotSpot / Adoptium / Minecraft -agentpath)
+// ============================================================================
+#if defined(_WIN32)
+#define NOESCAPE_JVMTI_EXPORT extern "C" __declspec(dllexport) int __stdcall
+#define NOESCAPE_JVMTI_VOID_EXPORT extern "C" __declspec(dllexport) void __stdcall
+#else
+#define NOESCAPE_JVMTI_EXPORT extern "C" __attribute__((visibility("default"))) int
+#define NOESCAPE_JVMTI_VOID_EXPORT extern "C" __attribute__((visibility("default"))) void
+#endif
+
+NOESCAPE_JVMTI_EXPORT Agent_OnLoad(void* /*vm*/, char* /*options*/, void* /*reserved*/) {
+    NoEscape_SetHostUsesJit(true);
+    return 0; // JNI_OK
+}
+
+NOESCAPE_JVMTI_EXPORT Agent_OnAttach(void* /*vm*/, char* /*options*/, void* /*reserved*/) {
+    NoEscape_SetHostUsesJit(true);
+    return 0; // JNI_OK
+}
+
+NOESCAPE_JVMTI_VOID_EXPORT Agent_OnUnload(void* /*vm*/) {
+}
 
 #endif // NOESCAPE_EXPORTS || NOESCAPE_BUILD_SHARED
