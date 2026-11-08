@@ -102,7 +102,7 @@ std::vector<CheatSignature> SignatureDatabase::CreateDefaultSignatures() {
         SignatureCategory::HOOK_FRAMEWORK,
         100,
         core::Severity::FATAL_BAN,
-        MemoryTargetRule::ALL_EXECUTABLE,
+        MemoryTargetRule::UNBACKED_ONLY,
         "MinHook x64 relay trampoline (mov r10, imm64; jmp r10)"
     );
 
@@ -142,7 +142,7 @@ std::vector<CheatSignature> SignatureDatabase::CreateDefaultSignatures() {
         SignatureCategory::HOOK_FRAMEWORK,
         100,
         core::Severity::FATAL_BAN,
-        MemoryTargetRule::ALL_EXECUTABLE,
+        MemoryTargetRule::UNBACKED_ONLY,
         "PolyHook x64 push-mov-xchg-ret hook stub"
     );
 
@@ -152,7 +152,7 @@ std::vector<CheatSignature> SignatureDatabase::CreateDefaultSignatures() {
         SignatureCategory::HOOK_FRAMEWORK,
         100,
         core::Severity::FATAL_BAN,
-        MemoryTargetRule::ALL_EXECUTABLE,
+        MemoryTargetRule::UNBACKED_ONLY,
         "PolyHook x64 push-mov-mov-ret hook stub"
     );
 
@@ -373,7 +373,7 @@ std::vector<CheatSignature> SignatureDatabase::CreateDefaultSignatures() {
         SignatureCategory::DEBUGGER_INTERFACE,
         100,
         core::Severity::FATAL_BAN,
-        MemoryTargetRule::ALL_EXECUTABLE,
+        MemoryTargetRule::UNBACKED_ONLY,
         "Frida Gum dynamic inline interceptor replacement stub"
     );
 
@@ -383,7 +383,7 @@ std::vector<CheatSignature> SignatureDatabase::CreateDefaultSignatures() {
         SignatureCategory::DEBUGGER_INTERFACE,
         100,
         core::Severity::FATAL_BAN,
-        MemoryTargetRule::ALL_EXECUTABLE,
+        MemoryTargetRule::UNBACKED_ONLY,
         "Frida Stalker execution tracing register spill sequence"
     );
 
@@ -575,7 +575,7 @@ std::vector<CheatSignature> SignatureDatabase::CreateDefaultSignatures() {
         SignatureCategory::SPEEDHACK_WRAPPER,
         100,
         core::Severity::FATAL_BAN,
-        MemoryTargetRule::ALL_EXECUTABLE,
+        MemoryTargetRule::UNBACKED_ONLY,
         "Speedhack QueryPerformanceCounter timing detour wrapper"
     );
 
@@ -585,7 +585,7 @@ std::vector<CheatSignature> SignatureDatabase::CreateDefaultSignatures() {
         SignatureCategory::SPEEDHACK_WRAPPER,
         90,
         core::Severity::FATAL_BAN,
-        MemoryTargetRule::ALL_EXECUTABLE,
+        MemoryTargetRule::UNBACKED_ONLY,
         "Speedhack timeGetTime hook wrapper multiplying delta ticks"
     );
 

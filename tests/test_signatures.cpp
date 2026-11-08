@@ -401,4 +401,12 @@ TEST(Signatures, TrampolineAndDetourRuleSafety) {
     auto substrateSig = SignatureDatabase::FindByName("Substrate_X64_PushRet");
     ASSERT_TRUE(substrateSig.has_value());
     ASSERT_EQ(static_cast<int>(substrateSig->GetTargetRule()), static_cast<int>(MemoryTargetRule::UNBACKED_ONLY));
+
+    auto speedTgt = SignatureDatabase::FindByName("Speedhack_TimeGetTime_Detour");
+    ASSERT_TRUE(speedTgt.has_value());
+    ASSERT_EQ(static_cast<int>(speedTgt->GetTargetRule()), static_cast<int>(MemoryTargetRule::UNBACKED_ONLY));
+
+    auto speedQpc = SignatureDatabase::FindByName("Speedhack_QPC_Detour");
+    ASSERT_TRUE(speedQpc.has_value());
+    ASSERT_EQ(static_cast<int>(speedQpc->GetTargetRule()), static_cast<int>(MemoryTargetRule::UNBACKED_ONLY));
 }
