@@ -91,6 +91,40 @@ TEST(HardeningV1_5, CorroborationMemoryIntraCategoryOrthogonalSubtypes) {
     ASSERT_TRUE(dec2.eligible_for_session_reject);
 }
 
+TEST(HardeningV1_5, CorroborationMemoryIntraCategoryOrthogonalSubtypesSameRootCause) {
+    EvidenceCorrelator correlator;
+    correlator.SetTimeWindowMs(60000);
+
+    // Both detections occur at the EXACT same memory address (0x7fff1000) under component "MemoryScanner"
+    DetectionEvent ev1;
+    ev1.type = DetectionType::UNBACKED_EXECUTABLE_MEMORY;
+    ev1.severity = Severity::CRITICAL;
+    ev1.component = "MemoryScanner";
+    ev1.details = "Unbacked allocation at 0x7fff1000";
+    ev1.threat_score = 70;
+    ev1.timestamp = DetectionEvent::NowMonotonicMs();
+    ev1.timestamp_utc_ms = DetectionEvent::NowUtcMs();
+
+    auto dec1 = correlator.Evaluate(ev1, 0, 100, /*strict_corroboration_mode=*/true);
+    ASSERT_FALSE(dec1.eligible_for_permanent_ban);
+
+    // Second event has orthogonal sub-type (MEMORY_SIGNATURE_MATCH) at the same root cause address
+    DetectionEvent ev2;
+    ev2.type = DetectionType::MEMORY_SIGNATURE_MATCH;
+    ev2.severity = Severity::CRITICAL;
+    ev2.component = "MemoryScanner";
+    ev2.details = "Signature match at 0x7fff1000";
+    ev2.threat_score = 70;
+    ev2.timestamp = DetectionEvent::NowMonotonicMs() + 50;
+    ev2.timestamp_utc_ms = DetectionEvent::NowUtcMs() + 50;
+
+    auto dec2 = correlator.Evaluate(ev2, 70, 100, /*strict_corroboration_mode=*/true);
+
+    // Must corroborate because distinct high-severity types >= 2 within the same category!
+    ASSERT_TRUE(dec2.eligible_for_permanent_ban);
+    ASSERT_TRUE(dec2.eligible_for_session_reject);
+}
+
 TEST(HardeningV1_5, CorroborationDuplicateSameTypeHeuristicDoesNotCorroborate) {
     EvidenceCorrelator correlator;
     correlator.SetTimeWindowMs(60000);
@@ -149,6 +183,22 @@ TEST(HardeningV1_5, ServerEspFovFrustumCullingBlocks360Radar) {
     auto decFront = filter.EvaluateEntityReplication(obs, targetFront);
     ASSERT_FALSE(decFront.culled_by_fov);
     ASSERT_TRUE(decFront.replicate_full_transform);
+}
+
+TEST(HardeningV1_5, ServerEspCloseContactOverlappingTargetNotCulledByFov) {
+    ServerEspFilter filter;
+
+    // Observer at (0, 0, 0) looking along +Y (yaw = 90 deg)
+    ObserverState obs{1, 0.0f, 0.0f, 0.0f, 0.0f, 90.0f, 90.0f};
+
+    // Enemy in knife-distance / direct body contact at (0, -0.4, 0) with bounding radius 0.6m
+    // Distance = 0.4m <= bounding_radius (0.6m): observer is inside target bounding volume.
+    // Even though observer faces +Y and target center is at -Y, target cannot be culled by FOV!
+    TargetEntityState knifeTarget{15, 0.0f, -0.4f, 0.0f, 0.6f, false, 0.0f};
+    auto decision = filter.EvaluateEntityReplication(obs, knifeTarget);
+
+    ASSERT_FALSE(decision.culled_by_fov);
+    ASSERT_TRUE(decision.replicate_full_transform);
 }
 
 TEST(HardeningV1_5, ServerEspVerticalRaycastPreventsHalfWallFalseOcclusion) {
@@ -234,6 +284,43 @@ TEST(HardeningV1_5, TimingTightenedWindowDetectsModerateSpeedhack) {
     ASSERT_FALSE(evNormal.has_value());
 }
 
+TEST(HardeningV1_5, TimingTightenedRatioDetectionActiveCheck) {
+    auto& timing = TimingIntegrity::Instance();
+
+    // 1. Ratio within tightened window [0.80, 1.25] produces no anomalies
+    auto evOk1 = timing.EvaluateRatioForTesting(1.00);
+    ASSERT_FALSE(evOk1.has_value());
+    auto evOk2 = timing.EvaluateRatioForTesting(0.85);
+    ASSERT_FALSE(evOk2.has_value());
+    auto evOk3 = timing.EvaluateRatioForTesting(1.20);
+    ASSERT_FALSE(evOk3.has_value());
+
+    // 2. Moderate acceleration speedhack (ratio = 0.75, which corresponds to 1.33x speedhack)
+    // In v1.4 ([0.60, 1.60]), 0.75 was in the blind zone and completely missed!
+    // Sample 1: Debounced (consecutive_anomalies_ = 1)
+    auto evAnomaly1 = timing.EvaluateRatioForTesting(0.75);
+    ASSERT_FALSE(evAnomaly1.has_value());
+
+    // Sample 2: Consecutive anomaly triggers detection!
+    auto evAnomaly2 = timing.EvaluateRatioForTesting(0.75);
+    ASSERT_TRUE(evAnomaly2.has_value());
+    ASSERT_EQ(evAnomaly2->type, DetectionType::SPEEDHACK_TIMING_DISCREPANCY);
+    ASSERT_EQ(evAnomaly2->severity, Severity::CRITICAL);
+    ASSERT_EQ(evAnomaly2->threat_score, 75u);
+
+    // Consecutive normal ratios reset debounce counter back to 0
+    timing.EvaluateRatioForTesting(1.00);
+    timing.EvaluateRatioForTesting(1.00);
+
+    // 3. Moderate slowdown speedhack (ratio = 1.35)
+    auto evSlow1 = timing.EvaluateRatioForTesting(1.35);
+    ASSERT_FALSE(evSlow1.has_value());
+    auto evSlow2 = timing.EvaluateRatioForTesting(1.35);
+    ASSERT_TRUE(evSlow2.has_value());
+    ASSERT_EQ(evSlow2->type, DetectionType::SPEEDHACK_TIMING_DISCREPANCY);
+    ASSERT_EQ(evSlow2->severity, Severity::CRITICAL);
+}
+
 // ============================================================================
 // Priority 5: Engine Watchdog Prolonged Freeze (> 6000ms) Fail-Closed Enforcement
 // ============================================================================
@@ -258,6 +345,9 @@ TEST(HardeningV1_5, EngineWatchdogProlongedFreezeEnforcesFailClosed) {
 
     // Watchdog must detect prolonged freeze (> 6000ms) and enforce fail-closed session rejection
     ASSERT_TRUE(engine.IsSessionRejected());
+
+    // Watchdog thread itself must remain alive to continue supervising the system
+    ASSERT_FALSE(engine.IsWatchdogExitedForTesting());
 
     engine.FreezeBackgroundLoopForTesting(false);
     engine.Stop();

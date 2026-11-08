@@ -121,6 +121,8 @@ public:
         std::lock_guard<std::mutex> lock(heartbeat_mutex_);
         freeze_background_loop_for_testing_.store(freeze, std::memory_order_release);
     }
+    bool IsWatchdogExitedForTesting() const { return watchdog_exited_.load(std::memory_order_acquire); }
+
     // Simulates OS-wide sleep/hibernate wake recovery on the watchdog
     void SimulateSystemWakeRecoveryForTesting();
 
@@ -145,6 +147,7 @@ private:
     std::atomic<bool> freeze_background_loop_for_testing_{false};
     std::atomic<bool> freeze_watchdog_for_testing_{false};
     std::atomic<bool> watchdog_delay_warned_{false};
+    std::atomic<bool> watchdog_freeze_enforced_{false};
 
     EvidenceCorrelator correlator_;
     network::PanelClient panel_client_;

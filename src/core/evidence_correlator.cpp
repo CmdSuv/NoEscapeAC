@@ -300,10 +300,9 @@ CorrelationDecision EvidenceCorrelator::Evaluate(
     auto& catEntries = category_timeline_[catKey];
     bool foundRootCause = false;
     for (auto& entry : catEntries) {
-        if (entry.root_cause_id == ev.root_cause_id) {
+        if (entry.root_cause_id == ev.root_cause_id && entry.type == ev.type) {
             entry.timestamp = now;
             entry.event_id = ev.event_id;
-            entry.type = ev.type;
             entry.severity = ev.severity;
             foundRootCause = true;
             break;
@@ -335,7 +334,7 @@ CorrelationDecision EvidenceCorrelator::Evaluate(
                     distinctHighSeverityTypes.insert(static_cast<uint32_t>(entry.type));
                 }
                 if (ev.related_event_ids.size() < 16 && entry.event_id != ev.event_id &&
-                    (otherCat != catKey || entry.root_cause_id != ev.root_cause_id) &&
+                    (otherCat != catKey || entry.root_cause_id != ev.root_cause_id || entry.type != ev.type) &&
                     std::find(ev.related_event_ids.begin(), ev.related_event_ids.end(), entry.event_id) == ev.related_event_ids.end()) {
                     ev.related_event_ids.push_back(entry.event_id);
                 }
@@ -363,7 +362,11 @@ CorrelationDecision EvidenceCorrelator::Evaluate(
         (distinctRootCauses.size() >= 2 || distinctHighSeverityTypes.size() >= 2);
     bool hasMultiSignalCorroboration = (independentCategories >= 2 && distinctRootCauses.size() >= 2) ||
         intraCategoryCorroborated;
-    bool corroboratedOrVerified = hasMultiSignalCorroboration || ev.server_verified;
+    bool prolongedWatchdogFreeze = (ev.type == DetectionType::HEARTBEAT_TAMPERING &&
+                                   ev.severity == Severity::FATAL_BAN &&
+                                   (ev.details.find("Prolonged") != std::string::npos ||
+                                    ev.details.find("> 6000ms") != std::string::npos));
+    bool corroboratedOrVerified = hasMultiSignalCorroboration || ev.server_verified || prolongedWatchdogFreeze;
 
     // Promote confidence across independent families / orthogonal proofs
     ConfidenceLevel promotedConf = baseConf;
@@ -372,8 +375,8 @@ CorrelationDecision EvidenceCorrelator::Evaluate(
     if (ev.server_verified) {
         promotedConf = ConfidenceLevel::INDEPENDENTLY_VERIFIED;
         state = EvidenceState::SERVER_VERIFIED;
-    } else if (hasMultiSignalCorroboration) {
-        promotedConf = (baseConf >= ConfidenceLevel::CORROBORATED_ANOMALY)
+    } else if (hasMultiSignalCorroboration || prolongedWatchdogFreeze) {
+        promotedConf = (baseConf >= ConfidenceLevel::CORROBORATED_ANOMALY || prolongedWatchdogFreeze)
             ? ConfidenceLevel::HIGH_CONFIDENCE_VIOLATION
             : ConfidenceLevel::CORROBORATED_ANOMALY;
         state = (promotedConf == ConfidenceLevel::HIGH_CONFIDENCE_VIOLATION)

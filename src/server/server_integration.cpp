@@ -359,25 +359,31 @@ ReplicationDecision ServerEspFilter::EvaluateEntityReplication(
     }
 
     // FOV Frustum Culling:
-    // Determine observer unit forward vector from yaw and pitch (degrees: yaw about +Z, pitch up positive)
-    constexpr float kDegToRad = 3.14159265358979323846f / 180.0f;
-    constexpr float kRadToDeg = 180.0f / 3.14159265358979323846f;
-    float cp = std::cos(observer.pitch_deg * kDegToRad);
-    float sp = std::sin(observer.pitch_deg * kDegToRad);
-    float cyw = std::cos(observer.yaw_deg * kDegToRad);
-    float syw = std::sin(observer.yaw_deg * kDegToRad);
-    float fx = cp * cyw;
-    float fy = cp * syw;
-    float fz = sp;
-
-    float effectiveFov = (observer.fov_deg > 0.0f && observer.fov_deg < 360.0f) ? observer.fov_deg : 110.0f;
+    float effectiveFov = (observer.fov_deg > 0.0f && std::isfinite(observer.fov_deg))
+        ? std::min(observer.fov_deg, 360.0f)
+        : 110.0f;
     float halfFov = effectiveFov * 0.5f;
     constexpr float kFovMarginDeg = 15.0f; // Peripheral / aspect ratio buffer
     float r = std::max(0.0f, target.bounding_radius);
-    float angularRadius = (dist > r && r > 0.0f) ? (std::asin(std::clamp(r / dist, 0.0f, 1.0f)) * kRadToDeg) : 0.0f;
-    float maxAngle = halfFov + kFovMarginDeg + angularRadius;
 
-    if (dist > 0.001f) {
+    // If target bounding sphere intersects or contains observer viewpoint (dist <= r),
+    // target is in direct physical contact / knife proximity and cannot be culled by FOV.
+    if (dist > r && dist > 0.001f && effectiveFov < 360.0f) {
+        constexpr float kDegToRad = 3.14159265358979323846f / 180.0f;
+        constexpr float kRadToDeg = 180.0f / 3.14159265358979323846f;
+        float pitch = std::isfinite(observer.pitch_deg) ? observer.pitch_deg : 0.0f;
+        float yaw = std::isfinite(observer.yaw_deg) ? observer.yaw_deg : 0.0f;
+        float cp = std::cos(pitch * kDegToRad);
+        float sp = std::sin(pitch * kDegToRad);
+        float cyw = std::cos(yaw * kDegToRad);
+        float syw = std::sin(yaw * kDegToRad);
+        float fx = cp * cyw;
+        float fy = cp * syw;
+        float fz = sp;
+
+        float angularRadius = (r > 0.0f) ? (std::asin(std::clamp(r / dist, 0.0f, 1.0f)) * kRadToDeg) : 0.0f;
+        float maxAngle = halfFov + kFovMarginDeg + angularRadius;
+
         float dirX = dx / dist;
         float dirY = dy / dist;
         float dirZ = dz / dist;

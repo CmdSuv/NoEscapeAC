@@ -18,6 +18,9 @@ public:
     // Checks current delta ratio against baseline
     std::optional<core::DetectionEvent> CheckSpeedhack();
 
+    // Directly evaluates a clock ratio delta for test verification of tightened thresholds
+    std::optional<core::DetectionEvent> EvaluateRatioForTesting(double ratio, double elapsedMs = 50.0);
+
     double GetCyclesPerMs() const { std::lock_guard<std::mutex> l(mutex_); return cycles_per_ms_; }
     bool IsCalibrated() const { std::lock_guard<std::mutex> l(mutex_); return calibrated_; }
 
@@ -28,6 +31,7 @@ private:
 
     mutable std::mutex mutex_;
     bool CalibrateLocked(uint32_t calibrationMs);
+    std::optional<core::DetectionEvent> EvaluateRatioInternal(double ratio, double elapsedMs);
     bool calibrated_{false};
     double cycles_per_ms_{0.0};
     uint64_t last_tsc_{0};

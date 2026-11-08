@@ -91,6 +91,10 @@ std::optional<core::DetectionEvent> TimingIntegrity::CheckSpeedhack() {
     last_tsc_ = nowTsc;
     last_os_time_ = nowOs;
 
+    return EvaluateRatioInternal(ratio, elapsedMs);
+}
+
+std::optional<core::DetectionEvent> TimingIntegrity::EvaluateRatioInternal(double ratio, double elapsedMs) {
     // A ratio < 0.80 means OS time is ticking faster than CPU cycles (Speedhack acceleration >= 1.25x)
     // A ratio > 1.25 means OS time is ticking slower than CPU cycles (Speedhack slowdown <= 0.80x)
     if (ratio < 0.80 || ratio > 1.25) {
@@ -113,6 +117,11 @@ std::optional<core::DetectionEvent> TimingIntegrity::CheckSpeedhack() {
     }
 
     return std::nullopt;
+}
+
+std::optional<core::DetectionEvent> TimingIntegrity::EvaluateRatioForTesting(double ratio, double elapsedMs) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return EvaluateRatioInternal(ratio, elapsedMs);
 }
 
 } // namespace noescape::security
