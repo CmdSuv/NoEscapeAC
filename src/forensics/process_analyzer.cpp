@@ -239,6 +239,40 @@ std::optional<core::DetectionEvent> ProcessAnalyzer::InspectExternalHandle(
 
     std::string lowerName = ToLower(owner_name);
     std::string lowerPath = ToLower(owner_path);
+
+    // Allowlist legitimate game launchers (Prism Launcher, Steam, CurseForge, Modrinth, Epic, etc.)
+    if (lowerName == "prismlauncher.exe" || lowerName == "prismlauncher" ||
+        lowerName == "steam.exe" || lowerName == "curseforge.exe" ||
+        lowerName == "modrinth-app.exe" || lowerName == "epicgameslauncher.exe" ||
+        lowerName == "heroic.exe") {
+        return std::nullopt;
+    }
+
+#if defined(_WIN32)
+    // Allowlist parent process that legitimately spawned this game instance via CreateProcess()
+    static DWORD s_parentPid = []() -> DWORD {
+        DWORD selfPid = GetCurrentProcessId();
+        HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if (hSnap != INVALID_HANDLE_VALUE) {
+            PROCESSENTRY32 pe{};
+            pe.dwSize = sizeof(pe);
+            if (Process32First(hSnap, &pe)) {
+                do {
+                    if (pe.th32ProcessID == selfPid) {
+                        CloseHandle(hSnap);
+                        return pe.th32ParentProcessID;
+                    }
+                } while (Process32Next(hSnap, &pe));
+            }
+            CloseHandle(hSnap);
+        }
+        return 0;
+    }();
+    if (s_parentPid != 0 && owner_pid == s_parentPid) {
+        return std::nullopt;
+    }
+#endif
+
     // Allowlist core OS system services (csrss, svchost, lsass, MsMpEng, werfault, explorer, services, start, conhost) when located in Windows system directories
     bool inSystemDir = (lowerPath.find("\\windows\\system32\\") != std::string::npos ||
                         lowerPath.find("\\windows\\syswow64\\") != std::string::npos ||
